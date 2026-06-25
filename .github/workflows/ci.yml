@@ -1,0 +1,65 @@
+# CI: lint + test the Rust workspace, then build the Python extension and run the
+# pytest suite. ocrspine is a GIT dependency (see [workspace.dependencies]); the
+# runner does NOT need a sibling ocrspine checkout — cargo fetches it. For the OCR
+# pytest leg, the PP-OCRv5 models are resolved at runtime: ocrspine's build script
+# bakes its own `CARGO_MANIFEST_DIR/models` as the fallback, which on a CI runner
+# is the cargo git checkout of ocrspine (models are committed there), so OCR works
+# offline with no extra setup.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: test (lib crates + features)
+        # py-bindings can't standalone-link (extension-module); exclude it from the
+        # plain `cargo test` and type-check it separately instead.
+        run: |
+          cargo test -p doc-core -p doc-parse -p doc-ocr --all-features
+          cargo check -p py-bindings --features ocr,legacy-doc
+
+  python:
+    name: python (maturin develop + pytest)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build + test deps
+        run: python -m pip install --upgrade pip maturin pytest
+      - name: maturin develop (with ocr feature)
+        run: maturin develop --release
+      - name: pytest
+        # OCR models resolve from ocrspine's cargo git checkout via the build-time
+        # fallback; no OCRSPINE_MODELS needed. Parsing tests need no models at all.
+        run: python -m pytest python/tests -q

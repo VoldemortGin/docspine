@@ -1,0 +1,30 @@
+[package]
+name = "doc-parse"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "docspine OOXML reader: zip extract + quick-xml walk -> doc_core::Document. Legacy binary .doc behind a feature."
+
+[features]
+default = []
+# 旧二进制 `.doc`(OLE/CFB 复合文档)的基础探测 —— 用纯 Rust 的 `cfb` crate 打开复合文档、
+# 定位 WordDocument 流。完整的 WordprocessingML 旧二进制正文重建很繁琐,本轮只做能力探测 +
+# 类型化降级,不卡主线(docx 优先)。off by default,避免给精简构建加依赖。
+legacy-doc = ["dep:cfb"]
+
+[dependencies]
+doc-core = { workspace = true }
+thiserror.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
+cfb = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Tests synthesize a minimal `.docx` in-memory; the zip *writer* APIs need the
+# `deflate` feature (the lib only uses the reader). Re-declared here (not
+# `workspace = true`) so the writer features are available to tests only.
+zip = { version = "2", default-features = false, features = ["deflate"] }

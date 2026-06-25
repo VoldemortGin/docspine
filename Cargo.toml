@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/doc-core",
+    "crates/doc-parse",
+    "crates/doc-ocr",
+    "crates/py-bindings",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/VoldemortGin/docspine"
+authors = ["docspine contributors"]
+rust-version = "1.96"
+
+[workspace.dependencies]
+# --- shared first-party crates ---
+doc-core = { path = "crates/doc-core", version = "0.0.1" }
+doc-parse = { path = "crates/doc-parse", version = "0.0.1" }
+doc-ocr = { path = "crates/doc-ocr", version = "0.0.1" }
+
+# --- sibling family crate: domain-neutral OCR (single source of truth for the
+# path; doc-ocr uses `ocrspine.workspace = true` so no per-crate path math).
+# Git dep (NOT path): the family publishes uniformly via git, and CI's
+# `maturin build` then `cargo fetch`es ocrspine itself — no sibling checkout
+# needed on the runner. ---
+ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f0233cd6500edfbbb82bc06c2332369871" }
+
+# --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
+thiserror = "2"
+pyo3 = "0.29"
+# Read-only zip for .docx (OOXML = zip + XML). Pure-Rust DEFLATE backend so the
+# build stays self-contained / cross-platform; no system zlib.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pull-based, low-allocation XML reader for the OOXML parts. Pure-Rust.
+quick-xml = "0.36"
+# Pure-Rust OLE/CFB (Compound File Binary) reader, for the legacy binary `.doc`
+# evaluation in `doc-parse` (behind the `legacy-doc` feature, off by default).
+cfb = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

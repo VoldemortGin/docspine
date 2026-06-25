@@ -1,0 +1,66 @@
+[build-system]
+requires = ["maturin>=1.12,<2"]
+build-backend = "maturin"
+
+[project]
+name = "docspine"
+# The version is taken from the Rust workspace (Cargo.toml [workspace.package])
+# at build time via maturin's `dynamic` metadata — that crate version is the
+# single source of truth.
+dynamic = ["version"]
+description = "Pure-Rust Word (.docx / OOXML) structural parser with strong table support and local image OCR, via PyO3."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "docspine contributors" }]
+keywords = ["docx", "word", "ooxml", "office", "table", "rust", "ocr"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Office/Business :: Office Suites",
+    "Topic :: Text Processing :: Markup",
+]
+
+[project.urls]
+Homepage = "https://github.com/VoldemortGin/docspine"
+Repository = "https://github.com/VoldemortGin/docspine"
+Issues = "https://github.com/VoldemortGin/docspine/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+# The Rust crate that builds the extension module.
+manifest-path = "crates/py-bindings/Cargo.toml"
+# Place the compiled `_core` inside the `docspine` package.
+module-name = "docspine._core"
+# Pure-Python sources live here.
+python-source = "python"
+# abi3 wheel covering CPython >= 3.11, with the image-OCR bridge compiled in.
+# (The `ocr` feature pulls doc-ocr / ocrspine; the release wheel ships full OCR.)
+features = ["pyo3/abi3-py311", "ocr"]
+# Ship PEP 561 type information (.pyi stubs + py.typed markers) in sdist + wheel.
+include = [
+    "LICENSE",
+    "python/docspine/py.typed",
+    "python/docspine/*.pyi",
+]
+# OCR models: the OCR engine (ocrspine) resolves its own ONNX models at runtime
+# via the `OCRSPINE_MODELS` env var, falling back to its compile-time
+# `CARGO_MANIFEST_DIR/models`. Bundling the PP-OCRv5 weights into the wheel for
+# distribution is a deferred CI task (see README "Deferred"); a dev `maturin
+# develop` works with OCRSPINE_MODELS pointed at a sibling ocrspine checkout.
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

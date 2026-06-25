@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+*.rs.bk
+*.pdb
+
+# Python / PyO3 / maturin
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.dylib
+*.dSYM/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+wheelhouse/

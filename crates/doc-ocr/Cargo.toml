@@ -1,0 +1,16 @@
+[package]
+name = "doc-ocr"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "docspine image-OCR bridge: applies ocrspine (PaddleOcr) to embedded pictures, with image-table geometry reconstruction."
+
+[dependencies]
+doc-core = { workspace = true }
+# Single source of truth for the dep spec lives in [workspace.dependencies]
+# (git dep on ocrspine); use it here without per-crate path/rev math.
+ocrspine = { workspace = true }

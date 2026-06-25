@@ -1,0 +1,13 @@
+[package]
+name = "doc-core"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "docspine core: structured Word document model + twip/EMU geometry + typed error. No IO, no zip, no XML."
+
+[dependencies]
+thiserror.workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "py-bindings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings for docspine; builds the _core extension module. FFI chokepoint."
+publish = false
+
+[lib]
+name = "_core"
+# cdylib for the Python extension module; rlib so it can be unit-tested.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `ocr` compiles in the doc-ocr bridge (ocrspine / PP-OCRv5). Off by default so a
+# lean structural-parse-only wheel needs no ONNX runtime; `maturin develop
+# --features ocr` (and the release CI) turn it on.
+ocr = ["dep:doc-ocr"]
+# Legacy binary `.doc` probing (OLE/CFB) — forwarded to doc-parse's feature.
+legacy-doc = ["doc-parse/legacy-doc"]
+
+[dependencies]
+doc-core = { workspace = true }
+doc-parse = { workspace = true }
+doc-ocr = { workspace = true, optional = true }
+pyo3 = { workspace = true, features = ["abi3-py311", "extension-module"] }
