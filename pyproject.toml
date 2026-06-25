@@ -32,6 +32,14 @@ classifiers = [
     "Topic :: Text Processing :: Markup",
 ]
 
+# The PP-OCRv5 ONNX model weights ship in the shared `ocrspine-models` data
+# package (one published copy for the whole spine family), resolved at runtime via
+# `ocrspine_models.models_dir()` (see `python/docspine/__init__.py`
+# `_ensure_ocr_models_env`). Hard (base) dependency so a plain
+# `pip install docspine` is full-OCR-capable offline — this also fixes the prior
+# bug where a pip-installed docspine had no resolvable models.
+dependencies = ["ocrspine-models>=0.0.1,<0.1"]
+
 [project.urls]
 Homepage = "https://github.com/VoldemortGin/docspine"
 Repository = "https://github.com/VoldemortGin/docspine"
@@ -56,11 +64,14 @@ include = [
     "python/docspine/py.typed",
     "python/docspine/*.pyi",
 ]
-# OCR models: the OCR engine (ocrspine) resolves its own ONNX models at runtime
-# via the `OCRSPINE_MODELS` env var, falling back to its compile-time
-# `CARGO_MANIFEST_DIR/models`. Bundling the PP-OCRv5 weights into the wheel for
-# distribution is a deferred CI task (see README "Deferred"); a dev `maturin
-# develop` works with OCRSPINE_MODELS pointed at a sibling ocrspine checkout.
+# OCR models: the ~28 MB PP-OCRv5 weights come from the shared `ocrspine-models`
+# data package (a base `dependencies` entry above), NOT from this wheel. The
+# `docspine.__init__._ensure_ocr_models_env` helper sets `OCRSPINE_MODELS` from
+# `ocrspine_models.models_dir()` before each OCR call, so a plain
+# `pip install docspine` is full-OCR-capable offline (this fixes the prior bug
+# where a pip-installed docspine had no resolvable models). A dev `maturin
+# develop` still works with `OCRSPINE_MODELS` pointed at a sibling ocrspine
+# checkout, which takes precedence (the helper leaves a preset env untouched).
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
