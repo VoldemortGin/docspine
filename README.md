@@ -1,5 +1,7 @@
 # docspine
 
+[![PyPI](https://img.shields.io/pypi/v/docspine.svg)](https://pypi.org/project/docspine/)
+
 A pure-Rust Word (`.docx`) parser with Python bindings (PyO3 / maturin,
 abi3-py311). A `.docx` file is OOXML — a zip archive of XML parts — and docspine
 walks `word/document.xml` directly to produce a structured, information-preserving
@@ -44,6 +46,19 @@ docspine ships **detection + a clean typed downgrade** today (a `.doc` byte
 stream yields `DocUnsupportedError`, and `probe_doc` reports the CFB streams when
 built with the `legacy-doc` feature); full `.doc` body reconstruction is a
 follow-up, not a blocker.
+
+## Install
+
+```bash
+pip install docspine
+```
+
+docspine is **on PyPI**. OCR works out of the box: the PP-OCRv5 weights ship in
+the shared [`ocrspine-models`](https://pypi.org/project/ocrspine-models/) data
+package — a runtime dependency `pip` pulls in automatically — so a plain
+`pip install docspine` finds the OCR models with no extra setup (it no longer
+needs a sibling `../ocrspine/models` checkout or `OCRSPINE_MODELS`). To build from
+source instead, see below.
 
 ## Build (from the package root)
 
@@ -98,6 +113,5 @@ crates/
 
 - Full legacy binary `.doc` (OLE/CFB / `[MS-DOC]`) body reconstruction (FIB,
   piece table, CHPX/PAPX). Today: detection + typed downgrade + `probe_doc`.
-- Bundling the PP-OCRv5 ONNX weights into the published wheel (a CI task).
 - Richer styling (theme colors, styles.xml inheritance), headers/footers,
   footnotes/endnotes, comments, fields, hyperlinks targets, SmartArt/charts.
