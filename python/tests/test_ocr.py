@@ -67,3 +67,36 @@ def test_reconstruct_image_table_returns_grid(ocr_sample_bytes):
 def test_ocr_image_bad_bytes_raises():
     with pytest.raises(docspine.DocError):
         docspine.ocr_image(b"not an image at all")
+
+
+def test_docx_embedded_image_to_ocr_closure(make_docx_with_image, ocr_sample_bytes):
+    """端到端闭环:解析 docx -> 取出内嵌图片字节 -> 喂给 ocr_image 识别出参考行。"""
+    docx = make_docx_with_image(ocr_sample_bytes)
+    doc = docspine.open_bytes(docx)
+
+    # 从文档里找到那张内嵌图片,按 media 名取回它的原始字节。
+    pic = None
+    for blk in doc.body():
+        if blk["kind"] == "paragraph":
+            for run in blk["runs"]:
+                if run["pictures"]:
+                    pic = run["pictures"][0]
+    assert pic is not None
+    raw = doc.image_bytes(pic["media"])
+    assert raw == ocr_sample_bytes  # 字节逐位还原。
+
+    # 把取回的字节直接喂给 OCR —— 这正是之前断裂、现在打通的闭环。
+    items = docspine.ocr_image(raw)
+    joined = "".join(ch for it in items for ch in it["text"] if not ch.isspace())
+    assert "pdfspineOCRtest2026" in joined
+
+
+def test_ocr_engine_is_cached_across_calls(ocr_sample_bytes):
+    """引擎为进程级单例:连续两次 ocr_image 结果一致(模型只加载一次,第二次复用缓存引擎)。
+
+    无法从 Python 直接断言“只加载一次”,但单例缓存(见 py-bindings 的 ``shared_ocr``)使
+    第二次调用跳过 ~28MB 模型重载;这里以确定性等价作为可观测代理。
+    """
+    first = docspine.ocr_image(ocr_sample_bytes)
+    second = docspine.ocr_image(ocr_sample_bytes)
+    assert [it["text"] for it in first] == [it["text"] for it in second]

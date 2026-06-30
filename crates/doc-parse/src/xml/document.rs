@@ -113,14 +113,17 @@ fn parse_paragraph<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Pa
                             para.runs.push(run);
                         }
                     }
-                    // 超链接 `w:hyperlink` 是 run 的容器:不要 skip,展开解析其中的 run。
-                    b"hyperlink" => {
+                    // 超链接 `w:hyperlink` / 修订插入 `w:ins` 都是 run 的容器:不要 skip,
+                    // 展开解析其中的 run。`w:ins`(修订插入)按“接受修订”语义当作正常正文保留。
+                    b"hyperlink" | b"ins" => {
                         for run in parse_run_container(reader, ctx) {
                             if !run.text.is_empty() || !run.pictures.is_empty() {
                                 para.runs.push(run);
                             }
                         }
                     }
+                    // 其余元素跳过。其中修订删除 `w:del`(其内 run 用 `w:delText`)按
+                    // “接受修订”语义整段丢弃、不输出文字,正好走这里被 skip。
                     _ => skip_element(reader),
                 }
             }
@@ -162,7 +165,8 @@ fn parse_ppr<R: std::io::BufRead>(reader: &mut Reader<R>, para: &mut Paragraph) 
 
 // ============================================================ run (w:r)
 
-/// 解析一个可能含若干 `w:r` 的容器(如 `w:hyperlink`)。已消费容器起始标签。
+/// 解析一个可能含若干 `w:r` 的容器(如 `w:hyperlink` / `w:ins`)。已消费容器起始标签。
+/// 嵌套的 `w:hyperlink` / `w:ins`(接受修订)递归展开其 run;其余(含 `w:del`)整体跳过。
 fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<TextRun> {
     let mut runs = Vec::new();
     let mut buf = Vec::new();
@@ -170,10 +174,10 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"r" {
-                    runs.push(parse_run(reader, ctx));
-                } else {
-                    skip_element(reader);
+                match name.as_slice() {
+                    b"r" => runs.push(parse_run(reader, ctx)),
+                    b"hyperlink" | b"ins" => runs.extend(parse_run_container(reader, ctx)),
+                    _ => skip_element(reader),
                 }
             }
             Ok(Event::Empty(_)) => {}

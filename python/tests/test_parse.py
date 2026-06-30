@@ -157,3 +157,84 @@ def test_probe_doc_on_non_cfb(minimal_docx_bytes):
 def test_open_missing_file_raises():
     with pytest.raises((FileNotFoundError, OSError)):
         docspine.open("/no/such/doc-12345.docx")
+
+
+# --- 内嵌图片字节(打通 OCR 闭环的前半段) -------------------------------------
+
+
+def test_image_bytes_by_media_name_and_rel_id(minimal_docx_bytes, image1_png_bytes):
+    """Document.image_bytes 既能按 media 裸文件名取,也能按图片 dict 的 rel_id 取。"""
+    doc = docspine.open_bytes(minimal_docx_bytes)
+    pic = None
+    for blk in doc.body():
+        if blk["kind"] == "paragraph":
+            for run in blk["runs"]:
+                if run["pictures"]:
+                    pic = run["pictures"][0]
+    assert pic is not None
+    # 按 media 名取。
+    by_name = doc.image_bytes(pic["media"])
+    assert by_name == image1_png_bytes
+    # 按 rel_id 取(同一份字节)。
+    by_rel = doc.image_bytes(pic["rel_id"])
+    assert by_rel == image1_png_bytes
+    # 查不到 -> None,绝不抛错。
+    assert doc.image_bytes("does-not-exist.png") is None
+
+
+# --- 修订:w:ins 插入文字保留、w:del 删除文字丢弃 -----------------------------
+
+
+def test_revision_ins_text_kept_del_text_dropped(revisions_docx_bytes):
+    """w:ins 内插入的文字按“接受修订”保留;w:del 内删除的文字丢弃。"""
+    doc = docspine.open_bytes(revisions_docx_bytes)
+    text = doc.text()
+    assert "INSERTED" in text  # 修订插入的文字现在能提取到(修复前会整段丢失)。
+    assert "DELETED" not in text  # 修订删除的文字不输出。
+    assert "Start" in text and "end" in text  # 周围正常正文不受影响。
+
+
+# --- 结构化导出:to_text / to_markdown / to_html ------------------------------
+
+
+def test_to_text_equivalent_to_text(minimal_docx_bytes):
+    doc = docspine.open_bytes(minimal_docx_bytes)
+    assert doc.to_text() == doc.text()
+    assert "Hello docspine" in doc.to_text()
+    assert "Merged Header\tSpanning Down" in doc.to_text()
+
+
+def test_to_markdown_heading_and_merged_table(minimal_docx_bytes):
+    """标题映射成 #;含合并的表退回 HTML <table> 保真 colspan/rowspan。"""
+    md = docspine.open_bytes(minimal_docx_bytes).to_markdown()
+    assert "# Hello docspine" in md
+    assert 'colspan="2"' in md
+    assert 'rowspan="2"' in md
+    assert "Merged Header" in md
+
+
+def test_to_markdown_simple_table_is_gfm(simple_table_docx_bytes):
+    """无合并的表输出 GFM 管道表(含分隔行)。"""
+    md = docspine.open_bytes(simple_table_docx_bytes).to_markdown()
+    assert "## Sub" in md
+    assert "| H1 | H2 |" in md
+    assert "| --- | --- |" in md
+    assert "| x | y |" in md
+
+
+def test_to_html_paragraph_heading_and_table_spans(minimal_docx_bytes):
+    html = docspine.open_bytes(minimal_docx_bytes).to_html()
+    assert "<h1>Hello docspine</h1>" in html
+    assert "<table>" in html
+    assert 'colspan="2"' in html
+    assert 'rowspan="2"' in html
+    assert "<td>A2</td>" in html
+    assert "nested" in html  # 嵌套表内容也在(单元格内递归渲染)。
+
+
+def test_to_html_simple_table(simple_table_docx_bytes):
+    html = docspine.open_bytes(simple_table_docx_bytes).to_html()
+    # 朴素表(无表头行标记)也渲染成 <table>,单元格为 <td>。
+    assert "<table>" in html
+    assert "<td>H1</td>" in html
+    assert "<h2>Sub</h2>" in html

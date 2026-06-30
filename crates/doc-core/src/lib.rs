@@ -5,6 +5,7 @@
 //! `py-bindings` 暴露。保持 domain-neutral、稳定、可测。
 
 pub mod error;
+pub mod export;
 pub mod geom;
 pub mod model;
 

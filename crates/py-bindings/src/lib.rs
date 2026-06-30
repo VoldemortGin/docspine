@@ -12,9 +12,11 @@
 //! (解析 / OCR)在 [`Python::detach`] 下释放 GIL 运行。错误折成以 `_core.DocError` 为根的
 //! 类型化异常层级。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use doc_core::export;
 use doc_core::geom::{emu_to_points, twips_to_points};
 use doc_core::model::{
     Block, Cell, Color, Document as CoreDocument, Paragraph, Picture, Row, Table, TextRun, VMerge,
@@ -24,7 +26,7 @@ use doc_parse::{parse_bytes, parse_path};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 /// 包版本(镜像 Rust workspace 版本)。
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -193,9 +195,45 @@ fn block_dict<'py>(py: Python<'py>, block: &Block) -> PyResult<Bound<'py, PyDict
 // --- pyclass 句柄 ---------------------------------------------------------
 
 /// 一份已解析的 Word 文档句柄(`Arc` 共享底层数据)。
+///
+/// 除结构化模型(`inner`)外,还把内嵌图片的原始字节(`media`,键为 `word/media/` 裸文件名)
+/// 留在句柄里,供 [`PyDocument::image_bytes`] 取出喂给 OCR;`rel_to_media` 是 `rel_id -> 裸文件名`
+/// 的便利索引,让用户既能按 media 名也能按图片 dict 里的 `rel_id` 查字节。
 #[pyclass(name = "Document", module = "docspine._core", frozen)]
 struct PyDocument {
     inner: Arc<CoreDocument>,
+    media: Arc<BTreeMap<String, Vec<u8>>>,
+    rel_to_media: Arc<BTreeMap<String, String>>,
+}
+
+/// 遍历文档(含表格单元格里的嵌套内容)收集 `rel_id -> media 裸文件名` 映射。
+fn collect_rel_to_media(doc: &CoreDocument) -> BTreeMap<String, String> {
+    fn walk(blocks: &[Block], map: &mut BTreeMap<String, String>) {
+        for b in blocks {
+            match b {
+                Block::Paragraph(p) => {
+                    for r in &p.runs {
+                        for pic in &r.pictures {
+                            if let Some(name) = &pic.media_name {
+                                map.entry(pic.rel_id.clone())
+                                    .or_insert_with(|| name.clone());
+                            }
+                        }
+                    }
+                }
+                Block::Table(t) => {
+                    for row in &t.rows {
+                        for cell in &row.cells {
+                            walk(&cell.blocks, map);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut map = BTreeMap::new();
+    walk(&doc.body, &mut map);
+    map
 }
 
 #[pymethods]
@@ -239,19 +277,41 @@ impl PyDocument {
 
     /// 便利:把全文按段落顺序拼成纯文本(表格按行、单元格按 tab 连接)。
     fn text(&self) -> String {
-        let mut out: Vec<String> = Vec::new();
-        for b in &self.inner.body {
-            match b {
-                Block::Paragraph(p) => out.push(p.text()),
-                Block::Table(t) => {
-                    for row in &t.rows {
-                        let cells: Vec<String> = row.cells.iter().map(|c| c.text()).collect();
-                        out.push(cells.join("\t"));
-                    }
-                }
+        export::to_text(self.inner.as_ref())
+    }
+
+    /// 结构化导出:纯文本(等价于 [`text`](Self::text))。
+    fn to_text(&self) -> String {
+        export::to_text(self.inner.as_ref())
+    }
+
+    /// 结构化导出:Markdown。段落空行分隔,标题样式映射成 `#`;表格无合并时输出 GFM 管道表,
+    /// 含合并单元格(横向 `gridSpan` / 纵向 `vMerge`)或嵌套表时退回 HTML `<table>` 保真合并。
+    fn to_markdown(&self) -> String {
+        export::to_markdown(self.inner.as_ref())
+    }
+
+    /// 结构化导出:HTML 片段。段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带 `rowspan`/
+    /// `colspan`),文本经 HTML 转义。
+    fn to_html(&self) -> String {
+        export::to_html(self.inner.as_ref())
+    }
+
+    /// 取一张内嵌图片的原始字节:`name` 可以是 `word/media/` 裸文件名(图片 dict 的 `media`),
+    /// 也可以是图片 dict 的 `rel_id`。查不到返回 `None`。配合 `ocr_image` 即可“解析 docx ->
+    /// 取出内嵌图片字节 -> OCR”端到端跑通。
+    fn image_bytes<'py>(&self, py: Python<'py>, name: &str) -> Option<Bound<'py, PyBytes>> {
+        // 1) 先按 media 裸文件名直接查。
+        if let Some(bytes) = self.media.get(name) {
+            return Some(PyBytes::new(py, bytes));
+        }
+        // 2) 否则把 name 当作 rel_id,经 rel -> media 映射再查。
+        if let Some(media_name) = self.rel_to_media.get(name) {
+            if let Some(bytes) = self.media.get(media_name) {
+                return Some(PyBytes::new(py, bytes));
             }
         }
-        out.join("\n")
+        None
     }
 
     fn __len__(&self) -> usize {
@@ -269,8 +329,11 @@ impl PyDocument {
 #[pyfunction]
 fn open(py: Python<'_>, path: PathBuf) -> PyResult<PyDocument> {
     let parsed = py.detach(|| parse_path(&path)).map_err(map_err)?;
+    let rel_to_media = collect_rel_to_media(&parsed.document);
     Ok(PyDocument {
         inner: Arc::new(parsed.document),
+        media: Arc::new(parsed.media),
+        rel_to_media: Arc::new(rel_to_media),
     })
 }
 
@@ -279,8 +342,11 @@ fn open(py: Python<'_>, path: PathBuf) -> PyResult<PyDocument> {
 fn open_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyDocument> {
     let owned = data.to_vec();
     let parsed = py.detach(|| parse_bytes(&owned)).map_err(map_err)?;
+    let rel_to_media = collect_rel_to_media(&parsed.document);
     Ok(PyDocument {
         inner: Arc::new(parsed.document),
+        media: Arc::new(parsed.media),
+        rel_to_media: Arc::new(rel_to_media),
     })
 }
 
@@ -303,8 +369,21 @@ fn probe_doc<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyDict>> 
 
 #[cfg(feature = "ocr")]
 mod ocr_api {
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
-    use doc_ocr::{ocr_image_bytes, reconstruct_table_from_image, ImageTableOptions, OcrItem};
+    use doc_ocr::{reconstruct_table_from_image, DocOcr, ImageTableOptions, OcrItem};
+
+    /// 进程级惰性单例:全程只构造一次 [`DocOcr`](内含 `PaddleOcr`),复用其缓存的引擎,避免
+    /// 每次 `ocr_image` 都重载 ~28MB 的 PP-OCRv5 模型。模型路径仍在 [`DocOcr::new`] 首次调用时
+    /// 从 `OCRSPINE_MODELS` env 解析(Python 包装在调用前已把 env 指向共享数据包)。
+    ///
+    /// 用 `Mutex<Option<_>>` 而非 `OnceLock<DocOcr>`:构造可能失败(模型缺失),失败不缓存,
+    /// 下次重试;构造成功后跨调用共享。OCR 期间持锁,把并发 OCR 串行化(底层引擎本就单实例)。
+    fn shared_ocr() -> &'static Mutex<Option<DocOcr>> {
+        static ENGINE: OnceLock<Mutex<Option<DocOcr>>> = OnceLock::new();
+        ENGINE.get_or_init(|| Mutex::new(None))
+    }
 
     /// 把一个 [`OcrItem`] 折成 dict。
     fn ocr_item_dict<'py>(py: Python<'py>, it: &OcrItem) -> PyResult<Bound<'py, PyDict>> {
@@ -316,11 +395,25 @@ mod ocr_api {
     }
 
     /// 对一张图片的编码字节(PNG / JPEG / TIFF / BMP)做本地 OCR,返回 `list[dict]`,每项含
-    /// `text` / `bbox` / `confidence`。推理在释放 GIL 下进行(本地、离线、确定性)。
+    /// `text` / `bbox` / `confidence`。推理在释放 GIL 下进行(本地、离线、确定性),并复用
+    /// 进程级缓存的引擎(见 [`shared_ocr`]),模型只加载一次。
     #[pyfunction]
     pub fn ocr_image<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyList>> {
         let owned = data.to_vec();
-        let items = py.detach(|| ocr_image_bytes(&owned)).map_err(map_err)?;
+        let items = py
+            .detach(|| -> doc_core::Result<Vec<OcrItem>> {
+                let mut guard = shared_ocr()
+                    .lock()
+                    .map_err(|_| DocError::Ocr("OCR engine mutex poisoned".into()))?;
+                if guard.is_none() {
+                    *guard = Some(DocOcr::new()?);
+                }
+                match guard.as_ref() {
+                    Some(engine) => engine.ocr(&owned),
+                    None => Err(DocError::Ocr("OCR engine unavailable".into())),
+                }
+            })
+            .map_err(map_err)?;
         let list = PyList::empty(py);
         for it in &items {
             list.append(ocr_item_dict(py, it)?)?;
