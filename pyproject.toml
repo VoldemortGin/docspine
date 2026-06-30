@@ -61,6 +61,10 @@ features = ["pyo3/abi3-py311", "ocr"]
 # Ship PEP 561 type information (.pyi stubs + py.typed markers) in sdist + wheel.
 include = [
     "LICENSE",
+    "NOTICE",
+    # Third-party permissive-license attribution (MIT/Apache/BSD/Zlib/…) for the
+    # bundled Rust deps — required to satisfy their attribution terms on redistribution.
+    "THIRD-PARTY-NOTICES.md",
     "python/docspine/py.typed",
     "python/docspine/*.pyi",
 ]

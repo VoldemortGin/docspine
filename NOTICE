@@ -1,0 +1,23 @@
+docspine
+Copyright 2026 docspine authors
+
+Licensed under the Apache License, Version 2.0.
+You may obtain a copy of the License in the accompanying LICENSE file or at
+http://www.apache.org/licenses/LICENSE-2.0.
+
+------------------------------------------------------------------------------
+THIRD-PARTY ATTRIBUTIONS
+------------------------------------------------------------------------------
+
+OCR (optional). When the `ocr` feature is compiled in, image text recognition
+runs on the PaddleOCR PP-OCRv5 ONNX models via the sibling family crate
+`ocrspine`. The model weights are distributed through the separate
+`ocrspine-models` package (a runtime dependency declared in pyproject), which
+carries its own LICENSE / NOTICE with the PaddlePaddle Authors' Apache-2.0
+attribution and per-file provenance. No model weights are bundled in this wheel.
+
+Third-party Rust dependencies are distributed under their own permissive licenses
+(MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, Zlib, 0BSD, Unlicense, Unicode-3.0,
+BlueOak-1.0.0, and similar) — the full per-component list with license texts is
+in the bundled THIRD-PARTY-NOTICES.md. Apache-2.0 is compatible with each, and no
+copyleft (GPL / AGPL / LGPL / MPL) components are included.
