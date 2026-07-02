@@ -17,6 +17,84 @@ use crate::geom::{Emu, Twips};
 pub struct Document {
     /// 正文块序列,按 `word/document.xml` 中 `w:body` 的文档顺序排列。
     pub body: Vec<Block>,
+    /// 节(section)序列,按文档顺序。每个 `.docx` 至少有一节(body 末尾的 `w:sectPr`);
+    /// 节中段落 `w:pPr > w:sectPr` 结束**包含它的**那一节。解析层保证非空(缺失时补
+    /// Word 默认节);块归属经 [`Section::end_block`] 划分。
+    pub sections: Vec<Section>,
+}
+
+/// 一节(`w:sectPr`)的页面几何:页面尺寸 / 页边距 / 纸向 / 分栏。
+///
+/// 缺省值取 Word 的默认页面设置:Letter 纵向(12240 x 15840 twip)、四边 1 英寸
+/// (1440 twip)边距、页眉/页脚 720 twip、单栏。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Section {
+    /// 页面宽(twip,`w:pgSz@w:w`)。
+    pub page_width: Twips,
+    /// 页面高(twip,`w:pgSz@w:h`)。
+    pub page_height: Twips,
+    /// 纸向(`w:pgSz@w:orient`,缺省纵向)。
+    pub orientation: Orientation,
+    /// 页边距(`w:pgMar`)。
+    pub margins: PageMargins,
+    /// 分栏数(`w:cols@w:num`,缺省 1)。
+    pub cols: u32,
+    /// 本节覆盖的正文块区间的**排他性**结束下标(相对 [`Document::body`])。
+    /// 本节的块为 `body[上一节.end_block .. 本节.end_block]`,首节从 0 起。
+    pub end_block: usize,
+}
+
+impl Default for Section {
+    fn default() -> Self {
+        Section {
+            page_width: 12_240,
+            page_height: 15_840,
+            orientation: Orientation::Portrait,
+            margins: PageMargins::default(),
+            cols: 1,
+            end_block: 0,
+        }
+    }
+}
+
+/// 纸向(`w:pgSz@w:orient`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Orientation {
+    /// 纵向(缺省)。
+    #[default]
+    Portrait,
+    /// 横向。
+    Landscape,
+}
+
+/// 页边距(twip,`w:pgMar` 的各属性)。缺省值取 Word 默认:四边 1440、页眉/页脚 720、
+/// 装订线 0。`top` / `bottom` 允许为负(Word 语义:负值表示正文可侵入页眉/页脚区)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageMargins {
+    pub top: Twips,
+    pub right: Twips,
+    pub bottom: Twips,
+    pub left: Twips,
+    /// 页眉距页顶(`@w:header`)。
+    pub header: Twips,
+    /// 页脚距页底(`@w:footer`)。
+    pub footer: Twips,
+    /// 装订线(`@w:gutter`)。
+    pub gutter: Twips,
+}
+
+impl Default for PageMargins {
+    fn default() -> Self {
+        PageMargins {
+            top: 1_440,
+            right: 1_440,
+            bottom: 1_440,
+            left: 1_440,
+            header: 720,
+            footer: 720,
+            gutter: 0,
+        }
+    }
 }
 
 /// 文档正文(或单元格内)的一个块级元素。段落与表格在 body 里同级出现,顺序即文档顺序。
@@ -41,16 +119,18 @@ pub struct Paragraph {
 }
 
 impl Paragraph {
-    /// 便利:把段内所有 run 的文字拼接成整段文本。
+    /// 便利:把段内所有 run 的文字拼接成整段文本(分段按 [`TextRun::text`] 折叠)。
     pub fn text(&self) -> String {
-        self.runs.iter().map(|r| r.text.as_str()).collect()
+        self.runs.iter().map(|r| r.text()).collect()
     }
 }
 
-/// 一段带样式的文字(`w:r`)。文字来自 `w:t`(以及 `w:tab`/`w:br` 等被规整为空白/换行)。
+/// 一段带样式的文字(`w:r`)。内容是**分段序列**([`RunSegment`]):文字(`w:t`)/
+/// 制表(`w:tab`)/ 换行换页(`w:br`、`w:cr`)各自独立成段,不再折叠丢失 `w:br@w:type`。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextRun {
-    pub text: String,
+    /// run 内容分段(文字 / 制表 / 换行换页),按文档顺序。
+    pub segments: Vec<RunSegment>,
     /// 字体名(`w:rPr` > `w:rFonts@w:ascii`,回退 `@w:hAnsi`)。
     pub font: Option<String>,
     /// 字号(磅;WordprocessingML 的 `w:sz` 以**半磅**存储,解析时已除以 2)。
@@ -63,6 +143,65 @@ pub struct TextRun {
     pub color: Option<Color>,
     /// 该 run 内嵌的图片(`w:drawing` / `w:pict`);一个 run 通常至多一张。
     pub pictures: Vec<Picture>,
+}
+
+impl TextRun {
+    /// 便利:仅含一段纯文字的 run(测试与轻量构造常用)。
+    pub fn from_text(text: impl Into<String>) -> Self {
+        TextRun {
+            segments: vec![RunSegment::Text(text.into())],
+            ..TextRun::default()
+        }
+    }
+
+    /// 把分段折叠成纯文本:`Tab` -> `'\t'`,`Break`(任意种类)-> `'\n'`。
+    /// 与历史上的 `text` 字段语义逐字节一致(导出契约依赖这一点)。
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for seg in &self.segments {
+            match seg {
+                RunSegment::Text(s) => out.push_str(s),
+                RunSegment::Tab => out.push('\t'),
+                RunSegment::Break(_) => out.push('\n'),
+            }
+        }
+        out
+    }
+
+    /// 追加一段文字:与末尾的 `Text` 段合并,保持“无相邻 Text 段”的最简形态。
+    pub fn push_text(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        if let Some(RunSegment::Text(t)) = self.segments.last_mut() {
+            t.push_str(s);
+        } else {
+            self.segments.push(RunSegment::Text(s.to_string()));
+        }
+    }
+}
+
+/// run 内容的一个分段。
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunSegment {
+    /// 一段文字(`w:t` / `w:delText` 等的字符内容)。
+    Text(String),
+    /// 一个制表符(`w:tab`)。
+    Tab,
+    /// 一个断行/断页/断栏(`w:br`,`w:cr` 视作换行)。
+    Break(BreakKind),
+}
+
+/// 断的种类(`w:br@w:type`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BreakKind {
+    /// 换行(`textWrapping`,缺省;`w:cr` 同义)。
+    #[default]
+    Line,
+    /// 换页(`w:br w:type="page"`)。
+    Page,
+    /// 换栏(`w:br w:type="column"`;单栏渲染时等效换页)。
+    Column,
 }
 
 /// 一张表格(`w:tbl`)。

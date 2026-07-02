@@ -277,10 +277,7 @@ mod tests {
 
     fn para(text: &str, style: Option<&str>) -> Paragraph {
         Paragraph {
-            runs: vec![TextRun {
-                text: text.to_string(),
-                ..Default::default()
-            }],
+            runs: vec![TextRun::from_text(text)],
             style: style.map(str::to_string),
             align: None,
             list_level: None,
@@ -333,6 +330,7 @@ mod tests {
                 Block::Paragraph(para("Title", Some("Heading1"))),
                 Block::Table(t),
             ],
+            ..Default::default()
         }
     }
 
@@ -372,6 +370,7 @@ mod tests {
         };
         let doc = Document {
             body: vec![Block::Table(t)],
+            ..Default::default()
         };
         let md = to_markdown(&doc);
         assert!(md.contains("| H1 | H2 |"));
@@ -392,11 +391,39 @@ mod tests {
     fn html_escapes_special_chars() {
         let doc = Document {
             body: vec![Block::Paragraph(para("a < b & \"c\"", None))],
+            ..Default::default()
         };
         let html = to_html(&doc);
         assert!(html.contains("&lt;"));
         assert!(html.contains("&amp;"));
         assert!(html.contains("&quot;"));
+    }
+
+    /// run 分段(Text/Tab/Break)在导出侧折叠回 `\t` / `\n`,与历史 text 字段逐字节一致。
+    #[test]
+    fn run_segments_fold_to_text_contract() {
+        use crate::model::{BreakKind, RunSegment};
+        let run = TextRun {
+            segments: vec![
+                RunSegment::Text("a".into()),
+                RunSegment::Tab,
+                RunSegment::Text("b".into()),
+                RunSegment::Break(BreakKind::Page),
+                RunSegment::Text("c".into()),
+                RunSegment::Break(BreakKind::Line),
+            ],
+            ..Default::default()
+        };
+        let doc = Document {
+            body: vec![Block::Paragraph(Paragraph {
+                runs: vec![run],
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        assert_eq!(to_text(&doc), "a\tb\nc\n");
+        // HTML 侧换行(不分种类)规整为 <br>。
+        assert!(to_html(&doc).contains("a\tb<br>c<br>"));
     }
 
     #[test]

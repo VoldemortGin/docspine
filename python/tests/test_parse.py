@@ -182,6 +182,98 @@ def test_image_bytes_by_media_name_and_rel_id(minimal_docx_bytes, image1_png_byt
     assert doc.image_bytes("does-not-exist.png") is None
 
 
+# --- 节(sectPr)页面几何:C-2 -------------------------------------------------
+
+
+def test_sections_default_when_no_sectpr(minimal_docx_bytes):
+    """整篇没有 sectPr -> 恰好一节 Word 默认页面设置(Letter 纵向、1 英寸边距)。"""
+    doc = docspine.open_bytes(minimal_docx_bytes)
+    sections = doc.sections()
+    assert len(sections) == 1
+    s = sections[0]
+    assert (s["page_width"], s["page_height"]) == (12240, 15840)
+    assert s["page_width_points"] == pytest.approx(612.0)
+    assert s["page_height_points"] == pytest.approx(792.0)
+    assert s["orientation"] == "portrait"
+    assert s["margins"] == {
+        "top": 1440,
+        "right": 1440,
+        "bottom": 1440,
+        "left": 1440,
+        "header": 720,
+        "footer": 720,
+        "gutter": 0,
+    }
+    assert s["margins_points"]["top"] == pytest.approx(72.0)
+    assert s["cols"] == 1
+    assert s["end_block_index"] == doc.block_count
+
+
+def test_sections_geometry_and_attribution(sections_docx_bytes):
+    """段内 pPr>sectPr 结束第一节;body 末尾 sectPr 定义最后一节(A4 横向、两栏)。"""
+    doc = docspine.open_bytes(sections_docx_bytes)
+    sections = doc.sections()
+    assert len(sections) == 2
+
+    first, last = sections
+    assert (first["page_width"], first["page_height"]) == (12240, 15840)
+    assert first["orientation"] == "portrait"
+    # 第一节含块 0..2(正文段 + 承载 sectPr 的空段)。
+    assert first["end_block_index"] == 2
+
+    assert (last["page_width"], last["page_height"]) == (16838, 11906)  # A4 横向
+    assert last["page_width_points"] == pytest.approx(841.9)
+    assert last["page_height_points"] == pytest.approx(595.3)
+    assert last["orientation"] == "landscape"
+    assert last["margins"] == {
+        "top": 720,
+        "right": 1080,
+        "bottom": 360,
+        "left": 1800,
+        "header": 500,
+        "footer": 400,
+        "gutter": 100,
+    }
+    assert last["cols"] == 2
+    assert last["end_block_index"] == doc.block_count == 3
+
+
+def test_content_after_mid_body_sectpr_not_truncated(sections_docx_bytes):
+    """内容丢失修复:段内 sectPr 之后的正文不再被截断(旧 walker 会丢掉其后全部 body)。"""
+    text = docspine.open_bytes(sections_docx_bytes).to_text()
+    assert "section one" in text
+    assert "section two" in text  # 修复前:段内 sectPr 之后的内容全部丢失。
+
+
+# --- run 分段与内容丢失修复:C-3 ------------------------------------------------
+
+
+def test_run_segments_exposed_with_break_types(content_loss_docx_bytes):
+    """run dict 新增 segments:文字 / 制表 / 断(w:br@w:type 不再丢失);text 契约不变。"""
+    doc = docspine.open_bytes(content_loss_docx_bytes)
+    # 最后一段:before <w:br w:type="page"/> after。
+    para = doc.paragraphs()[-1]
+    run = para["runs"][0]
+    assert run["segments"] == [
+        {"kind": "text", "text": "before"},
+        {"kind": "break", "break_type": "page"},
+        {"kind": "text", "text": "after"},
+    ]
+    # 折叠后的 text 键契约不变:Break -> "\n"。
+    assert run["text"] == "before\nafter"
+
+
+def test_sdt_and_fldsimple_content_recovered(content_loss_docx_bytes):
+    """w:sdt(块级 + 行内)与 w:fldSimple 的文字不再整体丢失(修复前 to_text 为空段)。"""
+    doc = docspine.open_bytes(content_loss_docx_bytes)
+    # 修复后的全文(修复前:COVER-TITLE / 2026-07-02 / 7 三处全部缺失)。
+    assert doc.to_text() == "COVER-TITLE\nUpdated 2026-07-02\nPage 7\nbefore\nafter"
+    md = doc.to_markdown()
+    assert "COVER-TITLE" in md
+    assert "Updated 2026-07-02" in md
+    assert "Page 7" in md
+
+
 # --- 修订:w:ins 插入文字保留、w:del 删除文字丢弃 -----------------------------
 
 

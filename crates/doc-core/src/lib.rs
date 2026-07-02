@@ -14,4 +14,7 @@ pub use geom::{
     emu_to_points, twips_to_points, Emu, Twips, EMU_PER_INCH, EMU_PER_POINT, TWIPS_PER_INCH,
     TWIPS_PER_POINT,
 };
-pub use model::{Block, Cell, Color, Document, Paragraph, Picture, Row, Table, TextRun, VMerge};
+pub use model::{
+    Block, BreakKind, Cell, Color, Document, Orientation, PageMargins, Paragraph, Picture, Row,
+    RunSegment, Section, Table, TextRun, VMerge,
+};

@@ -255,10 +255,72 @@ _IMAGE_ONLY_DOCUMENT = (
 )
 
 
+# 两节文档(C-2):段内 pPr>sectPr(Letter 纵向,结束第一节)+ body 末尾 sectPr
+# (A4 横向、自定义边距、两栏,定义最后一节)。
+_SECTIONS_DOCUMENT = (
+    _DOC_HEADER
+    + """
+  <w:body>
+    <w:p><w:r><w:t>section one</w:t></w:r></w:p>
+    <w:p>
+      <w:pPr>
+        <w:sectPr>
+          <w:pgSz w:w="12240" w:h="15840"/>
+          <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"
+                   w:header="720" w:footer="720" w:gutter="0"/>
+        </w:sectPr>
+      </w:pPr>
+    </w:p>
+    <w:p><w:r><w:t>section two</w:t></w:r></w:p>
+    <w:sectPr>
+      <w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>
+      <w:pgMar w:top="720" w:right="1080" w:bottom="360" w:left="1800"
+               w:header="500" w:footer="400" w:gutter="100"/>
+      <w:cols w:num="2" w:space="708"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+)
+
+# 内容丢失修复三连(C-3):块级/行内 w:sdt、w:fldSimple 缓存结果、w:br@w:type="page"。
+_CONTENT_LOSS_DOCUMENT = (
+    _DOC_HEADER
+    + """
+  <w:body>
+    <w:sdt>
+      <w:sdtPr><w:alias w:val="Cover"/></w:sdtPr>
+      <w:sdtContent><w:p><w:r><w:t>COVER-TITLE</w:t></w:r></w:p></w:sdtContent>
+    </w:sdt>
+    <w:p>
+      <w:r><w:t>Updated </w:t></w:r>
+      <w:sdt><w:sdtContent><w:r><w:t>2026-07-02</w:t></w:r></w:sdtContent></w:sdt>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Page </w:t></w:r>
+      <w:fldSimple w:instr=" PAGE \\* MERGEFORMAT "><w:r><w:t>7</w:t></w:r></w:fldSimple>
+    </w:p>
+    <w:p><w:r><w:t>before</w:t><w:br w:type="page"/><w:t>after</w:t></w:r></w:p>
+  </w:body>
+</w:document>"""
+)
+
+
 @pytest.fixture(scope="session")
 def revisions_docx_bytes() -> bytes:
     """含 w:ins / w:del 修订标记的合成 ``.docx`` 字节。"""
     return build_docx(_REVISIONS_DOCUMENT)
+
+
+@pytest.fixture(scope="session")
+def sections_docx_bytes() -> bytes:
+    """含段内 + body 末尾 ``w:sectPr`` 的两节合成 ``.docx`` 字节(C-2)。"""
+    return build_docx(_SECTIONS_DOCUMENT)
+
+
+@pytest.fixture(scope="session")
+def content_loss_docx_bytes() -> bytes:
+    """含 ``w:sdt`` / ``w:fldSimple`` / ``w:br@w:type`` 的合成 ``.docx`` 字节(C-3)。"""
+    return build_docx(_CONTENT_LOSS_DOCUMENT)
 
 
 @pytest.fixture(scope="session")

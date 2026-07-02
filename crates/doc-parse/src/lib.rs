@@ -59,11 +59,11 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedDoc> {
     let doc_xml = pkg.document_xml()?;
     let rels_xml = pkg.document_rels_str();
 
-    // 3) 走 w:body -> 块序列(段落 + 表格,表格是重点)。
-    let body = xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index);
+    // 3) 走 w:body -> 块序列(段落 + 表格,表格是重点)+ 节序列(sectPr 页面几何)。
+    let (body, sections) = xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index);
 
     Ok(ParsedDoc {
-        document: Document { body },
+        document: Document { body, sections },
         media,
     })
 }

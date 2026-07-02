@@ -19,7 +19,8 @@ use std::sync::Arc;
 use doc_core::export;
 use doc_core::geom::{emu_to_points, twips_to_points};
 use doc_core::model::{
-    Block, Cell, Color, Document as CoreDocument, Paragraph, Picture, Row, Table, TextRun, VMerge,
+    Block, BreakKind, Cell, Color, Document as CoreDocument, Orientation, Paragraph, Picture, Row,
+    RunSegment, Section, Table, TextRun, VMerge,
 };
 use doc_core::DocError;
 use doc_parse::{parse_bytes, parse_path};
@@ -69,10 +70,41 @@ fn color_hex(c: &Color) -> String {
 
 // --- dict 构造:把领域模型映射成可自省的 list[dict] ----------------------
 
-/// 一个 [`TextRun`] -> dict。
+/// 一个 [`RunSegment`] -> dict(`kind` 为 `"text"` / `"tab"` / `"break"`;`break` 段另带
+/// `break_type`:`"line"` / `"page"` / `"column"`)。
+fn segment_dict<'py>(py: Python<'py>, seg: &RunSegment) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    match seg {
+        RunSegment::Text(s) => {
+            d.set_item("kind", "text")?;
+            d.set_item("text", s)?;
+        }
+        RunSegment::Tab => d.set_item("kind", "tab")?,
+        RunSegment::Break(kind) => {
+            d.set_item("kind", "break")?;
+            d.set_item(
+                "break_type",
+                match kind {
+                    BreakKind::Line => "line",
+                    BreakKind::Page => "page",
+                    BreakKind::Column => "column",
+                },
+            )?;
+        }
+    }
+    Ok(d)
+}
+
+/// 一个 [`TextRun`] -> dict。`text` 是分段折叠后的纯文本(契约不变:Tab -> `\t`、
+/// Break -> `\n`);`segments` 是无损的内容分段(`w:br@w:type` 不再丢失)。
 fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("text", &run.text)?;
+    d.set_item("text", run.text())?;
+    let segs = PyList::empty(py);
+    for seg in &run.segments {
+        segs.append(segment_dict(py, seg)?)?;
+    }
+    d.set_item("segments", segs)?;
     d.set_item("font", run.font.as_deref())?;
     d.set_item("size_pt", run.size_pt)?;
     d.set_item("bold", run.bold)?;
@@ -192,6 +224,44 @@ fn block_dict<'py>(py: Python<'py>, block: &Block) -> PyResult<Bound<'py, PyDict
     }
 }
 
+/// 一节 [`Section`] -> dict。长度双份给出:twip 原值 + `_points` 便利换算(对齐
+/// `width` / `width_points` 的既有惯例)。
+fn section_dict<'py>(py: Python<'py>, sect: &Section) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("page_width", sect.page_width)?;
+    d.set_item("page_height", sect.page_height)?;
+    d.set_item("page_width_points", twips_to_points(sect.page_width))?;
+    d.set_item("page_height_points", twips_to_points(sect.page_height))?;
+    d.set_item(
+        "orientation",
+        match sect.orientation {
+            Orientation::Portrait => "portrait",
+            Orientation::Landscape => "landscape",
+        },
+    )?;
+    let m = &sect.margins;
+    let pairs = [
+        ("top", m.top),
+        ("right", m.right),
+        ("bottom", m.bottom),
+        ("left", m.left),
+        ("header", m.header),
+        ("footer", m.footer),
+        ("gutter", m.gutter),
+    ];
+    let margins = PyDict::new(py);
+    let margins_points = PyDict::new(py);
+    for (key, v) in pairs {
+        margins.set_item(key, v)?;
+        margins_points.set_item(key, twips_to_points(v))?;
+    }
+    d.set_item("margins", margins)?;
+    d.set_item("margins_points", margins_points)?;
+    d.set_item("cols", sect.cols)?;
+    d.set_item("end_block_index", sect.end_block)?;
+    Ok(d)
+}
+
 // --- pyclass 句柄 ---------------------------------------------------------
 
 /// 一份已解析的 Word 文档句柄(`Arc` 共享底层数据)。
@@ -271,6 +341,18 @@ impl PyDocument {
             if let Block::Table(t) = b {
                 list.append(table_dict(py, t)?)?;
             }
+        }
+        Ok(list)
+    }
+
+    /// 节(`w:sectPr`)序列,作为 `list[dict]`:页面尺寸 / 页边距 / 纸向 / 分栏,twip 原值
+    /// 带 `_points` 便利换算;`end_block_index` 是本节覆盖的正文块区间的排他性结束下标
+    /// (本节的块为 `body()[上一节.end_block_index : 本节.end_block_index]`)。至少一节
+    /// (无 `w:sectPr` 时为 Word 默认页面设置:Letter 纵向、1 英寸边距)。
+    fn sections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let list = PyList::empty(py);
+        for s in &self.inner.sections {
+            list.append(section_dict(py, s)?)?;
         }
         Ok(list)
     }

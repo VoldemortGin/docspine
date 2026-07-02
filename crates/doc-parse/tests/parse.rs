@@ -6,7 +6,7 @@
 
 use std::io::{Cursor, Write};
 
-use doc_core::model::{Block, VMerge};
+use doc_core::model::{Block, BreakKind, Orientation, RunSegment, VMerge};
 use doc_parse::{parse_bytes, ParsedDoc};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -84,8 +84,8 @@ const DOCUMENT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?
   </w:body>
 </w:document>"#;
 
-/// 把上面的部件压成一个内存里的 `.docx` zip 字节串。
-fn build_minimal_docx() -> Vec<u8> {
+/// 把给定的 `word/document.xml` 压成一个内存里的最小合法 `.docx` zip 字节串。
+fn build_docx(document_xml: &str) -> Vec<u8> {
     let mut buf = Cursor::new(Vec::new());
     {
         let mut zip = ZipWriter::new(&mut buf);
@@ -93,7 +93,7 @@ fn build_minimal_docx() -> Vec<u8> {
         for (name, body) in [
             ("[Content_Types].xml", CONTENT_TYPES),
             ("_rels/.rels", ROOT_RELS),
-            ("word/document.xml", DOCUMENT),
+            ("word/document.xml", document_xml),
             ("word/_rels/document.xml.rels", DOC_RELS),
         ] {
             zip.start_file(name, opts).expect("start_file");
@@ -105,7 +105,19 @@ fn build_minimal_docx() -> Vec<u8> {
 }
 
 fn parse() -> ParsedDoc {
-    parse_bytes(&build_minimal_docx()).expect("parse minimal docx")
+    parse_bytes(&build_docx(DOCUMENT)).expect("parse minimal docx")
+}
+
+/// 便利:把一段 `w:body` 内容包进 `w:document` 根,解析成 [`ParsedDoc`]。
+fn parse_body_xml(body_xml: &str) -> ParsedDoc {
+    let doc = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>{body_xml}</w:body>
+</w:document>"#
+    );
+    parse_bytes(&build_docx(&doc)).expect("parse synthetic docx")
 }
 
 #[test]
@@ -127,7 +139,7 @@ fn parses_paragraph_runs_and_styling() {
     assert_eq!(p.text(), "Hello docspine");
 
     let run = &p.runs[0];
-    assert_eq!(run.text, "Hello docspine");
+    assert_eq!(run.text(), "Hello docspine");
     assert!(run.bold);
     assert!(run.italic);
     assert_eq!(run.size_pt, Some(24.0)); // w:sz="48" half-points / 2
@@ -216,6 +228,230 @@ fn parses_nested_table_inside_cell() {
         panic!("nested cell should hold a paragraph");
     };
     assert_eq!(np.text(), "nested");
+}
+
+// ============================================================ C-2:节(sectPr)页面几何
+
+#[test]
+fn no_sectpr_yields_single_default_section() {
+    // 整篇没有任何 sectPr(既有最小 fixture)-> 恰好一节 Word 默认页面设置,覆盖全部块。
+    let parsed = parse();
+    assert_eq!(parsed.document.sections.len(), 1);
+    let s = &parsed.document.sections[0];
+    assert_eq!((s.page_width, s.page_height), (12_240, 15_840)); // Letter
+    assert_eq!(s.orientation, Orientation::Portrait);
+    assert_eq!(
+        (
+            s.margins.top,
+            s.margins.right,
+            s.margins.bottom,
+            s.margins.left
+        ),
+        (1_440, 1_440, 1_440, 1_440)
+    );
+    assert_eq!(
+        (s.margins.header, s.margins.footer, s.margins.gutter),
+        (720, 720, 0)
+    );
+    assert_eq!(s.cols, 1);
+    assert_eq!(s.end_block, parsed.document.body.len());
+}
+
+#[test]
+fn body_final_sectpr_parses_geometry() {
+    // body 末尾 sectPr:A4 横向 + 自定义边距 + 两栏。
+    let parsed = parse_body_xml(
+        r#"<w:p><w:r><w:t>only</w:t></w:r></w:p>
+           <w:sectPr>
+             <w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>
+             <w:pgMar w:top="720" w:right="1080" w:bottom="360" w:left="1800"
+                      w:header="500" w:footer="400" w:gutter="100"/>
+             <w:cols w:num="2" w:space="708"/>
+           </w:sectPr>"#,
+    );
+    assert_eq!(parsed.document.sections.len(), 1);
+    let s = &parsed.document.sections[0];
+    assert_eq!((s.page_width, s.page_height), (16_838, 11_906)); // A4 横向
+    assert_eq!(s.orientation, Orientation::Landscape);
+    assert_eq!(
+        (
+            s.margins.top,
+            s.margins.right,
+            s.margins.bottom,
+            s.margins.left
+        ),
+        (720, 1_080, 360, 1_800)
+    );
+    assert_eq!(
+        (s.margins.header, s.margins.footer, s.margins.gutter),
+        (500, 400, 100)
+    );
+    assert_eq!(s.cols, 2);
+    assert_eq!(s.end_block, 1);
+}
+
+#[test]
+fn mid_body_sectpr_splits_sections_and_keeps_following_content() {
+    // 段内 pPr>sectPr 结束包含它的节;**之后的正文不得截断**(修复:旧 walker 在段内
+    // sectPr 处提前 break,导致其后整个 body 丢失)。
+    let parsed = parse_body_xml(
+        r#"<w:p><w:r><w:t>first section text</w:t></w:r></w:p>
+           <w:p>
+             <w:pPr>
+               <w:sectPr>
+                 <w:pgSz w:w="12240" w:h="15840"/>
+                 <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>
+               </w:sectPr>
+             </w:pPr>
+           </w:p>
+           <w:p><w:r><w:t>second section text</w:t></w:r></w:p>
+           <w:sectPr>
+             <w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>
+           </w:sectPr>"#,
+    );
+    let doc = &parsed.document;
+    // 内容丢失修复:段内 sectPr 之后的段落还在。
+    assert_eq!(doc.body.len(), 3);
+    let Block::Paragraph(last) = &doc.body[2] else {
+        panic!("expected trailing paragraph");
+    };
+    assert_eq!(last.text(), "second section text");
+
+    // 节归属:第一节含块 0..2(含承载 sectPr 的空段),第二节含块 2..3。
+    assert_eq!(doc.sections.len(), 2);
+    assert_eq!(doc.sections[0].end_block, 2);
+    assert_eq!(doc.sections[0].orientation, Orientation::Portrait);
+    assert_eq!(doc.sections[1].end_block, 3);
+    assert_eq!(doc.sections[1].orientation, Orientation::Landscape);
+    assert_eq!(
+        (doc.sections[1].page_width, doc.sections[1].page_height),
+        (15_840, 12_240)
+    );
+}
+
+#[test]
+fn ppr_props_after_nested_container_still_parse() {
+    // pPr 深度计数修复:w:numPr(嵌套容器)之后的 w:jc 不再被提前 break 丢掉。
+    let parsed = parse_body_xml(
+        r#"<w:p>
+             <w:pPr>
+               <w:numPr><w:ilvl w:val="1"/><w:numId w:val="5"/></w:numPr>
+               <w:jc w:val="right"/>
+             </w:pPr>
+             <w:r><w:t>numbered</w:t></w:r>
+           </w:p>"#,
+    );
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected paragraph");
+    };
+    assert_eq!(p.list_level, Some(1));
+    assert_eq!(p.align.as_deref(), Some("right"));
+}
+
+// ============================================================ C-3:run 分段与内容丢失修复
+
+#[test]
+fn run_segments_capture_breaks_tabs_and_types() {
+    // w:br@w:type 终于被读取:page/column 与缺省换行区分;w:cr 视作换行;w:tab 独立成段。
+    let parsed = parse_body_xml(
+        r#"<w:p><w:r>
+             <w:t>a</w:t><w:tab/><w:t>b</w:t>
+             <w:br w:type="page"/><w:t>c</w:t>
+             <w:br w:type="column"/><w:br/><w:cr/><w:t>d</w:t>
+           </w:r></w:p>"#,
+    );
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected paragraph");
+    };
+    let run = &p.runs[0];
+    assert_eq!(
+        run.segments,
+        vec![
+            RunSegment::Text("a".into()),
+            RunSegment::Tab,
+            RunSegment::Text("b".into()),
+            RunSegment::Break(BreakKind::Page),
+            RunSegment::Text("c".into()),
+            RunSegment::Break(BreakKind::Column),
+            RunSegment::Break(BreakKind::Line),
+            RunSegment::Break(BreakKind::Line),
+            RunSegment::Text("d".into()),
+        ]
+    );
+    // 折叠契约不变:Tab -> '\t',Break(任意种类)-> '\n'。
+    assert_eq!(run.text(), "a\tb\nc\n\n\nd");
+}
+
+#[test]
+fn sdt_content_is_transparent_at_block_and_inline_level() {
+    // w:sdt(封面/目录等结构化文档标签)整体丢弃 -> 修复:sdtContent 透明展开。
+    // 覆盖:块级 sdt(含嵌套 sdt)、行内 sdt、单元格内 sdt。
+    let parsed = parse_body_xml(
+        r#"<w:sdt>
+             <w:sdtPr><w:alias w:val="Cover"/></w:sdtPr>
+             <w:sdtContent>
+               <w:p><w:r><w:t>cover title</w:t></w:r></w:p>
+               <w:sdt><w:sdtContent>
+                 <w:p><w:r><w:t>nested sdt para</w:t></w:r></w:p>
+               </w:sdtContent></w:sdt>
+             </w:sdtContent>
+           </w:sdt>
+           <w:p>
+             <w:r><w:t>before </w:t></w:r>
+             <w:sdt>
+               <w:sdtPr><w:date/></w:sdtPr>
+               <w:sdtContent><w:r><w:t>2026-07-02</w:t></w:r></w:sdtContent>
+             </w:sdt>
+             <w:r><w:t> after</w:t></w:r>
+           </w:p>
+           <w:tbl>
+             <w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid>
+             <w:tr><w:tc>
+               <w:sdt><w:sdtContent>
+                 <w:p><w:r><w:t>cell sdt text</w:t></w:r></w:p>
+               </w:sdtContent></w:sdt>
+             </w:tc></w:tr>
+           </w:tbl>"#,
+    );
+    let doc = &parsed.document;
+    // 块级 sdt 展开成两个段落 + 行内段 + 表 = 4 个顶层块。
+    assert_eq!(doc.body.len(), 4);
+    let texts: Vec<String> = doc
+        .body
+        .iter()
+        .filter_map(|b| match b {
+            Block::Paragraph(p) => Some(p.text()),
+            Block::Table(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["cover title", "nested sdt para", "before 2026-07-02 after"]
+    );
+    let Block::Table(t) = &doc.body[3] else {
+        panic!("expected table");
+    };
+    assert_eq!(t.rows[0].cells[0].text(), "cell sdt text");
+}
+
+#[test]
+fn fldsimple_cached_result_is_kept() {
+    // w:fldSimple(字段)缓存结果整体丢弃 -> 修复:当作 run 容器透明展开。
+    let parsed = parse_body_xml(
+        r#"<w:p>
+             <w:r><w:t>Page </w:t></w:r>
+             <w:fldSimple w:instr=" PAGE \* MERGEFORMAT ">
+               <w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r>
+             </w:fldSimple>
+             <w:r><w:t> of 9</w:t></w:r>
+           </w:p>"#,
+    );
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected paragraph");
+    };
+    assert_eq!(p.text(), "Page 7 of 9");
+    // 字段结果 run 的样式也保留。
+    assert!(p.runs.iter().any(|r| r.bold && r.text() == "7"));
 }
 
 #[test]
