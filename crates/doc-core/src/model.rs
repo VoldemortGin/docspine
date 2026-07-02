@@ -11,6 +11,7 @@
 //!   区分 `restart` 起始格与 `continue` 延续格)。
 
 use crate::geom::{Emu, Twips};
+use crate::style::{RunProps, StyleTable, Theme};
 
 /// 一份解析好的 Word 文档。
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -21,6 +22,11 @@ pub struct Document {
     /// 节中段落 `w:pPr > w:sectPr` 结束**包含它的**那一节。解析层保证非空(缺失时补
     /// Word 默认节);块归属经 [`Section::end_block`] 划分。
     pub sections: Vec<Section>,
+    /// 样式表(`word/styles.xml`:docDefaults + 样式定义)。部件缺失时为空表。
+    /// 有效样式经 [`crate::style::resolve_run`] / [`crate::style::resolve_para`] 级联合并。
+    pub styles: StyleTable,
+    /// 主题(`word/theme/theme1.xml`:fontScheme + clrScheme)。部件缺失时为空主题。
+    pub theme: Theme,
 }
 
 /// 一节(`w:sectPr`)的页面几何:页面尺寸 / 页边距 / 纸向 / 分栏。
@@ -143,6 +149,11 @@ pub struct TextRun {
     pub color: Option<Color>,
     /// 该 run 内嵌的图片(`w:drawing` / `w:pict`);一个 run 通常至多一张。
     pub pictures: Vec<Picture>,
+    /// 直接格式化的 rPr 原始片段(**全 Option**,能区分「未设置(继承)」与「显式关」,
+    /// toggle XOR 语义依赖这一点)。上面的 `font`/`size_pt`/`bold`/… 是它折叠后的便利字段
+    /// (缺省 = false/None,契约不变),导出与 Python 侧继续用便利字段;
+    /// 渲染侧走 [`crate::style::resolve_run`] 消费本片段。
+    pub rpr: RunProps,
 }
 
 impl TextRun {

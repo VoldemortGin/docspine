@@ -26,11 +26,13 @@ use doc_core::model::{
     Block, BreakKind, Cell, Color, Orientation, Paragraph, Picture, Row, RunSegment, Section,
     Table, TextRun, VMerge,
 };
+use doc_core::style::{ColorRef, FontRef, RunProps};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 use super::{
-    attr_of, attr_string, local_name, media_name_from_target, on_off_val, parse_rels, Relationship,
+    attr_of, attr_string, local_name, media_name_from_target, on_off_val, parse_rels, props,
+    skip_element, Relationship,
 };
 
 /// 解析期的只读上下文:rel 映射(图片 r:id -> media 名) + media 长度索引。
@@ -395,7 +397,7 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"rPr" => parse_rpr(reader, &mut run),
+                    b"rPr" => apply_direct_rpr(&mut run, props::parse_rpr(reader)),
                     b"t" => run.push_text(&read_text(reader)),
                     b"tab" => {
                         run.segments.push(RunSegment::Tab);
@@ -504,63 +506,30 @@ fn parse_sdt_runs<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec
     runs
 }
 
-/// 解析 `w:rPr`(run 属性):字体/字号/粗体/斜体/下划线/颜色。已消费 `<w:rPr>` 起始标签。
-/// rPr 子元素几乎都是自闭合的开关/属性元素;`Empty` 与 `Start` 形式按本地名统一处理,Start
-/// 形式带子树的(罕见)以深度计数兜底,不会错位(见 [`skip_element`] 的循环结构)。
-fn parse_rpr<R: std::io::BufRead>(reader: &mut Reader<R>, run: &mut TextRun) {
-    let mut depth = 0usize;
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) => apply_rpr_prop(&e, run),
-            Ok(Event::Start(e)) => {
-                apply_rpr_prop(&e, run);
-                depth += 1;
-            }
-            Ok(Event::End(_)) => {
-                if depth == 0 {
-                    break; // rPr 自身结束。
-                }
-                depth -= 1;
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
+/// 把直接格式化的 rPr 片段(经共享的 [`props::parse_rpr`])装上 run:原始片段存进
+/// `run.rpr`(供有效样式解析器,能区分「未设置」与「显式关」),同时折叠出历史便利字段
+/// (`font`/`size_pt`/`bold`/…,缺省 = false/None)——折叠语义与旧 walker 逐字节一致,
+/// 导出/Python 契约不变。
+fn apply_direct_rpr(run: &mut TextRun, rpr: RunProps) {
+    run.font = named_font(&rpr.fonts.ascii)
+        .or_else(|| named_font(&rpr.fonts.h_ansi))
+        .or_else(|| named_font(&rpr.fonts.cs));
+    run.size_pt = rpr.sz;
+    run.bold = rpr.b == Some(true);
+    run.italic = rpr.i == Some(true);
+    run.underline = rpr.u == Some(true);
+    run.color = match rpr.color {
+        Some(ColorRef::Rgb(c)) => Some(c),
+        _ => None, // auto / theme 引用:便利字段维持 None(有效色走解析器)。
+    };
+    run.rpr = rpr;
 }
 
-/// 把一个 rPr 子元素(`Empty` 或 `Start`)的属性应用到 run 上。
-fn apply_rpr_prop(e: &BytesStart, run: &mut TextRun) {
-    match local_name(e.name().as_ref()) {
-        b"rFonts" => {
-            run.font = attr_of(e, b"ascii")
-                .or_else(|| attr_of(e, b"hAnsi"))
-                .or_else(|| attr_of(e, b"cs"))
-                .or(run.font.take());
-        }
-        b"sz" => {
-            // w:sz 以半磅存储;除以 2 得磅。
-            run.size_pt = attr_of(e, b"val")
-                .and_then(|s| s.parse::<f32>().ok())
-                .map(|v| v / 2.0)
-                .or(run.size_pt.take());
-        }
-        b"b" => run.bold = on_off_val(e),
-        b"i" => run.italic = on_off_val(e),
-        b"u" => {
-            // 下划线:val 非 "none" 即为真。
-            run.underline = attr_of(e, b"val")
-                .map(|v| !v.eq_ignore_ascii_case("none"))
-                .unwrap_or(true);
-        }
-        b"color" => {
-            run.color = attr_of(e, b"val")
-                .and_then(|h| Color::from_hex(&h))
-                .or(run.color.take());
-        }
-        _ => {}
+/// 便利字段只认显名字体(theme 间接引用旧 walker 本就不读,行为保持)。
+fn named_font(font: &Option<FontRef>) -> Option<String> {
+    match font {
+        Some(FontRef::Named(name)) => Some(name.clone()),
+        _ => None,
     }
 }
 
@@ -877,26 +846,4 @@ fn read_text<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
         buf.clear();
     }
     out
-}
-
-/// 跳过当前已打开元素的全部内容,直到其匹配的结束标签。已消费该元素的起始标签。
-/// 通过深度计数处理同名嵌套。
-fn skip_element<R: std::io::BufRead>(reader: &mut Reader<R>) {
-    let mut depth = 1usize;
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(_)) => depth += 1,
-            Ok(Event::End(_)) => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
 }

@@ -58,6 +58,22 @@ impl Package {
         self.part_str("word/_rels/document.xml.rels")
     }
 
+    /// 样式部件 `word/styles.xml` 的文本(可缺;缺失即空样式表)。
+    pub fn styles_xml_str(&self) -> Option<String> {
+        self.part_str("word/styles.xml")
+    }
+
+    /// 主题部件文本:标准名 `word/theme/theme1.xml`;容错取 `word/theme/` 下第一个
+    /// `.xml`(BTreeMap 序,确定性)。可缺;缺失即空主题。
+    pub fn theme_xml_str(&self) -> Option<String> {
+        self.part_str("word/theme/theme1.xml").or_else(|| {
+            self.parts
+                .iter()
+                .find(|(k, _)| k.starts_with("word/theme/") && k.ends_with(".xml"))
+                .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+        })
+    }
+
     /// 收集全部 `word/media/*` 字节,键为**裸文件名**(如 `image1.png`)。
     pub fn collect_media(&self) -> BTreeMap<String, Vec<u8>> {
         let mut out = BTreeMap::new();

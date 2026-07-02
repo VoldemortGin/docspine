@@ -1,11 +1,17 @@
 //! quick-xml walker —— WordprocessingML 解析。
 //!
 //! - [`document`]:解析 `word/document.xml`(`w:body` -> `Vec<Block>`,表格是重点)。
+//! - [`styles`]:解析 `word/styles.xml`(docDefaults + 样式定义 -> `StyleTable`,C-5)。
+//! - [`theme`]:解析 `word/theme/theme1.xml`(fontScheme + clrScheme -> `Theme`,C-5)。
+//! - [`props`]:document.xml 与 styles.xml 共用的 rPr / pPr 属性片段解析器。
 //!
-//! 本模块根放**关系(`.rels`)解析**与一批被多处复用的小工具(本地名、属性读取等)。
+//! 本模块根放**关系(`.rels`)解析**与一批被多处复用的小工具(本地名、属性读取、跳树等)。
 //! 所有 walker 都遵循家族约定:未知元素跳过、缺失属性 → `None`、**绝不 panic**。
 
 pub mod document;
+pub mod props;
+pub mod styles;
+pub mod theme;
 
 use std::collections::BTreeMap;
 
@@ -111,5 +117,27 @@ pub fn on_off_val(e: &BytesStart) -> bool {
     match attr_of(e, b"val") {
         None => true,
         Some(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")),
+    }
+}
+
+/// 跳过当前已打开元素的全部内容,直到其匹配的结束标签。已消费该元素的起始标签。
+/// 通过深度计数处理同名嵌套。各部件 walker 共用。
+pub fn skip_element<R: std::io::BufRead>(reader: &mut Reader<R>) {
+    let mut depth = 1usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
     }
 }

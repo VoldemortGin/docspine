@@ -1,0 +1,1157 @@
+//! 有效样式解析器(PDF-EXPORT C-5):styles.xml 样式表 + theme1.xml 主题 + 级联合并。
+//!
+//! WordprocessingML 的**有效格式**是一条级联链(ECMA-376 §17.7.2):
+//!
+//! ```text
+//! docDefaults(rPrDefault/pPrDefault)
+//!   → 表格样式(段落在表格内时,tblStyle 的 basedOn 链)
+//!   → 段落样式(pStyle 的 basedOn 链,根先、派生后)
+//!   → 直接格式化(w:pPr / w:rPr),后者覆盖前者
+//! ```
+//!
+//! **toggle 属性(b/i/caps/smallCaps/strike/vanish)** 例外(ECMA-376 §17.7.3):
+//! 直接格式化是绝对开关;否则以 docDefaults 为基值,与样式链上 `true` 出现次数的
+//! **奇偶**做异或(样式里显式的 `false` 不参与计数)。字符样式(`w:rStyle`)在
+//! 直接格式化侧尚未捕获(C-4),届时其 basedOn 链同样进入异或计数。
+//!
+//! **theme 间接引用**:`rFonts@asciiTheme="minorHAnsi"` 等经 [`Theme::fonts`]
+//! (fontScheme)解成实际 family 名;`w:color@themeColor="accent1"` 经
+//! [`Theme::colors`](clrScheme)解成 RGB。
+//!
+//! 本模块是纯「模型 → 模型」计算:无 IO / zip / XML,输入全部来自 [`Document`] 上的
+//! [`StyleTable`] / [`Theme`](由 doc-parse 机械填充),供 doc-render(C-1)消费。
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::model::{Color, Document, Paragraph, Table, TextRun};
+
+// ============================================================ Word 内置缺省(硬编码兜底)
+
+/// Word 内置缺省正文西文字体。出处:Office 默认主题「Office」的 minorFont/latin =
+/// "Calibri"(Word 2007+ 默认模板);ECMA-376 未规定实现缺省,这里对齐 Word 实际行为。
+/// 仅当 docDefaults / 样式链 / theme 都给不出字体时才落到这里。
+pub const DEFAULT_LATIN_FONT: &str = "Calibri";
+
+/// Word 内置缺省标题西文字体(majorFont/latin)。出处:Office 2013+ 默认主题「Office」的
+/// majorFont/latin = "Calibri Light"。仅当 theme 部件缺失/槽位为空时兜底。
+pub const DEFAULT_MAJOR_LATIN_FONT: &str = "Calibri Light";
+
+/// Word 内置缺省字号(磅)。出处:Word 默认模板 docDefaults 为 `w:sz w:val="22"`
+/// (22 半磅 = 11pt)。仅当 docDefaults 与样式链都未给出字号时兜底。
+pub const DEFAULT_SIZE_PT: f32 = 11.0;
+
+// ============================================================ theme(theme1.xml)
+
+/// 主题(`word/theme/theme1.xml`):fontScheme(字体方案)+ clrScheme(配色方案)。
+/// 部件缺失时为全空缺省,解析器落到硬编码兜底。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Theme {
+    /// 字体方案(`a:fontScheme`):major(标题)/ minor(正文)各一组。
+    pub fonts: FontScheme,
+    /// 配色方案(`a:clrScheme`):12 个具名槽位。
+    pub colors: ColorScheme,
+}
+
+/// 字体方案(`a:fontScheme`)。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FontScheme {
+    /// 标题字体组(`a:majorFont`)。
+    pub major: FontSet,
+    /// 正文字体组(`a:minorFont`)。
+    pub minor: FontSet,
+}
+
+/// 一组主题字体(`a:majorFont` / `a:minorFont` 的 latin / ea / cs 槽)。
+/// `typeface=""`(空串)按缺失处理 → `None`。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FontSet {
+    /// 西文(`a:latin@typeface`)。
+    pub latin: Option<String>,
+    /// 东亚(`a:ea@typeface`)。
+    pub east_asia: Option<String>,
+    /// 复杂文种(`a:cs@typeface`)。
+    pub cs: Option<String>,
+}
+
+/// 配色方案(`a:clrScheme`)的 12 个槽位;取 `a:srgbClr@val` 或 `a:sysClr@lastClr`。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ColorScheme {
+    pub dk1: Option<Color>,
+    pub lt1: Option<Color>,
+    pub dk2: Option<Color>,
+    pub lt2: Option<Color>,
+    pub accent1: Option<Color>,
+    pub accent2: Option<Color>,
+    pub accent3: Option<Color>,
+    pub accent4: Option<Color>,
+    pub accent5: Option<Color>,
+    pub accent6: Option<Color>,
+    pub hlink: Option<Color>,
+    pub fol_hlink: Option<Color>,
+}
+
+impl ColorScheme {
+    /// 按主题色槽位取色。`text1/dark1 → dk1`、`background1/light1 → lt1` 等映射见
+    /// [`ThemeColor::from_attr`]。
+    pub fn get(&self, slot: ThemeColor) -> Option<Color> {
+        match slot {
+            ThemeColor::Dark1 => self.dk1,
+            ThemeColor::Light1 => self.lt1,
+            ThemeColor::Dark2 => self.dk2,
+            ThemeColor::Light2 => self.lt2,
+            ThemeColor::Accent1 => self.accent1,
+            ThemeColor::Accent2 => self.accent2,
+            ThemeColor::Accent3 => self.accent3,
+            ThemeColor::Accent4 => self.accent4,
+            ThemeColor::Accent5 => self.accent5,
+            ThemeColor::Accent6 => self.accent6,
+            ThemeColor::Hyperlink => self.hlink,
+            ThemeColor::FollowedHyperlink => self.fol_hlink,
+        }
+    }
+
+    /// 按槽位写色(供 theme1.xml walker 填充)。
+    pub fn set(&mut self, slot: ThemeColor, color: Color) {
+        let field = match slot {
+            ThemeColor::Dark1 => &mut self.dk1,
+            ThemeColor::Light1 => &mut self.lt1,
+            ThemeColor::Dark2 => &mut self.dk2,
+            ThemeColor::Light2 => &mut self.lt2,
+            ThemeColor::Accent1 => &mut self.accent1,
+            ThemeColor::Accent2 => &mut self.accent2,
+            ThemeColor::Accent3 => &mut self.accent3,
+            ThemeColor::Accent4 => &mut self.accent4,
+            ThemeColor::Accent5 => &mut self.accent5,
+            ThemeColor::Accent6 => &mut self.accent6,
+            ThemeColor::Hyperlink => &mut self.hlink,
+            ThemeColor::FollowedHyperlink => &mut self.fol_hlink,
+        };
+        *field = Some(color);
+    }
+}
+
+/// 主题色槽位(`w:color@w:themeColor` 的取值域,ECMA-376 ST_ThemeColor)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeColor {
+    Dark1,
+    Light1,
+    Dark2,
+    Light2,
+    Accent1,
+    Accent2,
+    Accent3,
+    Accent4,
+    Accent5,
+    Accent6,
+    Hyperlink,
+    FollowedHyperlink,
+}
+
+impl ThemeColor {
+    /// 解析 `w:themeColor` 属性值。`text1/dark1` 都指 dk1、`background1/light1` 都指
+    /// lt1(text/background 是 dk/lt 的用途别名,ECMA-376 §20.1.6.2)。未知值 → `None`。
+    pub fn from_attr(s: &str) -> Option<Self> {
+        Some(match s {
+            "dark1" | "text1" => ThemeColor::Dark1,
+            "light1" | "background1" => ThemeColor::Light1,
+            "dark2" | "text2" => ThemeColor::Dark2,
+            "light2" | "background2" => ThemeColor::Light2,
+            "accent1" => ThemeColor::Accent1,
+            "accent2" => ThemeColor::Accent2,
+            "accent3" => ThemeColor::Accent3,
+            "accent4" => ThemeColor::Accent4,
+            "accent5" => ThemeColor::Accent5,
+            "accent6" => ThemeColor::Accent6,
+            "hyperlink" => ThemeColor::Hyperlink,
+            "followedHyperlink" => ThemeColor::FollowedHyperlink,
+            _ => return None,
+        })
+    }
+
+    /// 解析 clrScheme 子元素的本地名(`a:dk1` / `a:accent1` / `a:folHlink` …)。
+    pub fn from_scheme_element(name: &str) -> Option<Self> {
+        Some(match name {
+            "dk1" => ThemeColor::Dark1,
+            "lt1" => ThemeColor::Light1,
+            "dk2" => ThemeColor::Dark2,
+            "lt2" => ThemeColor::Light2,
+            "accent1" => ThemeColor::Accent1,
+            "accent2" => ThemeColor::Accent2,
+            "accent3" => ThemeColor::Accent3,
+            "accent4" => ThemeColor::Accent4,
+            "accent5" => ThemeColor::Accent5,
+            "accent6" => ThemeColor::Accent6,
+            "hlink" => ThemeColor::Hyperlink,
+            "folHlink" => ThemeColor::FollowedHyperlink,
+            _ => return None,
+        })
+    }
+}
+
+/// 主题字体槽位(`rFonts@asciiTheme` 等的取值域,ECMA-376 ST_Theme)。
+/// `major*` 指 fontScheme 的 majorFont,`minor*` 指 minorFont;
+/// `*Ascii`/`*HAnsi` 落 latin 槽、`*EastAsia` 落 ea 槽、`*Bidi` 落 cs 槽。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeFont {
+    MajorAscii,
+    MajorHAnsi,
+    MajorEastAsia,
+    MajorBidi,
+    MinorAscii,
+    MinorHAnsi,
+    MinorEastAsia,
+    MinorBidi,
+}
+
+impl ThemeFont {
+    /// 解析 `asciiTheme` / `hAnsiTheme` / `eastAsiaTheme` / `cstheme` 的属性值。
+    pub fn from_attr(s: &str) -> Option<Self> {
+        Some(match s {
+            "majorAscii" => ThemeFont::MajorAscii,
+            "majorHAnsi" => ThemeFont::MajorHAnsi,
+            "majorEastAsia" => ThemeFont::MajorEastAsia,
+            "majorBidi" => ThemeFont::MajorBidi,
+            "minorAscii" => ThemeFont::MinorAscii,
+            "minorHAnsi" => ThemeFont::MinorHAnsi,
+            "minorEastAsia" => ThemeFont::MinorEastAsia,
+            "minorBidi" => ThemeFont::MinorBidi,
+            _ => return None,
+        })
+    }
+
+    fn is_major(self) -> bool {
+        matches!(
+            self,
+            ThemeFont::MajorAscii
+                | ThemeFont::MajorHAnsi
+                | ThemeFont::MajorEastAsia
+                | ThemeFont::MajorBidi
+        )
+    }
+}
+
+// ============================================================ 属性片段(rPr / pPr)
+
+/// 一处字体引用:显名,或主题间接引用(解引在有效样式解析时进行)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontRef {
+    /// 显式 family 名(`rFonts@ascii` 等)。
+    Named(String),
+    /// 主题间接引用(`rFonts@asciiTheme` 等;同槽位上 theme 属性优先于显名,
+    /// ECMA-376 §17.3.2.26)。
+    Theme(ThemeFont),
+}
+
+/// `rFonts` 的四槽字体(ascii / hAnsi / eastAsia / cs),每槽独立参与级联。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FontSlots {
+    pub ascii: Option<FontRef>,
+    pub h_ansi: Option<FontRef>,
+    pub east_asia: Option<FontRef>,
+    pub cs: Option<FontRef>,
+}
+
+/// 一处颜色引用(`w:color`):显式 RGB、主题间接引用、或 `auto`(自动,渲染侧按黑)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorRef {
+    Rgb(Color),
+    Theme(ThemeColor),
+    Auto,
+}
+
+/// 一个 rPr 片段:**全 Option**,能区分「未设置(继承)」与「显式关」。
+/// docDefaults / 样式定义 / 直接格式化共用同一形状(C-4/C-5 的共享 prop-struct)。
+/// 本轮覆盖既有解析语法 + C-5 所需(toggle / 4 槽字体 / theme 引用);
+/// szCs / 下划线样式 / highlight / vertAlign 等在 C-4 扩展。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RunProps {
+    /// 四槽字体(`w:rFonts`)。
+    pub fonts: FontSlots,
+    /// 字号(磅;`w:sz` 半磅已除 2)。值属性:就近覆盖。
+    pub sz: Option<f32>,
+    /// 粗体(`w:b`)。**toggle 属性**:XOR 语义。
+    pub b: Option<bool>,
+    /// 斜体(`w:i`)。toggle。
+    pub i: Option<bool>,
+    /// 全大写(`w:caps`)。toggle。
+    pub caps: Option<bool>,
+    /// 小型大写(`w:smallCaps`)。toggle。
+    pub small_caps: Option<bool>,
+    /// 单删除线(`w:strike`)。toggle。
+    pub strike: Option<bool>,
+    /// 隐藏文字(`w:vanish`)。toggle。
+    pub vanish: Option<bool>,
+    /// 下划线(`w:u`;`val="none"` → `Some(false)`)。值属性(样式种类在 C-4 扩展)。
+    pub u: Option<bool>,
+    /// 文字颜色(`w:color`)。值属性。
+    pub color: Option<ColorRef>,
+}
+
+impl RunProps {
+    /// 值属性的就近覆盖合并:`other`(级联链上更靠近正文的一层)的 `Some` 覆盖本层。
+    /// **toggle 属性(b/i/caps/smallCaps/strike/vanish)不在此处理**(XOR 语义,
+    /// 见 [`resolve_run`]),这里一并搬运只是为了保留「最后一层的显式值」不参与判定。
+    fn overlay_values(&mut self, other: &RunProps) {
+        for (slot, o) in [
+            (&mut self.fonts.ascii, &other.fonts.ascii),
+            (&mut self.fonts.h_ansi, &other.fonts.h_ansi),
+            (&mut self.fonts.east_asia, &other.fonts.east_asia),
+            (&mut self.fonts.cs, &other.fonts.cs),
+        ] {
+            if o.is_some() {
+                *slot = o.clone();
+            }
+        }
+        if other.sz.is_some() {
+            self.sz = other.sz;
+        }
+        if other.u.is_some() {
+            self.u = other.u;
+        }
+        if other.color.is_some() {
+            self.color = other.color;
+        }
+    }
+}
+
+/// 一个 pPr 片段(样式定义与 docDefaults 共用)。本轮语法只有对齐(`w:jc`);
+/// spacing / ind / pBdr / shd / keep 系列在 C-4 扩展进来。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParaProps {
+    /// 对齐(`w:jc@w:val`,归一化枚举)。值属性。
+    pub jc: Option<Justification>,
+}
+
+/// 归一化的段落对齐(`w:jc`)。`left/start → Left`、`right/end → Right`、
+/// `both → Justify`。缺省 Left(LTR 文档的 Word 缺省)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Justification {
+    #[default]
+    Left,
+    Center,
+    Right,
+    Justify,
+    Distribute,
+}
+
+impl Justification {
+    /// 解析 `w:jc@w:val`。未知值 → `None`(容错,当未设置)。
+    pub fn from_attr(s: &str) -> Option<Self> {
+        Some(match s {
+            "left" | "start" => Justification::Left,
+            "center" => Justification::Center,
+            "right" | "end" => Justification::Right,
+            "both" => Justification::Justify,
+            "distribute" => Justification::Distribute,
+            _ => return None,
+        })
+    }
+}
+
+// ============================================================ 样式表(styles.xml)
+
+/// 样式种类(`w:style@w:type`)。缺省 paragraph(ECMA-376 §17.7.4.17)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StyleKind {
+    #[default]
+    Paragraph,
+    Character,
+    Table,
+    Numbering,
+}
+
+impl StyleKind {
+    /// 解析 `w:style@w:type`。未知值按缺省 paragraph 容错。
+    pub fn from_attr(s: &str) -> Self {
+        match s {
+            "character" => StyleKind::Character,
+            "table" => StyleKind::Table,
+            "numbering" => StyleKind::Numbering,
+            _ => StyleKind::Paragraph,
+        }
+    }
+}
+
+/// 一条样式定义(`w:style`):名字 / 种类 / basedOn 父样式 / 是否该类缺省样式 +
+/// rPr / pPr 属性片段。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Style {
+    /// 显示名(`w:name@w:val`,如 `"heading 1"`)。级联用的是 styleId(表键),名字仅刻画。
+    pub name: Option<String>,
+    /// 种类(`w:style@w:type`)。
+    pub kind: StyleKind,
+    /// 父样式 id(`w:basedOn@w:val`)。
+    pub based_on: Option<String>,
+    /// 是否该种类的缺省样式(`w:style@w:default`)。
+    pub default: bool,
+    /// run 属性片段(`w:style > w:rPr`)。
+    pub rpr: RunProps,
+    /// 段落属性片段(`w:style > w:pPr`)。
+    pub ppr: ParaProps,
+}
+
+/// 样式表(`word/styles.xml`):docDefaults + `styleId → Style` 映射 + 各类缺省样式 id。
+/// 部件缺失时为空表,解析器落到 Word 内置缺省。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StyleTable {
+    /// 文档级 run 属性缺省(`w:docDefaults > w:rPrDefault > w:rPr`)。
+    pub doc_default_rpr: RunProps,
+    /// 文档级段落属性缺省(`w:docDefaults > w:pPrDefault > w:pPr`)。
+    pub doc_default_ppr: ParaProps,
+    /// 样式定义(键 = `w:style@w:styleId`)。
+    pub styles: BTreeMap<String, Style>,
+    /// 缺省段落样式 id(`w:type="paragraph"` 且 `w:default` 为真;通常是 `Normal`)。
+    /// 段落无 `pStyle` 时按 Word 语义应用它。
+    pub default_para_style: Option<String>,
+    /// 缺省字符样式 id(通常是 `DefaultParagraphFont`,按惯例无属性)。
+    /// 本轮解析器不消费(rStyle 在 C-4 捕获),保留以完整刻画。
+    pub default_char_style: Option<String>,
+}
+
+impl StyleTable {
+    /// 体检样式表:`basedOn` 环(会让朴素解析器死循环)与悬空 `basedOn` 引用。
+    /// 环上的**每个**成员各报一次(确定性:BTreeMap/BTreeSet 序)。
+    /// 解析函数([`resolve_run`] 等)自身带 visited-set 防环,遇环终止不悬挂;
+    /// 这里的告警供 doc-render 汇入 ExportWarning。
+    pub fn validate(&self) -> Vec<StyleWarning> {
+        let mut warnings = Vec::new();
+        let mut cycle_members: BTreeSet<&str> = BTreeSet::new();
+        for (id, style) in &self.styles {
+            if let Some(base) = style.based_on.as_deref() {
+                if !self.styles.contains_key(base) {
+                    warnings.push(StyleWarning::UnknownBasedOn {
+                        style_id: id.clone(),
+                        based_on: base.to_string(),
+                    });
+                }
+            }
+            // 从每个样式出发沿 basedOn 走:重访到出发点即证明它在环上。
+            let mut visited: BTreeSet<&str> = BTreeSet::new();
+            let mut cur = Some(id.as_str());
+            while let Some(sid) = cur {
+                if !visited.insert(sid) {
+                    if sid == id {
+                        cycle_members.insert(sid);
+                    }
+                    break;
+                }
+                cur = self.styles.get(sid).and_then(|s| s.based_on.as_deref());
+            }
+        }
+        warnings.extend(
+            cycle_members
+                .into_iter()
+                .map(|id| StyleWarning::BasedOnCycle {
+                    style_id: id.to_string(),
+                }),
+        );
+        warnings
+    }
+}
+
+/// 样式表体检告警(供 doc-render 转成 ExportWarning 浮出)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StyleWarning {
+    /// `basedOn` 链成环(样式 `style_id` 在环上)。解析已按 visited-set 截断,不悬挂。
+    BasedOnCycle { style_id: String },
+    /// `basedOn` 指向不存在的样式 id。级联按链在此截断处理。
+    UnknownBasedOn { style_id: String, based_on: String },
+}
+
+// ============================================================ 有效属性(解析输出)
+
+/// 一个 run 的**有效** run 属性:级联合并 + theme 解引 + Word 内置兜底之后的最终值。
+/// doc-render 直接按此排版,不再看原始片段。
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveRunProps {
+    /// 西文字体 family(兜底 [`DEFAULT_LATIN_FONT`])。
+    pub font_ascii: String,
+    /// 高 ANSI 字体(未设时随 `font_ascii`)。
+    pub font_h_ansi: String,
+    /// 东亚字体(无兜底:`None` 交渲染侧字体回退链)。
+    pub font_east_asia: Option<String>,
+    /// 复杂文种字体(无兜底)。
+    pub font_cs: Option<String>,
+    /// 字号(磅,兜底 [`DEFAULT_SIZE_PT`])。
+    pub size_pt: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub caps: bool,
+    pub small_caps: bool,
+    pub vanish: bool,
+    /// 文字颜色;`None` = auto/未设(渲染侧按黑)。
+    pub color: Option<Color>,
+}
+
+/// 一个段落的**有效**段落属性。本轮只有对齐;C-4 起扩展 spacing / indent 等。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveParaProps {
+    /// 对齐(缺省 Left)。
+    pub align: Justification,
+}
+
+// ============================================================ 解析器(级联合并)
+
+/// 解析一个正文段落的有效段落属性(非表格内;表格内用 [`resolve_para_in_table`])。
+pub fn resolve_para(doc: &Document, para: &Paragraph) -> EffectiveParaProps {
+    resolve_para_props(doc, None, para)
+}
+
+/// 解析表格内段落的有效段落属性:表格样式(`tblStyle` 链)插在 docDefaults 与段落样式之间。
+pub fn resolve_para_in_table(
+    doc: &Document,
+    table: &Table,
+    para: &Paragraph,
+) -> EffectiveParaProps {
+    resolve_para_props(doc, table.style.as_deref(), para)
+}
+
+/// 解析一个 run 的有效 run 属性(非表格内;表格内用 [`resolve_run_in_table`])。
+pub fn resolve_run(doc: &Document, para: &Paragraph, run: &TextRun) -> EffectiveRunProps {
+    resolve_run_props(doc, None, para, run)
+}
+
+/// 解析表格内 run 的有效 run 属性(表格样式链参与级联与 toggle 计数)。
+pub fn resolve_run_in_table(
+    doc: &Document,
+    table: &Table,
+    para: &Paragraph,
+    run: &TextRun,
+) -> EffectiveRunProps {
+    resolve_run_props(doc, table.style.as_deref(), para, run)
+}
+
+/// 组装完整样式链:表格样式链(如在表格内)+ 段落样式链,各自 basedOn 递归、根先派生后。
+/// 段落无 `pStyle` 时应用缺省段落样式(Word 语义:每个段落都有样式)。
+fn full_chain<'a>(
+    table: &'a StyleTable,
+    table_style: Option<&str>,
+    para: &'a Paragraph,
+) -> Vec<&'a Style> {
+    let mut chain = style_chain(table, table_style);
+    let para_style = para
+        .style
+        .as_deref()
+        .or(table.default_para_style.as_deref());
+    chain.extend(style_chain(table, para_style));
+    chain
+}
+
+/// 沿 `basedOn` 走出一条样式链,**根(最基)在前**。visited-set 防环:重访即截断,
+/// 有限步终止(环告警见 [`StyleTable::validate`]);未知 id 处链截断。
+fn style_chain<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<&'a Style> {
+    let mut chain = Vec::new();
+    let mut visited: BTreeSet<&str> = BTreeSet::new();
+    let mut cur = id;
+    while let Some(sid) = cur {
+        if !visited.insert(sid) {
+            break; // basedOn 成环:截断。
+        }
+        let Some(style) = table.styles.get(sid) else {
+            break; // 悬空引用:截断。
+        };
+        chain.push(style);
+        cur = style.based_on.as_deref();
+    }
+    chain.reverse();
+    chain
+}
+
+/// toggle 属性的有效值(ECMA-376 §17.7.3):直接格式化是绝对开关;否则以 docDefaults
+/// 为基值,与样式链上 `Some(true)` 出现次数的奇偶异或(显式 `false` 不参与计数)。
+fn resolve_toggle(
+    direct: Option<bool>,
+    doc_default: Option<bool>,
+    chain: &[&Style],
+    get: impl Fn(&RunProps) -> Option<bool>,
+) -> bool {
+    if let Some(v) = direct {
+        return v;
+    }
+    let base = doc_default == Some(true);
+    let odd = chain.iter().filter(|s| get(&s.rpr) == Some(true)).count() % 2 == 1;
+    base ^ odd
+}
+
+/// 把一处字体引用解成实际 family 名:显名直接用;主题引用查 fontScheme,latin 槽在
+/// theme 缺失/为空时落硬编码兜底(ea/cs 槽无兜底,交渲染侧回退链)。
+fn deref_font(font: &FontRef, theme: &Theme) -> Option<String> {
+    match font {
+        FontRef::Named(name) => Some(name.clone()),
+        FontRef::Theme(slot) => {
+            let set = if slot.is_major() {
+                &theme.fonts.major
+            } else {
+                &theme.fonts.minor
+            };
+            let resolved = match slot {
+                ThemeFont::MajorAscii
+                | ThemeFont::MajorHAnsi
+                | ThemeFont::MinorAscii
+                | ThemeFont::MinorHAnsi => set.latin.as_ref(),
+                ThemeFont::MajorEastAsia | ThemeFont::MinorEastAsia => set.east_asia.as_ref(),
+                ThemeFont::MajorBidi | ThemeFont::MinorBidi => set.cs.as_ref(),
+            };
+            match resolved {
+                Some(name) => Some(name.clone()),
+                None => match slot {
+                    // latin 槽兜底 Office 默认主题;ea/cs 无兜底。
+                    ThemeFont::MajorAscii | ThemeFont::MajorHAnsi => {
+                        Some(DEFAULT_MAJOR_LATIN_FONT.to_string())
+                    }
+                    ThemeFont::MinorAscii | ThemeFont::MinorHAnsi => {
+                        Some(DEFAULT_LATIN_FONT.to_string())
+                    }
+                    _ => None,
+                },
+            }
+        }
+    }
+}
+
+fn resolve_run_props(
+    doc: &Document,
+    table_style: Option<&str>,
+    para: &Paragraph,
+    run: &TextRun,
+) -> EffectiveRunProps {
+    let st = &doc.styles;
+    let chain = full_chain(st, table_style, para);
+
+    // 值属性:docDefaults → 样式链(根先)→ 直接格式化,后者的 Some 覆盖前者。
+    let mut merged = st.doc_default_rpr.clone();
+    for s in &chain {
+        merged.overlay_values(&s.rpr);
+    }
+    merged.overlay_values(&run.rpr);
+
+    // toggle 属性:XOR 语义(直接格式化绝对开关)。
+    let dd = &st.doc_default_rpr;
+    let bold = resolve_toggle(run.rpr.b, dd.b, &chain, |r| r.b);
+    let italic = resolve_toggle(run.rpr.i, dd.i, &chain, |r| r.i);
+    let caps = resolve_toggle(run.rpr.caps, dd.caps, &chain, |r| r.caps);
+    let small_caps = resolve_toggle(run.rpr.small_caps, dd.small_caps, &chain, |r| r.small_caps);
+    let strike = resolve_toggle(run.rpr.strike, dd.strike, &chain, |r| r.strike);
+    let vanish = resolve_toggle(run.rpr.vanish, dd.vanish, &chain, |r| r.vanish);
+
+    // theme 解引 + Word 内置兜底。
+    let font_ascii = merged
+        .fonts
+        .ascii
+        .as_ref()
+        .and_then(|f| deref_font(f, &doc.theme))
+        .unwrap_or_else(|| DEFAULT_LATIN_FONT.to_string());
+    let font_h_ansi = merged
+        .fonts
+        .h_ansi
+        .as_ref()
+        .and_then(|f| deref_font(f, &doc.theme))
+        .unwrap_or_else(|| font_ascii.clone());
+    let font_east_asia = merged
+        .fonts
+        .east_asia
+        .as_ref()
+        .and_then(|f| deref_font(f, &doc.theme));
+    let font_cs = merged
+        .fonts
+        .cs
+        .as_ref()
+        .and_then(|f| deref_font(f, &doc.theme));
+    let color = match merged.color {
+        Some(ColorRef::Rgb(c)) => Some(c),
+        Some(ColorRef::Theme(slot)) => doc.theme.colors.get(slot),
+        Some(ColorRef::Auto) | None => None, // auto/未设:渲染侧按黑。
+    };
+
+    EffectiveRunProps {
+        font_ascii,
+        font_h_ansi,
+        font_east_asia,
+        font_cs,
+        size_pt: merged.sz.unwrap_or(DEFAULT_SIZE_PT),
+        bold,
+        italic,
+        underline: merged.u == Some(true),
+        strike,
+        caps,
+        small_caps,
+        vanish,
+        color,
+    }
+}
+
+fn resolve_para_props(
+    doc: &Document,
+    table_style: Option<&str>,
+    para: &Paragraph,
+) -> EffectiveParaProps {
+    let st = &doc.styles;
+    let chain = full_chain(st, table_style, para);
+
+    let mut jc = st.doc_default_ppr.jc;
+    for s in &chain {
+        if s.ppr.jc.is_some() {
+            jc = s.ppr.jc;
+        }
+    }
+    // 直接格式化(现模型:Paragraph.align 原样字符串;C-4 换成共享 ParaProps 片段)。
+    if let Some(direct) = para.align.as_deref().and_then(Justification::from_attr) {
+        jc = Some(direct);
+    }
+
+    EffectiveParaProps {
+        align: jc.unwrap_or_default(),
+    }
+}
+
+// ============================================================ 单测:每条合并语义分支
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Document, Paragraph, Table, TextRun};
+
+    /// 便利:造一条只带 rPr 片段的段落样式。
+    fn para_style(based_on: Option<&str>, rpr: RunProps, ppr: ParaProps) -> Style {
+        Style {
+            kind: StyleKind::Paragraph,
+            based_on: based_on.map(str::to_string),
+            rpr,
+            ppr,
+            ..Style::default()
+        }
+    }
+
+    fn doc_with_styles(styles: Vec<(&str, Style)>) -> Document {
+        let mut doc = Document::default();
+        for (id, s) in styles {
+            doc.styles.styles.insert(id.to_string(), s);
+        }
+        doc
+    }
+
+    fn styled_para(style: Option<&str>) -> Paragraph {
+        Paragraph {
+            style: style.map(str::to_string),
+            ..Paragraph::default()
+        }
+    }
+
+    /// 空文档 + 无任何样式/直接格式化:落 Word 内置缺省(Calibri 11pt,全开关关)。
+    #[test]
+    fn hardcoded_word_defaults_when_everything_absent() {
+        let doc = Document::default();
+        let para = Paragraph::default();
+        let run = TextRun::default();
+        let eff = resolve_run(&doc, &para, &run);
+        assert_eq!(eff.font_ascii, DEFAULT_LATIN_FONT);
+        assert_eq!(eff.font_h_ansi, DEFAULT_LATIN_FONT);
+        assert_eq!(eff.font_east_asia, None);
+        assert_eq!(eff.size_pt, DEFAULT_SIZE_PT);
+        assert!(!eff.bold && !eff.italic && !eff.underline && !eff.strike);
+        assert_eq!(eff.color, None);
+        assert_eq!(resolve_para(&doc, &para).align, Justification::Left);
+    }
+
+    /// docDefaults 覆盖内置缺省:rPrDefault 的字号/字体、pPrDefault 的对齐生效。
+    #[test]
+    fn doc_defaults_apply_to_unstyled_content() {
+        let mut doc = Document::default();
+        doc.styles.doc_default_rpr.sz = Some(12.0);
+        doc.styles.doc_default_rpr.fonts.ascii = Some(FontRef::Named("Aptos".into()));
+        doc.styles.doc_default_ppr.jc = Some(Justification::Justify);
+        let para = Paragraph::default();
+        let eff = resolve_run(&doc, &para, &TextRun::default());
+        assert_eq!(eff.size_pt, 12.0);
+        assert_eq!(eff.font_ascii, "Aptos");
+        // h_ansi 未设:随 ascii。
+        assert_eq!(eff.font_h_ansi, "Aptos");
+        assert_eq!(resolve_para(&doc, &para).align, Justification::Justify);
+    }
+
+    /// basedOn 链:派生样式覆盖基样式的值属性;未覆盖的槽位从基样式继承。
+    #[test]
+    fn based_on_chain_value_override_and_inherit() {
+        let normal = para_style(
+            None,
+            RunProps {
+                sz: Some(11.0),
+                fonts: FontSlots {
+                    ascii: Some(FontRef::Named("Base".into())),
+                    east_asia: Some(FontRef::Named("宋体".into())),
+                    ..FontSlots::default()
+                },
+                ..RunProps::default()
+            },
+            ParaProps {
+                jc: Some(Justification::Left),
+            },
+        );
+        let heading = para_style(
+            Some("Normal"),
+            RunProps {
+                sz: Some(16.0),
+                ..RunProps::default()
+            },
+            ParaProps {
+                jc: Some(Justification::Center),
+            },
+        );
+        let doc = doc_with_styles(vec![("Normal", normal), ("Heading1", heading)]);
+        let para = styled_para(Some("Heading1"));
+        let eff = resolve_run(&doc, &para, &TextRun::default());
+        assert_eq!(eff.size_pt, 16.0); // 派生覆盖
+        assert_eq!(eff.font_ascii, "Base"); // 槽位继承
+        assert_eq!(eff.font_east_asia.as_deref(), Some("宋体"));
+        assert_eq!(resolve_para(&doc, &para).align, Justification::Center);
+    }
+
+    /// 段落无 pStyle 时应用缺省段落样式(Word 语义:每个段落都有样式)。
+    #[test]
+    fn default_paragraph_style_applies_when_pstyle_absent() {
+        let mut normal = para_style(
+            None,
+            RunProps {
+                sz: Some(10.5),
+                ..RunProps::default()
+            },
+            ParaProps::default(),
+        );
+        normal.default = true;
+        let mut doc = doc_with_styles(vec![("Normal", normal)]);
+        doc.styles.default_para_style = Some("Normal".into());
+        let eff = resolve_run(&doc, &Paragraph::default(), &TextRun::default());
+        assert_eq!(eff.size_pt, 10.5);
+    }
+
+    /// toggle XOR:样式链上 b=true 出现奇数次 → 开;偶数次 → 关(相互抵消)。
+    #[test]
+    fn toggle_xor_along_style_chain() {
+        let bold_on = RunProps {
+            b: Some(true),
+            ..RunProps::default()
+        };
+        // 奇数次(1 层):开。
+        let doc = doc_with_styles(vec![(
+            "S1",
+            para_style(None, bold_on.clone(), ParaProps::default()),
+        )]);
+        let eff = resolve_run(&doc, &styled_para(Some("S1")), &TextRun::default());
+        assert!(eff.bold, "b=true x1(奇数)→ 开");
+
+        // 偶数次(2 层,basedOn 链):关。
+        let doc = doc_with_styles(vec![
+            (
+                "Normal",
+                para_style(None, bold_on.clone(), ParaProps::default()),
+            ),
+            (
+                "Heading1",
+                para_style(Some("Normal"), bold_on.clone(), ParaProps::default()),
+            ),
+        ]);
+        let eff = resolve_run(&doc, &styled_para(Some("Heading1")), &TextRun::default());
+        assert!(!eff.bold, "b=true x2(偶数)→ 关");
+
+        // 样式里显式 false 不参与计数:true x1 + false x1 → 仍开。
+        let doc = doc_with_styles(vec![
+            (
+                "Normal",
+                para_style(None, bold_on.clone(), ParaProps::default()),
+            ),
+            (
+                "Derived",
+                para_style(
+                    Some("Normal"),
+                    RunProps {
+                        b: Some(false),
+                        ..RunProps::default()
+                    },
+                    ParaProps::default(),
+                ),
+            ),
+        ]);
+        let eff = resolve_run(&doc, &styled_para(Some("Derived")), &TextRun::default());
+        assert!(eff.bold, "显式 false 不计入 XOR");
+    }
+
+    /// toggle:直接格式化是绝对开关(b=0 恒关、b=1 恒开,无视链上奇偶)。
+    #[test]
+    fn toggle_direct_formatting_is_absolute() {
+        let bold_on = RunProps {
+            b: Some(true),
+            ..RunProps::default()
+        };
+        let doc = doc_with_styles(vec![(
+            "S1",
+            para_style(None, bold_on.clone(), ParaProps::default()),
+        )]);
+        let para = styled_para(Some("S1"));
+
+        // 链上奇数次(开)+ direct b=0 → 恒关。
+        let mut run = TextRun::default();
+        run.rpr.b = Some(false);
+        assert!(!resolve_run(&doc, &para, &run).bold);
+
+        // 链上偶数次(关)+ direct b=1 → 恒开。
+        let doc2 = doc_with_styles(vec![
+            (
+                "Normal",
+                para_style(None, bold_on.clone(), ParaProps::default()),
+            ),
+            (
+                "H",
+                para_style(Some("Normal"), bold_on, ParaProps::default()),
+            ),
+        ]);
+        let mut run = TextRun::default();
+        run.rpr.b = Some(true);
+        assert!(resolve_run(&doc2, &styled_para(Some("H")), &run).bold);
+    }
+
+    /// toggle:docDefaults 是基值,与链上奇偶再异或(docDefault=true + 链上 x1 → 关)。
+    #[test]
+    fn toggle_doc_default_is_xor_base() {
+        let mut doc = doc_with_styles(vec![(
+            "S1",
+            para_style(
+                None,
+                RunProps {
+                    i: Some(true),
+                    ..RunProps::default()
+                },
+                ParaProps::default(),
+            ),
+        )]);
+        doc.styles.doc_default_rpr.i = Some(true);
+        let eff = resolve_run(&doc, &styled_para(Some("S1")), &TextRun::default());
+        assert!(!eff.italic, "docDefault(真)XOR 链上奇数次(真)→ 关");
+        // 无样式链时:docDefault 直接生效。
+        let eff = resolve_run(&doc, &Paragraph::default(), &TextRun::default());
+        assert!(eff.italic);
+    }
+
+    /// basedOn 成环:解析有限步终止(不悬挂),validate 对环上成员告警。
+    #[test]
+    fn based_on_cycle_terminates_and_warns() {
+        let doc = doc_with_styles(vec![
+            (
+                "A",
+                para_style(
+                    Some("B"),
+                    RunProps {
+                        sz: Some(14.0),
+                        ..RunProps::default()
+                    },
+                    ParaProps::default(),
+                ),
+            ),
+            (
+                "B",
+                para_style(Some("A"), RunProps::default(), ParaProps::default()),
+            ),
+        ]);
+        // 终止且 A 的值属性仍生效。
+        let eff = resolve_run(&doc, &styled_para(Some("A")), &TextRun::default());
+        assert_eq!(eff.size_pt, 14.0);
+        // 环上成员各报一次。
+        let warnings = doc.styles.validate();
+        assert!(warnings.contains(&StyleWarning::BasedOnCycle {
+            style_id: "A".into()
+        }));
+        assert!(warnings.contains(&StyleWarning::BasedOnCycle {
+            style_id: "B".into()
+        }));
+    }
+
+    /// 悬空 basedOn:链截断 + UnknownBasedOn 告警,不 panic。
+    #[test]
+    fn unknown_based_on_truncates_and_warns() {
+        let doc = doc_with_styles(vec![(
+            "S1",
+            para_style(
+                Some("Ghost"),
+                RunProps {
+                    sz: Some(13.0),
+                    ..RunProps::default()
+                },
+                ParaProps::default(),
+            ),
+        )]);
+        let eff = resolve_run(&doc, &styled_para(Some("S1")), &TextRun::default());
+        assert_eq!(eff.size_pt, 13.0);
+        assert!(doc
+            .styles
+            .validate()
+            .contains(&StyleWarning::UnknownBasedOn {
+                style_id: "S1".into(),
+                based_on: "Ghost".into()
+            }));
+    }
+
+    /// theme 字体间接引用:asciiTheme=minorHAnsi → fontScheme minor latin 实际名;
+    /// eastAsiaTheme=minorEastAsia → minor ea;theme 缺槽时 latin 落硬编码兜底。
+    #[test]
+    fn theme_font_indirection_resolves_family_names() {
+        let mut doc = Document::default();
+        doc.theme.fonts.minor.latin = Some("Aptos".into());
+        doc.theme.fonts.minor.east_asia = Some("DengXian".into());
+        doc.theme.fonts.major.latin = Some("Aptos Display".into());
+        doc.styles.doc_default_rpr.fonts = FontSlots {
+            ascii: Some(FontRef::Theme(ThemeFont::MinorHAnsi)),
+            h_ansi: Some(FontRef::Theme(ThemeFont::MinorHAnsi)),
+            east_asia: Some(FontRef::Theme(ThemeFont::MinorEastAsia)),
+            cs: Some(FontRef::Theme(ThemeFont::MinorBidi)),
+        };
+        let eff = resolve_run(&doc, &Paragraph::default(), &TextRun::default());
+        assert_eq!(eff.font_ascii, "Aptos");
+        assert_eq!(eff.font_east_asia.as_deref(), Some("DengXian"));
+        assert_eq!(eff.font_cs, None, "theme cs 槽为空:无兜底");
+
+        // majorHAnsi 引用 → major latin。
+        let mut run = TextRun::default();
+        run.rpr.fonts.ascii = Some(FontRef::Theme(ThemeFont::MajorHAnsi));
+        let eff = resolve_run(&doc, &Paragraph::default(), &run);
+        assert_eq!(eff.font_ascii, "Aptos Display");
+
+        // theme 部件缺失:latin 槽落硬编码兜底(Calibri / Calibri Light)。
+        let mut bare = Document::default();
+        bare.styles.doc_default_rpr.fonts.ascii = Some(FontRef::Theme(ThemeFont::MinorHAnsi));
+        let eff = resolve_run(&bare, &Paragraph::default(), &TextRun::default());
+        assert_eq!(eff.font_ascii, DEFAULT_LATIN_FONT);
+        let mut run = TextRun::default();
+        run.rpr.fonts.ascii = Some(FontRef::Theme(ThemeFont::MajorHAnsi));
+        let eff = resolve_run(&bare, &Paragraph::default(), &run);
+        assert_eq!(eff.font_ascii, DEFAULT_MAJOR_LATIN_FONT);
+    }
+
+    /// theme 颜色间接引用:color@themeColor=accent1 → clrScheme 的 RGB;显式 RGB 覆盖;
+    /// auto → None。
+    #[test]
+    fn theme_color_indirection_and_auto() {
+        let mut doc = Document::default();
+        doc.theme
+            .colors
+            .set(ThemeColor::Accent1, Color::new([0x44, 0x72, 0xC4]));
+        doc.styles.doc_default_rpr.color = Some(ColorRef::Theme(ThemeColor::Accent1));
+        let eff = resolve_run(&doc, &Paragraph::default(), &TextRun::default());
+        assert_eq!(eff.color, Some(Color::new([0x44, 0x72, 0xC4])));
+
+        // 直接格式化的显式 RGB 覆盖主题引用。
+        let mut run = TextRun::default();
+        run.rpr.color = Some(ColorRef::Rgb(Color::new([1, 2, 3])));
+        let eff = resolve_run(&doc, &Paragraph::default(), &run);
+        assert_eq!(eff.color, Some(Color::new([1, 2, 3])));
+
+        // auto:显式设置但解析为 None(渲染侧按黑),仍覆盖继承色。
+        let mut run = TextRun::default();
+        run.rpr.color = Some(ColorRef::Auto);
+        let eff = resolve_run(&doc, &Paragraph::default(), &run);
+        assert_eq!(eff.color, None);
+    }
+
+    /// 直接格式化优先:direct sz / jc 覆盖样式链与 docDefaults。
+    #[test]
+    fn direct_formatting_wins_for_value_props() {
+        let mut doc = doc_with_styles(vec![(
+            "S1",
+            para_style(
+                None,
+                RunProps {
+                    sz: Some(16.0),
+                    ..RunProps::default()
+                },
+                ParaProps {
+                    jc: Some(Justification::Center),
+                },
+            ),
+        )]);
+        doc.styles.doc_default_rpr.sz = Some(11.0);
+        let mut para = styled_para(Some("S1"));
+        para.align = Some("right".into());
+        let mut run = TextRun::default();
+        run.rpr.sz = Some(9.0);
+        assert_eq!(resolve_run(&doc, &para, &run).size_pt, 9.0);
+        assert_eq!(resolve_para(&doc, &para).align, Justification::Right);
+    }
+
+    /// 表格样式 overlay:tblStyle 链插在 docDefaults 与段落样式之间;段落样式仍可覆盖;
+    /// 表格样式的 toggle 参与 XOR 计数。
+    #[test]
+    fn table_style_overlay_sits_between_defaults_and_para_style() {
+        let doc = doc_with_styles(vec![
+            (
+                "TStyle",
+                Style {
+                    kind: StyleKind::Table,
+                    rpr: RunProps {
+                        sz: Some(9.0),
+                        b: Some(true),
+                        ..RunProps::default()
+                    },
+                    ppr: ParaProps {
+                        jc: Some(Justification::Center),
+                    },
+                    ..Style::default()
+                },
+            ),
+            (
+                "CellPara",
+                para_style(
+                    None,
+                    RunProps {
+                        sz: Some(10.0),
+                        ..RunProps::default()
+                    },
+                    ParaProps::default(),
+                ),
+            ),
+        ]);
+        let table = Table {
+            style: Some("TStyle".into()),
+            ..Table::default()
+        };
+
+        // 无段落样式:表格样式生效(字号/对齐/粗体)。
+        let para = Paragraph::default();
+        let eff = resolve_run_in_table(&doc, &table, &para, &TextRun::default());
+        assert_eq!(eff.size_pt, 9.0);
+        assert!(eff.bold, "表格样式的 b=true 计入 XOR(奇数)");
+        assert_eq!(
+            resolve_para_in_table(&doc, &table, &para).align,
+            Justification::Center
+        );
+
+        // 段落样式覆盖表格样式的值属性。
+        let para = styled_para(Some("CellPara"));
+        let eff = resolve_run_in_table(&doc, &table, &para, &TextRun::default());
+        assert_eq!(eff.size_pt, 10.0);
+    }
+
+    /// jc 归一化:left/start/center/right/end/both/distribute;未知值容错为未设置。
+    #[test]
+    fn justification_normalizes_jc_values() {
+        assert_eq!(Justification::from_attr("left"), Some(Justification::Left));
+        assert_eq!(Justification::from_attr("start"), Some(Justification::Left));
+        assert_eq!(
+            Justification::from_attr("center"),
+            Some(Justification::Center)
+        );
+        assert_eq!(
+            Justification::from_attr("right"),
+            Some(Justification::Right)
+        );
+        assert_eq!(Justification::from_attr("end"), Some(Justification::Right));
+        assert_eq!(
+            Justification::from_attr("both"),
+            Some(Justification::Justify)
+        );
+        assert_eq!(
+            Justification::from_attr("distribute"),
+            Some(Justification::Distribute)
+        );
+        assert_eq!(Justification::from_attr("wat"), None);
+    }
+}

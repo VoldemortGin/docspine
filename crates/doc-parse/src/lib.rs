@@ -62,8 +62,24 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedDoc> {
     // 3) 走 w:body -> 块序列(段落 + 表格,表格是重点)+ 节序列(sectPr 页面几何)。
     let (body, sections) = xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index);
 
+    // 4) 跨部件表(C-5):styles.xml -> 样式表、theme1.xml -> 主题;部件缺失时为空缺省
+    //    (有效样式解析器落到 Word 内置兜底)。级联合并在 doc-core::style,这里只机械搬运。
+    let styles = pkg
+        .styles_xml_str()
+        .map(|s| xml::styles::parse(&s))
+        .unwrap_or_default();
+    let theme = pkg
+        .theme_xml_str()
+        .map(|s| xml::theme::parse(&s))
+        .unwrap_or_default();
+
     Ok(ParsedDoc {
-        document: Document { body, sections },
+        document: Document {
+            body,
+            sections,
+            styles,
+            theme,
+        },
         media,
     })
 }

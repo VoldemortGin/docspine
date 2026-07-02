@@ -8,6 +8,7 @@ pub mod error;
 pub mod export;
 pub mod geom;
 pub mod model;
+pub mod style;
 
 pub use error::{DocError, Result};
 pub use geom::{
@@ -17,4 +18,8 @@ pub use geom::{
 pub use model::{
     Block, BreakKind, Cell, Color, Document, Orientation, PageMargins, Paragraph, Picture, Row,
     RunSegment, Section, Table, TextRun, VMerge,
+};
+pub use style::{
+    resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveParaProps,
+    EffectiveRunProps, StyleTable, StyleWarning, Theme,
 };
