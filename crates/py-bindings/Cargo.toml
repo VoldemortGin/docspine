@@ -19,6 +19,10 @@ crate-type = ["cdylib", "rlib"]
 # lean structural-parse-only wheel needs no ONNX runtime; `maturin develop
 # --features ocr` (and the release CI) turn it on.
 ocr = ["dep:doc-ocr"]
+# `pdf` compiles in the doc-render bridge (pdf-typeset flow-layout engine, git
+# dep on pdfspine) exposing `Document.to_pdf/save_pdf`. On in the release wheel
+# via `[tool.maturin] features`, mirroring `ocr`.
+pdf = ["dep:doc-render"]
 # Legacy binary `.doc` probing (OLE/CFB) — forwarded to doc-parse's feature.
 legacy-doc = ["doc-parse/legacy-doc"]
 
@@ -26,4 +30,5 @@ legacy-doc = ["doc-parse/legacy-doc"]
 doc-core = { workspace = true }
 doc-parse = { workspace = true }
 doc-ocr = { workspace = true, optional = true }
+doc-render = { workspace = true, optional = true }
 pyo3 = { workspace = true, features = ["abi3-py311", "extension-module"] }

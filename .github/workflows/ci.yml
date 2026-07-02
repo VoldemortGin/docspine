@@ -38,8 +38,8 @@ jobs:
         # py-bindings can't standalone-link (extension-module); exclude it from the
         # plain `cargo test` and type-check it separately instead.
         run: |
-          cargo test -p doc-core -p doc-parse -p doc-ocr --all-features
-          cargo check -p py-bindings --features ocr,legacy-doc
+          cargo test -p doc-core -p doc-parse -p doc-ocr -p doc-render --all-features
+          cargo check -p py-bindings --features ocr,legacy-doc,pdf
 
   python:
     name: python (maturin develop + pytest)

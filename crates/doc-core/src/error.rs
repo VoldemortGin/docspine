@@ -30,6 +30,10 @@ pub enum DocError {
     /// 图片 OCR 失败(由 `doc-ocr` 把 `ocrspine::OcrError` 映射过来)。
     #[error("ocr error: {0}")]
     Ocr(String),
+
+    /// PDF 渲染/序列化失败(由 `doc-render` 把 pdf-typeset 引擎错误映射过来)。
+    #[error("render error: {0}")]
+    Render(String),
 }
 
 impl DocError {
@@ -42,6 +46,7 @@ impl DocError {
             DocError::InvalidArgument(_) => "invalid-argument",
             DocError::Io(_) => "io",
             DocError::Ocr(_) => "ocr",
+            DocError::Render(_) => "render",
         }
     }
 }

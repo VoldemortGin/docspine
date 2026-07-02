@@ -279,8 +279,7 @@ mod tests {
         Paragraph {
             runs: vec![TextRun::from_text(text)],
             style: style.map(str::to_string),
-            align: None,
-            list_level: None,
+            ..Paragraph::default()
         }
     }
 

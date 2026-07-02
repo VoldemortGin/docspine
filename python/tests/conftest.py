@@ -27,6 +27,10 @@ _CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
 </Types>"""
 
+# styles / theme 部件的 Content-Types Override(build_docx 按需拼接)。
+_STYLES_OVERRIDE = '  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+_THEME_OVERRIDE = '  <Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'
+
 _ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
@@ -171,18 +175,37 @@ _DOC_HEADER = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"""
 
 
-def build_docx(document_xml: str, *, image: bytes | None = None) -> bytes:
+def build_docx(
+    document_xml: str,
+    *,
+    image: bytes | None = None,
+    styles_xml: str | None = None,
+    theme_xml: str | None = None,
+) -> bytes:
     """用纯 ``zipfile`` 把给定的 ``word/document.xml`` 包成最小合法 ``.docx``。
 
     ``image`` 给定时写入 ``word/media/image1.png``(主文档关系把 ``rId10`` 指向它);
-    不给时该关系悬空、无伤(图片测试才用)。
+    不给时该关系悬空、无伤(图片测试才用)。``styles_xml`` / ``theme_xml`` 给定时
+    写入对应部件(含 Content-Types Override),供样式级联 / 导出测试合成带样式的文档。
     """
+    types = _CONTENT_TYPES
+    overrides = "".join(
+        f"\n{line}"
+        for part, line in [(styles_xml, _STYLES_OVERRIDE), (theme_xml, _THEME_OVERRIDE)]
+        if part is not None
+    )
+    if overrides:
+        types = types.replace("\n</Types>", f"{overrides}\n</Types>")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        z.writestr("[Content_Types].xml", types)
         z.writestr("_rels/.rels", _ROOT_RELS)
         z.writestr("word/document.xml", document_xml)
         z.writestr("word/_rels/document.xml.rels", _DOC_RELS)
+        if styles_xml is not None:
+            z.writestr("word/styles.xml", styles_xml)
+        if theme_xml is not None:
+            z.writestr("word/theme/theme1.xml", theme_xml)
         if image is not None:
             z.writestr("word/media/image1.png", image)
     return buf.getvalue()
@@ -303,6 +326,71 @@ _CONTENT_LOSS_DOCUMENT = (
   </w:body>
 </w:document>"""
 )
+
+
+# PDF 导出端到端 fixture(C-1/C-4):Heading1(样式级联)+ 两段直格正文(bold /
+# italic / color)+ 无边框表格 + 段内 sectPr 分节(第二节 A4 横向换页面几何)。
+_PDF_EXPORT_DOCUMENT = (
+    _DOC_HEADER
+    + """
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Export Chapter</w:t></w:r></w:p>
+    <w:p>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>Bold lead </w:t></w:r>
+      <w:r><w:rPr><w:i/><w:color w:val="FF0000"/></w:rPr><w:t>with red italic tail.</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>Second body paragraph flows plainly after it.</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tblGrid><w:gridCol w:w="3600"/><w:gridCol w:w="3600"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:shd w:fill="D9E2F3"/></w:tcPr><w:p><w:r><w:t>Alpha</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Beta</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>Gamma</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Delta</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p>
+      <w:pPr>
+        <w:sectPr>
+          <w:pgSz w:w="12240" w:h="15840"/>
+          <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"
+                   w:header="720" w:footer="720" w:gutter="0"/>
+        </w:sectPr>
+      </w:pPr>
+    </w:p>
+    <w:p><w:r><w:t>Landscape section closes the document.</w:t></w:r></w:p>
+    <w:sectPr>
+      <w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>
+      <w:pgMar w:top="720" w:right="1080" w:bottom="720" w:left="1080"
+               w:header="500" w:footer="400" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+)
+
+# 导出 fixture 的 styles.xml:docDefaults 22 半磅(11pt)+ Normal(缺省)+
+# Heading1(basedOn Normal:b / 32 半磅 = 16pt)。零 theme(落硬编码兜底)。
+_PDF_EXPORT_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault>
+    <w:pPrDefault><w:pPr/></w:pPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/>
+    <w:basedOn w:val="Normal"/>
+    <w:rPr><w:b/><w:sz w:val="32"/></w:rPr>
+  </w:style>
+</w:styles>"""
+
+
+@pytest.fixture(scope="session")
+def pdf_export_docx_bytes() -> bytes:
+    """PDF 导出端到端 fixture(C-1/C-4):标题 + 直格正文 + 表格 + 两节换几何。"""
+    return build_docx(_PDF_EXPORT_DOCUMENT, styles_xml=_PDF_EXPORT_STYLES)
 
 
 @pytest.fixture(scope="session")

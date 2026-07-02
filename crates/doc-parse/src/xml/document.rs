@@ -110,11 +110,12 @@ fn parse_body<R: std::io::BufRead>(
                     _ => skip_element(reader),
                 }
             }
-            Ok(Event::Empty(e)) => {
-                if local_name(e.name().as_ref()) == b"sectPr" {
-                    trailing = Some(Section::default());
-                }
-            }
+            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+                b"sectPr" => trailing = Some(Section::default()),
+                // 自闭合 <w:p/>:空段落(Word 对空段的常见写法),占一个块(渲染占一行)。
+                b"p" => blocks.push(Block::Paragraph(Paragraph::default())),
+                _ => {}
+            },
             Ok(Event::End(_)) => break, // body 结束。
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -163,7 +164,12 @@ fn parse_block_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx)
                     _ => skip_element(reader),
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            Ok(Event::Empty(e)) => {
+                // 自闭合 <w:p/>:空段落照收(占一行)。
+                if local_name(e.name().as_ref()) == b"p" {
+                    blocks.push(Block::Paragraph(Paragraph::default()));
+                }
+            }
             Ok(Event::End(_)) => break, // 容器结束。
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -300,11 +306,13 @@ fn parse_paragraph<R: std::io::BufRead>(
 }
 
 /// 解析 `w:pPr`(段落属性):`w:pStyle`、`w:jc`、`w:numPr>w:ilvl`、`w:sectPr`(节边界,
-/// 作为返回值交给段落层)。已消费 `<w:pPr>` 起始标签。
+/// 作为返回值交给段落层),以及经共享的 [`props::apply_ppr_prop`] 写进 `para.ppr` 的
+/// 直接格式化片段(spacing / ind / pBdr / shd / keep 系列,C-4)。已消费 `<w:pPr>` 起始标签。
 ///
 /// 与 [`parse_rpr`] 同构地做**深度计数**:嵌套容器(如 `w:numPr`)的结束标签不会再把
 /// pPr 的遍历提前打断——修复过去 `w:numPr` / `w:sectPr` 之后的属性(如 `w:jc`)丢失、
-/// 甚至整段后续正文被截断的内容丢失缺陷。
+/// 甚至整段后续正文被截断的内容丢失缺陷。两个例外子树与共享解析器一致:`w:pBdr` 走
+/// 专用子 walker;pPr 内嵌的 `w:rPr`(段落标记符属性,内含同名异义元素)整体跳过。
 fn parse_ppr<R: std::io::BufRead>(reader: &mut Reader<R>, para: &mut Paragraph) -> Option<Section> {
     let mut sect = None;
     let mut depth = 0usize;
@@ -317,17 +325,20 @@ fn parse_ppr<R: std::io::BufRead>(reader: &mut Reader<R>, para: &mut Paragraph) 
                     sect = Some(Section::default());
                 } else {
                     apply_ppr_prop(&e, para);
+                    props::apply_ppr_prop(&e, &mut para.ppr);
                 }
             }
-            Ok(Event::Start(e)) => {
-                if local_name(e.name().as_ref()) == b"sectPr" {
-                    // 子 walker 消费整个 sectPr 子树,深度不受影响。
-                    sect = Some(parse_sectpr(reader));
-                } else {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                // 子 walker 消费整个 sectPr 子树,深度不受影响。
+                b"sectPr" => sect = Some(parse_sectpr(reader)),
+                b"pBdr" => props::parse_pbdr(reader, &mut para.ppr),
+                b"rPr" => skip_element(reader),
+                _ => {
                     apply_ppr_prop(&e, para);
+                    props::apply_ppr_prop(&e, &mut para.ppr);
                     depth += 1;
                 }
-            }
+            },
             Ok(Event::End(_)) => {
                 if depth == 0 {
                     break; // pPr 自身结束。
@@ -343,7 +354,8 @@ fn parse_ppr<R: std::io::BufRead>(reader: &mut Reader<R>, para: &mut Paragraph) 
     sect
 }
 
-/// 把一个 pPr 子元素(`Empty` 或 `Start`)的属性应用到段落上。
+/// 把一个 pPr 子元素(`Empty` 或 `Start`)的**便利字段**应用到段落上
+/// (pStyle / 原样 jc / ilvl;归一化属性走共享的 [`props::apply_ppr_prop`])。
 fn apply_ppr_prop(e: &BytesStart, para: &mut Paragraph) {
     match local_name(e.name().as_ref()) {
         b"pStyle" => para.style = attr_of(e, b"val").or(para.style.take()),
@@ -517,7 +529,7 @@ fn apply_direct_rpr(run: &mut TextRun, rpr: RunProps) {
     run.size_pt = rpr.sz;
     run.bold = rpr.b == Some(true);
     run.italic = rpr.i == Some(true);
-    run.underline = rpr.u == Some(true);
+    run.underline = matches!(rpr.u, Some(k) if k.is_on());
     run.color = match rpr.color {
         Some(ColorRef::Rgb(c)) => Some(c),
         _ => None, // auto / theme 引用:便利字段维持 None(有效色走解析器)。
@@ -677,7 +689,12 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> C
                     _ => skip_element(reader),
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            Ok(Event::Empty(e)) => {
+                // 自闭合 <w:p/>:空段落照收(单元格常见,渲染占一行)。
+                if local_name(e.name().as_ref()) == b"p" {
+                    cell.blocks.push(Block::Paragraph(Paragraph::default()));
+                }
+            }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,

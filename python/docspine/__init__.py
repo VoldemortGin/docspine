@@ -21,6 +21,7 @@ from ._core import (
     Document,
     DocError,
     DocOcrError,
+    DocRenderError,
     DocUnsupportedError,
     DocXmlError,
     DocZipError,
@@ -114,5 +115,6 @@ __all__ = [
     "DocXmlError",
     "DocUnsupportedError",
     "DocOcrError",
+    "DocRenderError",
     "__version__",
 ]

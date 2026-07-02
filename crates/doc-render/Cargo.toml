@@ -1,0 +1,16 @@
+[package]
+name = "doc-render"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "docspine PDF renderer: maps the doc-core IR onto the pdf-typeset flow-layout engine (PRD-PDF-EXPORT C-1)."
+
+[dependencies]
+doc-core = { workspace = true }
+# 家族共享排版引擎(pdfspine Phase A)。经 workspace 的 git dep + 钉死 rev 进来;
+# 它 re-export 了消费者需要的 pdf-edit/pdf-core 面,不要再直接依赖那些 crate。
+pdf-typeset = { workspace = true }

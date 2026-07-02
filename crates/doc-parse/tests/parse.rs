@@ -494,3 +494,149 @@ fn probe_doc_detects_word_stream_in_cfb() {
     );
     assert!(probe.streams.iter().any(|s| s.contains("WordDocument")));
 }
+
+// ============================================================ 直接格式化补齐(C-4)
+
+/// pPr 直接格式化:spacing / ind / shd / keep 系列 + pBdr 落进 `Paragraph.ppr`;
+/// 便利字段(style/align)契约不变。
+#[test]
+fn direct_ppr_spacing_indent_borders_shading_and_flags() {
+    use doc_core::style::{ColorRef, LineSpacingRule};
+
+    let parsed = parse_body_xml(
+        r#"<w:p>
+             <w:pPr>
+               <w:pStyle w:val="Body"/>
+               <w:keepNext/>
+               <w:keepLines w:val="0"/>
+               <w:pageBreakBefore/>
+               <w:widowControl w:val="0"/>
+               <w:pBdr>
+                 <w:top w:val="single" w:sz="8" w:space="2" w:color="FF0000"/>
+                 <w:bottom w:val="double" w:sz="4" w:space="0" w:color="auto"/>
+               </w:pBdr>
+               <w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/>
+               <w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>
+               <w:ind w:left="720" w:right="360" w:hanging="360"/>
+               <w:contextualSpacing/>
+               <w:jc w:val="both"/>
+             </w:pPr>
+             <w:r><w:t>styled</w:t></w:r>
+           </w:p>"#,
+    );
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected a paragraph");
+    };
+    // 便利字段不变。
+    assert_eq!(p.style.as_deref(), Some("Body"));
+    assert_eq!(p.align.as_deref(), Some("both"));
+
+    let ppr = &p.ppr;
+    assert_eq!(ppr.space_before, Some(240));
+    assert_eq!(ppr.space_after, Some(120));
+    assert_eq!(ppr.line, Some(LineSpacingRule::Auto(360)));
+    assert_eq!(ppr.ind_left, Some(720));
+    assert_eq!(ppr.ind_right, Some(360));
+    assert_eq!(ppr.ind_hanging, Some(360));
+    assert_eq!(ppr.ind_first_line, None);
+    assert_eq!(ppr.keep_next, Some(true));
+    assert_eq!(ppr.keep_lines, Some(false));
+    assert_eq!(ppr.page_break_before, Some(true));
+    assert_eq!(ppr.widow_control, Some(false));
+    assert_eq!(ppr.contextual_spacing, Some(true));
+    assert_eq!(
+        ppr.jc,
+        Some(doc_core::style::Justification::Justify),
+        "归一化 jc 与原样 align 并存"
+    );
+
+    let top = ppr.borders.top.as_ref().expect("top border");
+    assert_eq!(top.val, "single");
+    assert_eq!(top.sz_eighth_pt, 8);
+    assert_eq!(top.space_pt, 2);
+    assert_eq!(
+        top.color,
+        Some(ColorRef::Rgb(doc_core::model::Color::new([0xFF, 0, 0])))
+    );
+    let bottom = ppr.borders.bottom.as_ref().expect("bottom border");
+    assert_eq!(bottom.val, "double");
+    assert_eq!(bottom.color, Some(ColorRef::Auto));
+    assert!(ppr.borders.left.is_none());
+    assert_eq!(
+        ppr.shd_fill,
+        Some(ColorRef::Rgb(doc_core::model::Color::new([
+            0xD9, 0xE2, 0xF3
+        ])))
+    );
+}
+
+/// pBdr 之后的 pPr 属性(jc)不被子树吞掉;pPr 内嵌 rPr(段落标记符属性,含同名异义的
+/// w:spacing 字符间距)不污染段落属性。
+#[test]
+fn ppr_after_pbdr_and_paragraph_mark_rpr_do_not_bleed() {
+    let parsed = parse_body_xml(
+        r#"<w:p>
+             <w:pPr>
+               <w:pBdr><w:top w:val="single" w:sz="4"/></w:pBdr>
+               <w:rPr><w:spacing w:val="20"/><w:sz w:val="96"/></w:rPr>
+               <w:jc w:val="center"/>
+             </w:pPr>
+             <w:r><w:t>x</w:t></w:r>
+           </w:p>"#,
+    );
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(p.align.as_deref(), Some("center"), "pBdr 后属性不丢");
+    assert!(p.ppr.borders.top.is_some());
+    // 段落标记符 rPr 的 w:spacing(字符间距)不得写进段落 spacing。
+    assert_eq!(p.ppr.space_before, None);
+    assert_eq!(p.ppr.space_after, None);
+    // run 自身的字号不受段落标记符 rPr 影响。
+    assert_eq!(p.runs[0].size_pt, None);
+}
+
+/// rPr 直接格式化补齐:rStyle / szCs / 下划线种类 / highlight / vertAlign 落进 `run.rpr`;
+/// underline 便利字段按种类折叠(none → false)。
+#[test]
+fn direct_rpr_rstyle_szcs_underline_kind_highlight_vert_align() {
+    use doc_core::style::{Highlight, UnderlineKind, VertAlign};
+
+    let parsed = parse_body_xml(
+        r#"<w:p>
+             <w:r>
+               <w:rPr>
+                 <w:rStyle w:val="Emphasis"/>
+                 <w:sz w:val="20"/><w:szCs w:val="24"/>
+                 <w:u w:val="double"/>
+                 <w:highlight w:val="yellow"/>
+                 <w:vertAlign w:val="superscript"/>
+               </w:rPr>
+               <w:t>rich</w:t>
+             </w:r>
+             <w:r>
+               <w:rPr><w:u w:val="none"/><w:highlight w:val="none"/></w:rPr>
+               <w:t>plain</w:t>
+             </w:r>
+           </w:p>"#,
+    );
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected a paragraph");
+    };
+    let rich = &p.runs[0].rpr;
+    assert_eq!(rich.r_style.as_deref(), Some("Emphasis"));
+    assert_eq!(rich.sz, Some(10.0));
+    assert_eq!(rich.sz_cs, Some(12.0));
+    assert_eq!(rich.u, Some(UnderlineKind::Double));
+    assert_eq!(
+        rich.highlight,
+        Some(Highlight::On(doc_core::model::Color::new([0xFF, 0xFF, 0])))
+    );
+    assert_eq!(rich.vert_align, Some(VertAlign::Superscript));
+    assert!(p.runs[0].underline, "非 none 种类折叠为 true");
+
+    let plain = &p.runs[1].rpr;
+    assert_eq!(plain.u, Some(UnderlineKind::None), "显式关保真");
+    assert_eq!(plain.highlight, Some(Highlight::Off));
+    assert!(!p.runs[1].underline);
+}

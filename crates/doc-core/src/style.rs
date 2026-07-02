@@ -11,8 +11,9 @@
 //!
 //! **toggle 属性(b/i/caps/smallCaps/strike/vanish)** 例外(ECMA-376 §17.7.3):
 //! 直接格式化是绝对开关;否则以 docDefaults 为基值,与样式链上 `true` 出现次数的
-//! **奇偶**做异或(样式里显式的 `false` 不参与计数)。字符样式(`w:rStyle`)在
-//! 直接格式化侧尚未捕获(C-4),届时其 basedOn 链同样进入异或计数。
+//! **奇偶**做异或(样式里显式的 `false` 不参与计数)。字符样式(`w:rStyle`,C-4 起
+//! 经 [`RunProps::r_style`] 捕获)的 basedOn 链插在段落样式链之后、直接格式化之前,
+//! 同样进入异或计数。
 //!
 //! **theme 间接引用**:`rFonts@asciiTheme="minorHAnsi"` 等经 [`Theme::fonts`]
 //! (fontScheme)解成实际 family 名;`w:color@themeColor="accent1"` 经
@@ -23,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::geom::{twips_to_points, Twips};
 use crate::model::{Color, Document, Paragraph, Table, TextRun};
 
 // ============================================================ Word 内置缺省(硬编码兜底)
@@ -259,16 +261,169 @@ pub enum ColorRef {
     Auto,
 }
 
+/// 下划线样式(`w:u@w:val`,ECMA-376 ST_Underline 的常用子集)。
+/// `None` 是「显式关」(能盖掉样式链);未知的非 `none` 取值容错为 [`UnderlineKind::Single`]
+/// (渲染侧 v1 只画单线,种类保真供后续扩展)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnderlineKind {
+    /// 显式无下划线(`val="none"`)。
+    None,
+    /// 单线(缺省)。
+    #[default]
+    Single,
+    Double,
+    Thick,
+    Dotted,
+    Dash,
+    DotDash,
+    DotDotDash,
+    Wave,
+    /// 仅词下划线(空格不画)。
+    Words,
+}
+
+impl UnderlineKind {
+    /// 解析 `w:u@w:val`。未知非 `none` 值容错为 `Single`(下划线开着,种类近似)。
+    pub fn from_attr(s: &str) -> Self {
+        match s {
+            "none" => UnderlineKind::None,
+            "double" => UnderlineKind::Double,
+            "thick" => UnderlineKind::Thick,
+            "dotted" | "dottedHeavy" => UnderlineKind::Dotted,
+            "dash" | "dashedHeavy" | "dashLong" | "dashLongHeavy" => UnderlineKind::Dash,
+            "dotDash" | "dashDotHeavy" => UnderlineKind::DotDash,
+            "dotDotDash" | "dashDotDotHeavy" => UnderlineKind::DotDotDash,
+            "wave" | "wavyHeavy" | "wavyDouble" => UnderlineKind::Wave,
+            "words" => UnderlineKind::Words,
+            _ => UnderlineKind::Single, // "single" 与未知值。
+        }
+    }
+
+    /// 该种类是否画下划线(`None` 以外都画)。
+    pub fn is_on(self) -> bool {
+        self != UnderlineKind::None
+    }
+}
+
+/// 纵向对齐(`w:vertAlign@w:val`):上标 / 下标 / 基线。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VertAlign {
+    #[default]
+    Baseline,
+    Superscript,
+    Subscript,
+}
+
+impl VertAlign {
+    /// 解析 `w:vertAlign@w:val`。未知值 → `None`(容错,当未设置)。
+    pub fn from_attr(s: &str) -> Option<Self> {
+        Some(match s {
+            "baseline" => VertAlign::Baseline,
+            "superscript" => VertAlign::Superscript,
+            "subscript" => VertAlign::Subscript,
+            _ => return None,
+        })
+    }
+}
+
+/// 高亮(`w:highlight@w:val`,ST_HighlightColor 具名色)。`Off`(`val="none"`)是
+/// 「显式关」,能盖掉样式链上继承的高亮。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Highlight {
+    /// 显式无高亮(`val="none"`)。
+    Off,
+    /// 具名高亮色(解析时已折成 RGB)。
+    On(Color),
+}
+
+impl Highlight {
+    /// 解析 `w:highlight@w:val` 的具名色(ECMA-376 §17.18.40 ST_HighlightColor)。
+    /// 未知名容错为 `None`(当未设置)。
+    pub fn from_attr(s: &str) -> Option<Self> {
+        let rgb: [u8; 3] = match s {
+            "none" => return Some(Highlight::Off),
+            "black" => [0x00, 0x00, 0x00],
+            "blue" => [0x00, 0x00, 0xFF],
+            "cyan" => [0x00, 0xFF, 0xFF],
+            "darkBlue" => [0x00, 0x00, 0x8B],
+            "darkCyan" => [0x00, 0x8B, 0x8B],
+            "darkGray" => [0xA9, 0xA9, 0xA9],
+            "darkGreen" => [0x00, 0x64, 0x00],
+            "darkMagenta" => [0x80, 0x00, 0x80],
+            "darkRed" => [0x8B, 0x00, 0x00],
+            "darkYellow" => [0x80, 0x80, 0x00],
+            "green" => [0x00, 0xFF, 0x00],
+            "lightGray" => [0xD3, 0xD3, 0xD3],
+            "magenta" => [0xFF, 0x00, 0xFF],
+            "red" => [0xFF, 0x00, 0x00],
+            "white" => [0xFF, 0xFF, 0xFF],
+            "yellow" => [0xFF, 0xFF, 0x00],
+            _ => return None,
+        };
+        Some(Highlight::On(Color::new(rgb)))
+    }
+}
+
+/// 一条边框(CT_Border:`w:pBdr` 的 `w:top` 等;C-7 起表格边框复用)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Border {
+    /// 线型(`@w:val`,`"single"`/`"double"`/`"none"` … 原样保留,容错)。
+    pub val: String,
+    /// 线宽(`@w:sz`,单位 1/8 磅)。
+    pub sz_eighth_pt: u32,
+    /// 到正文的留白(`@w:space`,磅)。
+    pub space_pt: u32,
+    /// 线色(`@w:color` / `@w:themeColor`)。
+    pub color: Option<ColorRef>,
+}
+
+/// 段落边框(`w:pPr > w:pBdr`)的各边;每边独立参与级联(就近覆盖)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParaBorders {
+    pub top: Option<Border>,
+    pub bottom: Option<Border>,
+    pub left: Option<Border>,
+    pub right: Option<Border>,
+    /// 相邻同边框段落之间的横线(`w:between`)。
+    pub between: Option<Border>,
+}
+
+impl ParaBorders {
+    /// 是否任意一边有(非 `none` 线型的)边框。
+    pub fn any(&self) -> bool {
+        [
+            &self.top,
+            &self.bottom,
+            &self.left,
+            &self.right,
+            &self.between,
+        ]
+        .into_iter()
+        .any(|b| b.as_ref().is_some_and(|b| b.val != "none"))
+    }
+}
+
+/// 行距规则(`w:spacing@w:line` + `@w:lineRule`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineSpacingRule {
+    /// 行高倍数(`lineRule="auto"` 或缺省;`line` 单位 1/240 行,240 = 单倍)。
+    Auto(i64),
+    /// 最小行高(`lineRule="atLeast"`,twip)。
+    AtLeast(Twips),
+    /// 精确行高(`lineRule="exact"`,twip)。
+    Exact(Twips),
+}
+
 /// 一个 rPr 片段:**全 Option**,能区分「未设置(继承)」与「显式关」。
 /// docDefaults / 样式定义 / 直接格式化共用同一形状(C-4/C-5 的共享 prop-struct)。
-/// 本轮覆盖既有解析语法 + C-5 所需(toggle / 4 槽字体 / theme 引用);
-/// szCs / 下划线样式 / highlight / vertAlign 等在 C-4 扩展。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RunProps {
     /// 四槽字体(`w:rFonts`)。
     pub fonts: FontSlots,
     /// 字号(磅;`w:sz` 半磅已除 2)。值属性:就近覆盖。
     pub sz: Option<f32>,
+    /// 复杂文种字号(磅;`w:szCs` 半磅已除 2)。值属性。
+    pub sz_cs: Option<f32>,
     /// 粗体(`w:b`)。**toggle 属性**:XOR 语义。
     pub b: Option<bool>,
     /// 斜体(`w:i`)。toggle。
@@ -281,16 +436,23 @@ pub struct RunProps {
     pub strike: Option<bool>,
     /// 隐藏文字(`w:vanish`)。toggle。
     pub vanish: Option<bool>,
-    /// 下划线(`w:u`;`val="none"` → `Some(false)`)。值属性(样式种类在 C-4 扩展)。
-    pub u: Option<bool>,
+    /// 下划线(`w:u`;`val="none"` → `Some(UnderlineKind::None)` = 显式关)。值属性。
+    pub u: Option<UnderlineKind>,
     /// 文字颜色(`w:color`)。值属性。
     pub color: Option<ColorRef>,
+    /// 高亮(`w:highlight`;`val="none"` → `Some(Highlight::Off)` = 显式关)。值属性。
+    pub highlight: Option<Highlight>,
+    /// 纵向对齐(`w:vertAlign`:上标/下标/基线)。值属性。
+    pub vert_align: Option<VertAlign>,
+    /// 字符样式引用(`w:rStyle@w:val`;仅直接格式化侧有意义)。其 basedOn 链插在
+    /// 段落样式链之后、直接格式化之前参与级联与 toggle 计数(C-4)。
+    pub r_style: Option<String>,
 }
 
 impl RunProps {
     /// 值属性的就近覆盖合并:`other`(级联链上更靠近正文的一层)的 `Some` 覆盖本层。
     /// **toggle 属性(b/i/caps/smallCaps/strike/vanish)不在此处理**(XOR 语义,
-    /// 见 [`resolve_run`]),这里一并搬运只是为了保留「最后一层的显式值」不参与判定。
+    /// 见 [`resolve_run`]);`r_style` 也不搬运(样式定义里无意义)。
     fn overlay_values(&mut self, other: &RunProps) {
         for (slot, o) in [
             (&mut self.fonts.ascii, &other.fonts.ascii),
@@ -305,21 +467,96 @@ impl RunProps {
         if other.sz.is_some() {
             self.sz = other.sz;
         }
+        if other.sz_cs.is_some() {
+            self.sz_cs = other.sz_cs;
+        }
         if other.u.is_some() {
             self.u = other.u;
         }
         if other.color.is_some() {
             self.color = other.color;
         }
+        if other.highlight.is_some() {
+            self.highlight = other.highlight;
+        }
+        if other.vert_align.is_some() {
+            self.vert_align = other.vert_align;
+        }
     }
 }
 
-/// 一个 pPr 片段(样式定义与 docDefaults 共用)。本轮语法只有对齐(`w:jc`);
-/// spacing / ind / pBdr / shd / keep 系列在 C-4 扩展进来。
+/// 一个 pPr 片段(样式定义 / docDefaults / 直接格式化共用):**全 Option**,每个
+/// 子属性独立参与级联(就近覆盖)。C-4 起覆盖 spacing / ind / pBdr / shd / keep 系列。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParaProps {
     /// 对齐(`w:jc@w:val`,归一化枚举)。值属性。
     pub jc: Option<Justification>,
+    /// 段前间距(`w:spacing@w:before`,twip)。
+    pub space_before: Option<Twips>,
+    /// 段后间距(`w:spacing@w:after`,twip)。
+    pub space_after: Option<Twips>,
+    /// 行距(`w:spacing@w:line` + `@w:lineRule`)。
+    pub line: Option<LineSpacingRule>,
+    /// 左缩进(`w:ind@w:left`,兼 `@w:start`,twip)。
+    pub ind_left: Option<Twips>,
+    /// 右缩进(`w:ind@w:right`,兼 `@w:end`,twip)。
+    pub ind_right: Option<Twips>,
+    /// 首行缩进(`w:ind@w:firstLine`,twip;与 hanging 互斥,hanging 优先)。
+    pub ind_first_line: Option<Twips>,
+    /// 悬挂缩进(`w:ind@w:hanging`,twip:首行相对 left **回退**该量)。
+    pub ind_hanging: Option<Twips>,
+    /// 段落边框(`w:pBdr`),每边独立级联。
+    pub borders: ParaBorders,
+    /// 段落底纹填充(`w:shd@w:fill` / `@w:themeFill`;`"auto"` → `Auto` = 显式无底纹)。
+    pub shd_fill: Option<ColorRef>,
+    /// 与下段同页(`w:keepNext`)。
+    pub keep_next: Option<bool>,
+    /// 段中不分页(`w:keepLines`)。
+    pub keep_lines: Option<bool>,
+    /// 段前分页(`w:pageBreakBefore`)。
+    pub page_break_before: Option<bool>,
+    /// 孤行控制(`w:widowControl`,Word 缺省开)。
+    pub widow_control: Option<bool>,
+    /// 同样式相邻段落间不加间距(`w:contextualSpacing`)。
+    pub contextual_spacing: Option<bool>,
+}
+
+impl ParaProps {
+    /// 值属性的就近覆盖合并(与 [`RunProps::overlay_values`] 同构;pPr 无 toggle 属性)。
+    fn overlay_values(&mut self, other: &ParaProps) {
+        macro_rules! ov {
+            ($($field:ident),+ $(,)?) => {
+                $(if other.$field.is_some() { self.$field = other.$field.clone(); })+
+            };
+        }
+        ov!(
+            jc,
+            space_before,
+            space_after,
+            line,
+            ind_left,
+            ind_right,
+            ind_first_line,
+            ind_hanging,
+            shd_fill,
+            keep_next,
+            keep_lines,
+            page_break_before,
+            widow_control,
+            contextual_spacing,
+        );
+        for (slot, o) in [
+            (&mut self.borders.top, &other.borders.top),
+            (&mut self.borders.bottom, &other.borders.bottom),
+            (&mut self.borders.left, &other.borders.left),
+            (&mut self.borders.right, &other.borders.right),
+            (&mut self.borders.between, &other.borders.between),
+        ] {
+            if o.is_some() {
+                *slot = o.clone();
+            }
+        }
+    }
 }
 
 /// 归一化的段落对齐(`w:jc`)。`left/start → Left`、`right/end → Right`、
@@ -474,22 +711,74 @@ pub struct EffectiveRunProps {
     pub font_cs: Option<String>,
     /// 字号(磅,兜底 [`DEFAULT_SIZE_PT`])。
     pub size_pt: f32,
+    /// 复杂文种字号(磅;未设时随 `size_pt`)。
+    pub size_cs_pt: f32,
     pub bold: bool,
     pub italic: bool,
+    /// 是否画下划线(`underline_kind` 非 `None`)。
     pub underline: bool,
+    /// 下划线种类(缺省 `None` = 不画;渲染侧 v1 一律画单线)。
+    pub underline_kind: UnderlineKind,
     pub strike: bool,
     pub caps: bool,
     pub small_caps: bool,
     pub vanish: bool,
     /// 文字颜色;`None` = auto/未设(渲染侧按黑)。
     pub color: Option<Color>,
+    /// 高亮底色;`None` = 无高亮。
+    pub highlight: Option<Color>,
+    /// 纵向对齐(上标/下标/基线,缺省基线)。
+    pub vert_align: VertAlign,
 }
 
-/// 一个段落的**有效**段落属性。本轮只有对齐;C-4 起扩展 spacing / indent 等。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 有效行距(twip 已换算成磅)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EffectiveLineSpacing {
+    /// 行高倍数(1.0 = 单倍,缺省)。
+    Multiple(f32),
+    /// 最小行高(磅)。
+    AtLeast(f32),
+    /// 精确行高(磅)。
+    Exact(f32),
+}
+
+impl Default for EffectiveLineSpacing {
+    fn default() -> Self {
+        EffectiveLineSpacing::Multiple(1.0)
+    }
+}
+
+/// 一个段落的**有效**段落属性(长度已换算成磅)。
+#[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveParaProps {
     /// 对齐(缺省 Left)。
     pub align: Justification,
+    /// 段前间距(磅,缺省 0)。
+    pub space_before_pt: f32,
+    /// 段后间距(磅,缺省 0)。
+    pub space_after_pt: f32,
+    /// 行距(缺省单倍)。
+    pub line_spacing: EffectiveLineSpacing,
+    /// 左缩进(磅,缺省 0)。
+    pub indent_left_pt: f32,
+    /// 右缩进(磅,缺省 0)。
+    pub indent_right_pt: f32,
+    /// 首行相对左缩进的额外缩进(磅):正 = firstLine,**负 = hanging**,缺省 0。
+    pub first_line_indent_pt: f32,
+    /// 段落边框(级联合并后的原始各边;渲染侧 v1 降级为告警)。
+    pub borders: ParaBorders,
+    /// 段落底纹填充色(theme 已解引;`None` = 无底纹)。
+    pub shading: Option<Color>,
+    /// 与下段同页。
+    pub keep_next: bool,
+    /// 段中不分页。
+    pub keep_lines: bool,
+    /// 段前分页。
+    pub page_break_before: bool,
+    /// 孤行控制(Word 缺省开)。
+    pub widow_control: bool,
+    /// 同样式相邻段落间不加间距。
+    pub contextual_spacing: bool,
 }
 
 // ============================================================ 解析器(级联合并)
@@ -618,7 +907,10 @@ fn resolve_run_props(
     run: &TextRun,
 ) -> EffectiveRunProps {
     let st = &doc.styles;
-    let chain = full_chain(st, table_style, para);
+    let mut chain = full_chain(st, table_style, para);
+    // 字符样式(`w:rStyle`)链:插在段落样式链之后、直接格式化之前(ECMA-376 §17.7.2),
+    // 同样根先派生后,并进入 toggle 的 XOR 计数。
+    chain.extend(style_chain(st, run.rpr.r_style.as_deref()));
 
     // 值属性:docDefaults → 样式链(根先)→ 直接格式化,后者的 Some 覆盖前者。
     let mut merged = st.doc_default_rpr.clone();
@@ -665,20 +957,29 @@ fn resolve_run_props(
         Some(ColorRef::Auto) | None => None, // auto/未设:渲染侧按黑。
     };
 
+    let size_pt = merged.sz.unwrap_or(DEFAULT_SIZE_PT);
+    let underline_kind = merged.u.unwrap_or(UnderlineKind::None);
     EffectiveRunProps {
         font_ascii,
         font_h_ansi,
         font_east_asia,
         font_cs,
-        size_pt: merged.sz.unwrap_or(DEFAULT_SIZE_PT),
+        size_pt,
+        size_cs_pt: merged.sz_cs.unwrap_or(size_pt),
         bold,
         italic,
-        underline: merged.u == Some(true),
+        underline: underline_kind.is_on(),
+        underline_kind,
         strike,
         caps,
         small_caps,
         vanish,
         color,
+        highlight: match merged.highlight {
+            Some(Highlight::On(c)) => Some(c),
+            Some(Highlight::Off) | None => None,
+        },
+        vert_align: merged.vert_align.unwrap_or_default(),
     }
 }
 
@@ -690,19 +991,52 @@ fn resolve_para_props(
     let st = &doc.styles;
     let chain = full_chain(st, table_style, para);
 
-    let mut jc = st.doc_default_ppr.jc;
+    // 值属性:docDefaults → 样式链(根先)→ 直接格式化(`Paragraph.ppr` 共享片段)。
+    let mut merged = st.doc_default_ppr.clone();
     for s in &chain {
-        if s.ppr.jc.is_some() {
-            jc = s.ppr.jc;
+        merged.overlay_values(&s.ppr);
+    }
+    merged.overlay_values(&para.ppr);
+
+    let pt = |t: Option<Twips>| t.map(|v| twips_to_points(v) as f32).unwrap_or(0.0);
+    // 首行缩进:hanging 优先于 firstLine(ECMA-376 §17.3.1.12:两者互斥,hanging 胜)。
+    let first_line_indent_pt = match (merged.ind_hanging, merged.ind_first_line) {
+        (Some(h), _) => -(twips_to_points(h) as f32),
+        (None, Some(f)) => twips_to_points(f) as f32,
+        (None, None) => 0.0,
+    };
+    let line_spacing = match merged.line {
+        // line 单位 1/240 行;非正值容错为单倍。
+        Some(LineSpacingRule::Auto(l)) if l > 0 => EffectiveLineSpacing::Multiple(l as f32 / 240.0),
+        Some(LineSpacingRule::AtLeast(t)) if t > 0 => {
+            EffectiveLineSpacing::AtLeast(twips_to_points(t) as f32)
         }
-    }
-    // 直接格式化(现模型:Paragraph.align 原样字符串;C-4 换成共享 ParaProps 片段)。
-    if let Some(direct) = para.align.as_deref().and_then(Justification::from_attr) {
-        jc = Some(direct);
-    }
+        Some(LineSpacingRule::Exact(t)) if t > 0 => {
+            EffectiveLineSpacing::Exact(twips_to_points(t) as f32)
+        }
+        _ => EffectiveLineSpacing::default(),
+    };
+    let shading = match merged.shd_fill {
+        Some(ColorRef::Rgb(c)) => Some(c),
+        Some(ColorRef::Theme(slot)) => doc.theme.colors.get(slot),
+        Some(ColorRef::Auto) | None => None,
+    };
 
     EffectiveParaProps {
-        align: jc.unwrap_or_default(),
+        align: merged.jc.unwrap_or_default(),
+        space_before_pt: pt(merged.space_before),
+        space_after_pt: pt(merged.space_after),
+        line_spacing,
+        indent_left_pt: pt(merged.ind_left),
+        indent_right_pt: pt(merged.ind_right),
+        first_line_indent_pt,
+        borders: merged.borders,
+        shading,
+        keep_next: merged.keep_next == Some(true),
+        keep_lines: merged.keep_lines == Some(true),
+        page_break_before: merged.page_break_before == Some(true),
+        widow_control: merged.widow_control.unwrap_or(true),
+        contextual_spacing: merged.contextual_spacing == Some(true),
     }
 }
 
@@ -787,6 +1121,7 @@ mod tests {
             },
             ParaProps {
                 jc: Some(Justification::Left),
+                ..ParaProps::default()
             },
         );
         let heading = para_style(
@@ -797,6 +1132,7 @@ mod tests {
             },
             ParaProps {
                 jc: Some(Justification::Center),
+                ..ParaProps::default()
             },
         );
         let doc = doc_with_styles(vec![("Normal", normal), ("Heading1", heading)]);
@@ -1065,12 +1401,13 @@ mod tests {
                 },
                 ParaProps {
                     jc: Some(Justification::Center),
+                    ..ParaProps::default()
                 },
             ),
         )]);
         doc.styles.doc_default_rpr.sz = Some(11.0);
         let mut para = styled_para(Some("S1"));
-        para.align = Some("right".into());
+        para.ppr.jc = Some(Justification::Right);
         let mut run = TextRun::default();
         run.rpr.sz = Some(9.0);
         assert_eq!(resolve_run(&doc, &para, &run).size_pt, 9.0);
@@ -1093,6 +1430,7 @@ mod tests {
                     },
                     ppr: ParaProps {
                         jc: Some(Justification::Center),
+                        ..ParaProps::default()
                     },
                     ..Style::default()
                 },
@@ -1128,6 +1466,229 @@ mod tests {
         let para = styled_para(Some("CellPara"));
         let eff = resolve_run_in_table(&doc, &table, &para, &TextRun::default());
         assert_eq!(eff.size_pt, 10.0);
+    }
+
+    /// 字符样式(rStyle)链:值属性插在段落样式之后、直接格式化之前;toggle 计入 XOR。
+    #[test]
+    fn r_style_chain_overlays_values_and_counts_in_toggle_xor() {
+        let char_base = Style {
+            kind: StyleKind::Character,
+            rpr: RunProps {
+                sz: Some(9.0),
+                b: Some(true),
+                ..RunProps::default()
+            },
+            ..Style::default()
+        };
+        let char_derived = Style {
+            kind: StyleKind::Character,
+            based_on: Some("CharBase".into()),
+            rpr: RunProps {
+                color: Some(ColorRef::Rgb(Color::new([0xFF, 0x00, 0x00]))),
+                b: Some(true),
+                ..RunProps::default()
+            },
+            ..Style::default()
+        };
+        let para_style_ = para_style(
+            None,
+            RunProps {
+                sz: Some(12.0),
+                b: Some(true),
+                ..RunProps::default()
+            },
+            ParaProps::default(),
+        );
+        let doc = doc_with_styles(vec![
+            ("CharBase", char_base),
+            ("Emphasis", char_derived),
+            ("P", para_style_),
+        ]);
+        let para = styled_para(Some("P"));
+        let mut run = TextRun::default();
+        run.rpr.r_style = Some("Emphasis".into());
+        let eff = resolve_run(&doc, &para, &run);
+        // 值:字符样式链(9pt)覆盖段落样式(12pt);颜色来自派生字符样式。
+        assert_eq!(eff.size_pt, 9.0);
+        assert_eq!(eff.color, Some(Color::new([0xFF, 0x00, 0x00])));
+        // toggle:段落样式 b=1 + 字符链 b=1 x2 → 共 3 次(奇数)→ 开。
+        assert!(eff.bold);
+        // 直接格式化仍是绝对开关。
+        run.rpr.b = Some(false);
+        assert!(!resolve_run(&doc, &para, &run).bold);
+        // 未知 rStyle:链截断,不影响其余解析。
+        let mut run = TextRun::default();
+        run.rpr.r_style = Some("Ghost".into());
+        assert_eq!(resolve_run(&doc, &para, &run).size_pt, 12.0);
+    }
+
+    /// 下划线种类:样式链给 Double;直接 `val="none"` 显式关(盖掉链)。
+    #[test]
+    fn underline_kind_cascades_and_explicit_none_wins() {
+        let doc = doc_with_styles(vec![(
+            "S1",
+            para_style(
+                None,
+                RunProps {
+                    u: Some(UnderlineKind::Double),
+                    ..RunProps::default()
+                },
+                ParaProps::default(),
+            ),
+        )]);
+        let para = styled_para(Some("S1"));
+        let eff = resolve_run(&doc, &para, &TextRun::default());
+        assert!(eff.underline);
+        assert_eq!(eff.underline_kind, UnderlineKind::Double);
+
+        let mut run = TextRun::default();
+        run.rpr.u = Some(UnderlineKind::None);
+        let eff = resolve_run(&doc, &para, &run);
+        assert!(!eff.underline);
+        assert_eq!(eff.underline_kind, UnderlineKind::None);
+
+        // from_attr:none / 已知 / 未知(容错 Single)。
+        assert_eq!(UnderlineKind::from_attr("none"), UnderlineKind::None);
+        assert_eq!(UnderlineKind::from_attr("wave"), UnderlineKind::Wave);
+        assert_eq!(UnderlineKind::from_attr("wat"), UnderlineKind::Single);
+    }
+
+    /// 高亮 / 纵向对齐 / szCs:值属性级联;highlight none 显式关;szCs 未设随 sz。
+    #[test]
+    fn highlight_vert_align_and_szcs_resolve() {
+        let doc = doc_with_styles(vec![(
+            "S1",
+            para_style(
+                None,
+                RunProps {
+                    sz: Some(10.0),
+                    highlight: Highlight::from_attr("yellow"),
+                    vert_align: Some(VertAlign::Superscript),
+                    ..RunProps::default()
+                },
+                ParaProps::default(),
+            ),
+        )]);
+        let para = styled_para(Some("S1"));
+        let eff = resolve_run(&doc, &para, &TextRun::default());
+        assert_eq!(eff.highlight, Some(Color::new([0xFF, 0xFF, 0x00])));
+        assert_eq!(eff.vert_align, VertAlign::Superscript);
+        assert_eq!(eff.size_cs_pt, 10.0, "szCs 未设:随 sz");
+
+        // 直接 highlight=none 显式关;szCs 显式值生效。
+        let mut run = TextRun::default();
+        run.rpr.highlight = Some(Highlight::Off);
+        run.rpr.sz_cs = Some(14.0);
+        let eff = resolve_run(&doc, &para, &run);
+        assert_eq!(eff.highlight, None);
+        assert_eq!(eff.size_cs_pt, 14.0);
+
+        // 未知高亮名容错为未设置。
+        assert_eq!(Highlight::from_attr("wat"), None);
+    }
+
+    /// 段落 spacing / ind:每个子属性独立级联;hanging 优先并给出**负**首行缩进。
+    #[test]
+    fn para_spacing_and_indent_merge_per_attribute() {
+        let doc = doc_with_styles(vec![(
+            "S1",
+            para_style(
+                None,
+                RunProps::default(),
+                ParaProps {
+                    space_before: Some(240), // 12pt
+                    ind_left: Some(720),     // 36pt
+                    ind_first_line: Some(360),
+                    ..ParaProps::default()
+                },
+            ),
+        )]);
+        let mut para = styled_para(Some("S1"));
+        // 直接格式化只给 space_after 与 hanging:其余从样式继承;hanging 盖掉 firstLine。
+        para.ppr.space_after = Some(120); // 6pt
+        para.ppr.ind_hanging = Some(360); // -18pt 首行
+        let eff = resolve_para(&doc, &para);
+        assert_eq!(eff.space_before_pt, 12.0);
+        assert_eq!(eff.space_after_pt, 6.0);
+        assert_eq!(eff.indent_left_pt, 36.0);
+        assert_eq!(eff.first_line_indent_pt, -18.0);
+
+        // 无 hanging 时 firstLine 为正首行缩进。
+        let para2 = styled_para(Some("S1"));
+        assert_eq!(resolve_para(&doc, &para2).first_line_indent_pt, 18.0);
+    }
+
+    /// 行距规则:auto(1/240 行)→ 倍数;exact/atLeast(twip)→ 磅;非正值容错单倍。
+    #[test]
+    fn line_spacing_rules_resolve() {
+        let mut para = Paragraph::default();
+        let doc = Document::default();
+        para.ppr.line = Some(LineSpacingRule::Auto(360));
+        assert_eq!(
+            resolve_para(&doc, &para).line_spacing,
+            EffectiveLineSpacing::Multiple(1.5)
+        );
+        para.ppr.line = Some(LineSpacingRule::Exact(480));
+        assert_eq!(
+            resolve_para(&doc, &para).line_spacing,
+            EffectiveLineSpacing::Exact(24.0)
+        );
+        para.ppr.line = Some(LineSpacingRule::AtLeast(240));
+        assert_eq!(
+            resolve_para(&doc, &para).line_spacing,
+            EffectiveLineSpacing::AtLeast(12.0)
+        );
+        para.ppr.line = Some(LineSpacingRule::Auto(0));
+        assert_eq!(
+            resolve_para(&doc, &para).line_spacing,
+            EffectiveLineSpacing::Multiple(1.0)
+        );
+    }
+
+    /// 段落边框按边级联、底纹 theme 解引、keep 系列旗标(widowControl 缺省开)。
+    #[test]
+    fn para_borders_shading_and_keep_flags_resolve() {
+        let border = |val: &str| Border {
+            val: val.to_string(),
+            sz_eighth_pt: 8,
+            space_pt: 1,
+            color: None,
+        };
+        let mut style_ppr = ParaProps::default();
+        style_ppr.borders.top = Some(border("single"));
+        style_ppr.borders.bottom = Some(border("double"));
+        let mut doc = doc_with_styles(vec![(
+            "S1",
+            para_style(None, RunProps::default(), style_ppr),
+        )]);
+        doc.theme
+            .colors
+            .set(ThemeColor::Accent2, Color::new([0xED, 0x7D, 0x31]));
+
+        let mut para = styled_para(Some("S1"));
+        para.ppr.borders.bottom = Some(border("none")); // 直接盖掉样式的 bottom
+        para.ppr.shd_fill = Some(ColorRef::Theme(ThemeColor::Accent2));
+        para.ppr.page_break_before = Some(true);
+        para.ppr.keep_next = Some(true);
+        let eff = resolve_para(&doc, &para);
+        assert_eq!(
+            eff.borders.top.as_ref().map(|b| b.val.as_str()),
+            Some("single")
+        );
+        assert_eq!(
+            eff.borders.bottom.as_ref().map(|b| b.val.as_str()),
+            Some("none")
+        );
+        assert!(eff.borders.any(), "top 仍是可见边框");
+        assert_eq!(eff.shading, Some(Color::new([0xED, 0x7D, 0x31])));
+        assert!(eff.page_break_before);
+        assert!(eff.keep_next);
+        assert!(!eff.keep_lines);
+        assert!(eff.widow_control, "widowControl 缺省开");
+
+        // shd fill="auto" 显式无底纹。
+        para.ppr.shd_fill = Some(ColorRef::Auto);
+        assert_eq!(resolve_para(&doc, &para).shading, None);
     }
 
     /// jc 归一化:left/start/center/right/end/both/distribute;未知值容错为未设置。

@@ -20,6 +20,7 @@ pub use model::{
     RunSegment, Section, Table, TextRun, VMerge,
 };
 pub use style::{
-    resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveParaProps,
-    EffectiveRunProps, StyleTable, StyleWarning, Theme,
+    resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveLineSpacing,
+    EffectiveParaProps, EffectiveRunProps, StyleTable, StyleWarning, Theme, UnderlineKind,
+    VertAlign,
 };

@@ -39,6 +39,7 @@ create_exception!(_core, DocZipError, DocError_);
 create_exception!(_core, DocXmlError, DocError_);
 create_exception!(_core, DocUnsupportedError, DocError_);
 create_exception!(_core, DocOcrError, DocError_);
+create_exception!(_core, DocRenderError, DocError_);
 
 /// 把 [`DocError`] 折成对应的 Python 异常(按 `kind()` 稳定标签分派)。
 fn map_err(e: DocError) -> PyErr {
@@ -48,6 +49,7 @@ fn map_err(e: DocError) -> PyErr {
         "xml" => DocXmlError::new_err(msg),
         "unsupported" => DocUnsupportedError::new_err(msg),
         "ocr" => DocOcrError::new_err(msg),
+        "render" => DocRenderError::new_err(msg),
         "invalid-argument" => PyValueError::new_err(msg),
         "io" => {
             if let DocError::Io(io) = &e {
@@ -379,6 +381,37 @@ impl PyDocument {
         export::to_html(self.inner.as_ref())
     }
 
+    /// 布局保真导出:把文档渲染成 PDF 字节(doc-render / pdf-typeset 流式布局引擎;
+    /// 系统字体解析,同机同字体环境 ⇒ 字节确定)。`font_map` 是字体替换覆盖
+    /// (请求 family -> 替换 family,如 `{"宋体": "Songti SC"}`)。渲染在释放 GIL 下
+    /// 进行;降级(字体替换 / 多栏压平 / 暂不渲染的图片等)以 `UserWarning` 浮出,
+    /// **每个类别只一次**。
+    #[cfg(feature = "pdf")]
+    #[pyo3(signature = (*, font_map=None))]
+    fn to_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        font_map: Option<BTreeMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let result = self.render_pdf_result(py, font_map)?;
+        Ok(PyBytes::new(py, &result.pdf))
+    }
+
+    /// 布局保真导出:渲染成 PDF 并写到 `path`(等价 `to_pdf` + 落盘;IO 错误折成
+    /// `FileNotFoundError` / `OSError`)。
+    #[cfg(feature = "pdf")]
+    #[pyo3(signature = (path, *, font_map=None))]
+    fn save_pdf(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        font_map: Option<BTreeMap<String, String>>,
+    ) -> PyResult<()> {
+        let result = self.render_pdf_result(py, font_map)?;
+        py.detach(|| std::fs::write(&path, &result.pdf))
+            .map_err(|e| map_err(DocError::Io(e)))
+    }
+
     /// 取一张内嵌图片的原始字节:`name` 可以是 `word/media/` 裸文件名(图片 dict 的 `media`),
     /// 也可以是图片 dict 的 `rel_id`。查不到返回 `None`。配合 `ocr_image` 即可“解析 docx ->
     /// 取出内嵌图片字节 -> OCR”端到端跑通。
@@ -403,6 +436,45 @@ impl PyDocument {
     fn __repr__(&self) -> String {
         format!("<docspine.Document block_count={}>", self.inner.body.len())
     }
+}
+
+// --- PDF 渲染桥(仅 `pdf` 特性) --------------------------------------------
+
+#[cfg(feature = "pdf")]
+impl PyDocument {
+    /// 渲染成 PDF(释放 GIL),回到 GIL 后按类别去重浮出降级告警。
+    fn render_pdf_result(
+        &self,
+        py: Python<'_>,
+        font_map: Option<BTreeMap<String, String>>,
+    ) -> PyResult<doc_render::RenderResult> {
+        let options = doc_render::RenderOptions {
+            font_map: font_map.unwrap_or_default(),
+        };
+        let inner = Arc::clone(&self.inner);
+        let media = Arc::clone(&self.media);
+        let result = py
+            .detach(move || doc_render::render_pdf(&inner, &media, &options))
+            .map_err(map_err)?;
+        emit_render_warnings(py, &result.warnings)?;
+        Ok(result)
+    }
+}
+
+/// 把渲染降级按 [`kind`](doc_render::RenderWarning::kind) 去重,每个类别只
+/// `warnings.warn` 一次(`UserWarning`,消息取该类首次出现的文本)。
+#[cfg(feature = "pdf")]
+fn emit_render_warnings(py: Python<'_>, warnings: &[doc_render::RenderWarning]) -> PyResult<()> {
+    let mut seen: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+    let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
+    for w in warnings {
+        if seen.insert(w.kind()) {
+            let msg = std::ffi::CString::new(format!("docspine PDF export: {w}"))
+                .unwrap_or_else(|_| c"docspine PDF export warning".to_owned());
+            PyErr::warn(py, &category, &msg, 2)?;
+        }
+    }
+    Ok(())
 }
 
 // --- 模块级函数:解析 -----------------------------------------------------
@@ -576,6 +648,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DocXmlError", py.get_type::<DocXmlError>())?;
     m.add("DocUnsupportedError", py.get_type::<DocUnsupportedError>())?;
     m.add("DocOcrError", py.get_type::<DocOcrError>())?;
+    m.add("DocRenderError", py.get_type::<DocRenderError>())?;
 
     Ok(())
 }

@@ -55,9 +55,10 @@ manifest-path = "crates/py-bindings/Cargo.toml"
 module-name = "docspine._core"
 # Pure-Python sources live here.
 python-source = "python"
-# abi3 wheel covering CPython >= 3.11, with the image-OCR bridge compiled in.
-# (The `ocr` feature pulls doc-ocr / ocrspine; the release wheel ships full OCR.)
-features = ["pyo3/abi3-py311", "ocr"]
+# abi3 wheel covering CPython >= 3.11, with the image-OCR bridge and the PDF
+# export bridge compiled in. (The `ocr` feature pulls doc-ocr / ocrspine; the
+# `pdf` feature pulls doc-render / pdf-typeset for Document.to_pdf/save_pdf.)
+features = ["pyo3/abi3-py311", "ocr", "pdf"]
 # Ship PEP 561 type information (.pyi stubs + py.typed markers) in sdist + wheel.
 include = [
     "LICENSE",

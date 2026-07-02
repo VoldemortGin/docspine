@@ -8,6 +8,7 @@ from ._core import (
     Document as Document,
     DocError as DocError,
     DocOcrError as DocOcrError,
+    DocRenderError as DocRenderError,
     DocUnsupportedError as DocUnsupportedError,
     DocXmlError as DocXmlError,
     DocZipError as DocZipError,
@@ -36,5 +37,6 @@ __all__ = [
     "DocXmlError",
     "DocUnsupportedError",
     "DocOcrError",
+    "DocRenderError",
     "__version__",
 ]

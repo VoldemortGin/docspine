@@ -11,7 +11,7 @@
 //!   区分 `restart` 起始格与 `continue` 延续格)。
 
 use crate::geom::{Emu, Twips};
-use crate::style::{RunProps, StyleTable, Theme};
+use crate::style::{ParaProps, RunProps, StyleTable, Theme};
 
 /// 一份解析好的 Word 文档。
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -104,6 +104,10 @@ impl Default for PageMargins {
 }
 
 /// 文档正文(或单元格内)的一个块级元素。段落与表格在 body 里同级出现,顺序即文档顺序。
+///
+/// (`Paragraph` 自 C-4 携带直接格式化 pPr 片段后天然比 `Table` 宽;正文以段落为
+/// 主,把**主流**变体装箱只会给热路径加一次指针跳转,故按语义保持内联。)
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     /// 一个段落(`w:p`)。
@@ -122,6 +126,10 @@ pub struct Paragraph {
     pub align: Option<String>,
     /// 列表/大纲层级(`w:pPr` > `w:numPr` > `w:ilvl@w:val`),缺省 `None`。
     pub list_level: Option<u32>,
+    /// 直接格式化的 pPr 原始片段(**全 Option**,C-4:spacing / ind / pBdr / shd /
+    /// keep 系列;`jc` 与上面的 `align` 便利字段并存,契约不变)。
+    /// 渲染侧走 [`crate::style::resolve_para`] 消费本片段。
+    pub ppr: ParaProps,
 }
 
 impl Paragraph {

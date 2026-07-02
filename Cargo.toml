@@ -4,6 +4,7 @@ members = [
     "crates/doc-core",
     "crates/doc-parse",
     "crates/doc-ocr",
+    "crates/doc-render",
     "crates/py-bindings",
 ]
 
@@ -20,6 +21,7 @@ rust-version = "1.96"
 doc-core = { path = "crates/doc-core", version = "0.0.1" }
 doc-parse = { path = "crates/doc-parse", version = "0.0.1" }
 doc-ocr = { path = "crates/doc-ocr", version = "0.0.1" }
+doc-render = { path = "crates/doc-render", version = "0.0.1" }
 
 # --- sibling family crate: domain-neutral OCR (single source of truth for the
 # path; doc-ocr uses `ocrspine.workspace = true` so no per-crate path math).
@@ -27,6 +29,14 @@ doc-ocr = { path = "crates/doc-ocr", version = "0.0.1" }
 # `maturin build` then `cargo fetch`es ocrspine itself — no sibling checkout
 # needed on the runner. ---
 ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f0233cd6500edfbbb82bc06c2332369871" }
+
+# --- sibling family crate: the shared typesetting engine behind faithful
+# docx → PDF export (pdfspine Phase A; doc-render uses
+# `pdf-typeset.workspace = true`). Same git-dep pattern as ocrspine above:
+# the family publishes uniformly via git, and CI's `maturin build` then
+# `cargo fetch`es pdfspine itself — no sibling checkout needed on the runner.
+# Bump the rev deliberately, never track a branch. ---
+pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "709b41daef28530842fb0503320c75bc776053d6" }
 
 # --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
 thiserror = "2"
