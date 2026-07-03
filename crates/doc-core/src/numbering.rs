@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::style::{Justification, ParaProps};
+use crate::style::{Justification, ParaProps, RunProps};
 
 /// 编号格式(`w:numFmt@w:val` 的常用子集;未知值按 decimal 容错)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,6 +71,9 @@ pub struct NumLevel {
     /// 层级段落属性(`w:lvl > w:pPr`,主要是 `w:ind` 缩进)。级联位置:样式层之下、
     /// 直接格式化之上(由 [`crate::style::resolve_para`] 合并)。
     pub ppr: ParaProps,
+    /// 编号符 run 属性(`w:lvl > w:rPr`;C-9 起捕获 `rFonts`/`sz` 供标签字体/字号
+    /// ——Symbol/Wingdings 圆点与缩号标签靠它)。仅作用于标签,不参与正文级联。
+    pub rpr: RunProps,
 }
 
 /// 一条抽象编号定义(`w:abstractNum`):层级表 + styleLink 间接(v1 不解)。

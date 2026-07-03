@@ -68,6 +68,11 @@ impl Package {
         self.part_str("word/numbering.xml")
     }
 
+    /// 设置部件 `word/settings.xml` 的文本(可缺;缺失即全 Word 缺省)。
+    pub fn settings_xml_str(&self) -> Option<String> {
+        self.part_str("word/settings.xml")
+    }
+
     /// 主题部件文本:标准名 `word/theme/theme1.xml`;容错取 `word/theme/` 下第一个
     /// `.xml`(BTreeMap 序,确定性)。可缺;缺失即空主题。
     pub fn theme_xml_str(&self) -> Option<String> {

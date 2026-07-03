@@ -13,7 +13,8 @@
 use doc_core::model::Color;
 use doc_core::style::{
     Border, CellBorders, CellMargins, ColorRef, FontRef, Highlight, Justification, LineSpacingRule,
-    ParaProps, RunProps, TableBorders, TableProps, ThemeColor, ThemeFont, UnderlineKind, VertAlign,
+    ParaProps, RunProps, TabStop, TableBorders, TableProps, ThemeColor, ThemeFont, UnderlineKind,
+    VertAlign,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -221,6 +222,16 @@ pub fn apply_ppr_prop(e: &BytesStart, p: &mut ParaProps) {
                 p.shd_fill = Some(match Color::from_hex(&v) {
                     Some(c) => ColorRef::Rgb(c),
                     None => ColorRef::Auto,
+                });
+            }
+        }
+        // `w:tabs > w:tab`(自定义制表位;`w:tabs` 容器本身无属性,子元素平铺经过
+        // 这里——pPr 语境里没有别的 `tab` 本地名,不会撞车)。
+        b"tab" => {
+            if let Some(pos) = attr_of(e, b"pos").and_then(|s| s.parse().ok()) {
+                p.tabs.push(TabStop {
+                    pos,
+                    val: attr_of(e, b"val").unwrap_or_else(|| "left".to_string()),
                 });
             }
         }

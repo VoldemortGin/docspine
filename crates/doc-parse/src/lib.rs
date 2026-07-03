@@ -77,6 +77,9 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedDoc> {
         .theme_xml_str()
         .map(|s| xml::theme::parse(&s))
         .unwrap_or_default();
+    let default_tab_stop = pkg
+        .settings_xml_str()
+        .and_then(|s| xml::settings::parse(&s));
 
     Ok(ParsedDoc {
         document: Document {
@@ -85,6 +88,7 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedDoc> {
             styles,
             theme,
             numbering,
+            default_tab_stop,
         },
         media,
     })

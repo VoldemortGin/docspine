@@ -481,6 +481,17 @@ pub struct TableProps {
     pub cell_margins: CellMargins,
 }
 
+/// 一个自定义制表位(`w:pPr > w:tabs > w:tab`)。v1 仅保真刻画(渲染侧按缺省
+/// 间隔制表位推进,存在自定义制表位时降级告警)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabStop {
+    /// 制表位位置(twip,`@w:pos`)。
+    pub pos: Twips,
+    /// 制表位种类(`@w:val`:`left`/`center`/`right`/`decimal`/`bar`/`clear` …,
+    /// 原样保留、容错)。
+    pub val: String,
+}
+
 /// 行距规则(`w:spacing@w:line` + `@w:lineRule`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineSpacingRule {
@@ -597,6 +608,8 @@ pub struct ParaProps {
     pub widow_control: Option<bool>,
     /// 同样式相邻段落间不加间距(`w:contextualSpacing`)。
     pub contextual_spacing: Option<bool>,
+    /// 自定义制表位(`w:tabs`;空 = 未设置)。级联按整表就近替换(非空盖前层)。
+    pub tabs: Vec<TabStop>,
 }
 
 impl ParaProps {
@@ -623,6 +636,9 @@ impl ParaProps {
             widow_control,
             contextual_spacing,
         );
+        if !other.tabs.is_empty() {
+            self.tabs = other.tabs.clone();
+        }
         for (slot, o) in [
             (&mut self.borders.top, &other.borders.top),
             (&mut self.borders.bottom, &other.borders.bottom),
@@ -859,6 +875,8 @@ pub struct EffectiveParaProps {
     pub widow_control: bool,
     /// 同样式相邻段落间不加间距。
     pub contextual_spacing: bool,
+    /// 自定义制表位(级联合并后;空 = 无。渲染侧 v1 按缺省间隔推进 + 降级告警)。
+    pub tabs: Vec<TabStop>,
 }
 
 // ============================================================ 解析器(级联合并)
@@ -1146,6 +1164,7 @@ fn resolve_para_props(
         page_break_before: merged.page_break_before == Some(true),
         widow_control: merged.widow_control.unwrap_or(true),
         contextual_spacing: merged.contextual_spacing == Some(true),
+        tabs: merged.tabs,
     }
 }
 

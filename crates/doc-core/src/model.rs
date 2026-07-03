@@ -33,6 +33,9 @@ pub struct Document {
     /// 编号表(`word/numbering.xml`:abstractNum 层级 + num 实例)。部件缺失时为空表。
     /// 计数与标签经 [`crate::numbering::ListCounters`] 在渲染侧推进。
     pub numbering: NumberingTable,
+    /// 缺省制表位间隔(twip,`word/settings.xml > w:defaultTabStop@w:val`;
+    /// 部件/属性缺失时 `None`,渲染侧落 Word 缺省 720 twip = 0.5 英寸)。
+    pub default_tab_stop: Option<Twips>,
 }
 
 /// 一节(`w:sectPr`)的页面几何:页面尺寸 / 页边距 / 纸向 / 分栏。
@@ -406,10 +409,70 @@ pub struct Picture {
     pub rel_id: String,
     /// 经 `word/_rels/document.xml.rels` 解析得到的 `word/media/*` 裸文件名(media map 的键)。
     pub media_name: Option<String>,
-    /// 显示尺寸 `(cx, cy)`(EMU,来自 `wp:extent`),best-effort。
+    /// 显示尺寸 `(cx, cy)`(EMU,来自 `wp:extent`;VML 从 `style` 宽高折算),best-effort。
     pub extent: Option<(Emu, Emu)>,
     /// 图片字节长度(便利字段;字节本身在 media map 里)。
     pub image_bytes_len: usize,
+    /// 放置方式(`wp:inline` 行内 / `wp:anchor` 锚定浮动;C-8)。
+    pub placement: Placement,
+}
+
+/// 图片放置方式(`wp:inline` / `wp:anchor`,C-8)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Placement {
+    /// 行内:随文字流参与版式(缺省)。
+    #[default]
+    Inline,
+    /// 锚定浮动:按 `wp:positionH` / `wp:positionV` 的偏移绝对定位
+    /// (v1 渲染为无环绕的覆盖层)。
+    Anchored {
+        /// 水平偏移(EMU,`wp:positionH > wp:posOffset`;缺省 0)。
+        x: Emu,
+        /// 垂直偏移(EMU,`wp:positionV > wp:posOffset`;缺省 0)。
+        y: Emu,
+        /// 水平参照系(`wp:positionH@relativeFrom`)。
+        rel_h: AnchorRef,
+        /// 垂直参照系(`wp:positionV@relativeFrom`)。
+        rel_v: AnchorRef,
+        /// 衬于文字下方(`wp:anchor@behindDoc`)。
+        behind: bool,
+    },
+}
+
+/// 锚定偏移的参照系(`@relativeFrom` 的常用子集;其余按 `Other` 容错,
+/// 渲染侧近似按页边距原点)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnchorRef {
+    /// 页面原点。
+    Page,
+    /// 页边距原点(缺省)。
+    #[default]
+    Margin,
+    /// 栏(单栏渲染下同 margin)。
+    Column,
+    /// 所在段落(v1 近似按 margin)。
+    Paragraph,
+    /// 所在字符(v1 近似按 margin)。
+    Character,
+    /// 所在行(v1 近似按 margin)。
+    Line,
+    /// 其余取值(insideMargin / outsideMargin 等;近似按 margin)。
+    Other,
+}
+
+impl AnchorRef {
+    /// 解析 `@relativeFrom`。未知值 → [`AnchorRef::Other`](容错)。
+    pub fn from_attr(s: &str) -> Self {
+        match s {
+            "page" => AnchorRef::Page,
+            "margin" => AnchorRef::Margin,
+            "column" => AnchorRef::Column,
+            "paragraph" => AnchorRef::Paragraph,
+            "character" => AnchorRef::Character,
+            "line" => AnchorRef::Line,
+            _ => AnchorRef::Other,
+        }
+    }
 }
 
 /// 一个 RGB 颜色(来自 `w:color@w:val` / `w:shd@w:fill` 的十六进制)。

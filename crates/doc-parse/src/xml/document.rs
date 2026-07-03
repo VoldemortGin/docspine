@@ -23,8 +23,8 @@ use std::collections::BTreeMap;
 
 use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
-    Block, BreakKind, Cell, CellVAlign, Color, HeightRule, Orientation, Paragraph, Picture, Row,
-    RunSegment, Section, Table, TableWidth, TextRun, VMerge,
+    AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, HeightRule, Orientation, Paragraph,
+    Picture, Placement, Row, RunSegment, Section, Table, TableWidth, TextRun, VMerge,
 };
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
 use quick_xml::events::{BytesStart, Event};
@@ -856,31 +856,153 @@ fn apply_tcpr_prop(e: &BytesStart, cell: &mut Cell) {
 
 // ============================================================ 图片 (w:drawing / w:pict)
 
-/// 解析 `w:drawing`(DrawingML 内嵌/浮动图片):取 `wp:extent@cx/cy` + `a:blip@r:embed`。
-/// 已消费 `<w:drawing>` 起始标签。无 blip 引用则返回 `None`。
+/// 解析 `w:drawing`(DrawingML 内嵌/浮动图片):取 `wp:extent@cx/cy` +
+/// `a:blip@r:embed`,并区分 `wp:inline` / `wp:anchor`(C-8:锚定的取
+/// `wp:positionH/V@relativeFrom` + `wp:posOffset` 偏移与 `@behindDoc`)。
+/// 已消费 `<w:drawing>` 起始标签,深度计数消费到其结束标签。无 blip 引用则返回 `None`。
 fn parse_drawing<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Picture> {
+    let mut rel_id = String::new();
+    let mut extent: Option<(Emu, Emu)> = None;
+    let mut anchored = false;
+    let mut behind = false;
+    let (mut x, mut y): (Emu, Emu) = (0, 0);
+    let mut rel_h = AnchorRef::default();
+    let mut rel_v = AnchorRef::default();
+    // 当前打开的定位轴:Some(true) = positionH、Some(false) = positionV,
+    // 其内的 posOffset 文本归该轴。
+    let mut axis: Option<bool> = None;
+    let mut depth = 1usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"posOffset" {
+                    // 子 walker 消费整个 posOffset(文本 + 结束标签),深度不变。
+                    if let (Some(h), Ok(v)) = (axis, read_text(reader).trim().parse::<Emu>()) {
+                        if h {
+                            x = v;
+                        } else {
+                            y = v;
+                        }
+                    }
+                } else {
+                    apply_drawing_elem(
+                        &e,
+                        &name,
+                        (&mut rel_id, &mut extent),
+                        (&mut anchored, &mut behind),
+                        (&mut rel_h, &mut rel_v, &mut axis),
+                    );
+                    depth += 1;
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                apply_drawing_elem(
+                    &e,
+                    &name,
+                    (&mut rel_id, &mut extent),
+                    (&mut anchored, &mut behind),
+                    (&mut rel_h, &mut rel_v, &mut axis),
+                );
+                if matches!(name.as_slice(), b"positionH" | b"positionV") {
+                    axis = None; // 自闭合定位轴:无 posOffset,偏移取 0。
+                }
+            }
+            Ok(Event::End(e)) => {
+                if matches!(local_name(e.name().as_ref()), b"positionH" | b"positionV") {
+                    axis = None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    let mut pic = resolve_picture(ctx, rel_id, extent)?;
+    if anchored {
+        pic.placement = Placement::Anchored {
+            x,
+            y,
+            rel_h,
+            rel_v,
+            behind,
+        };
+    }
+    Some(pic)
+}
+
+/// 把 drawing 子元素的属性写进解析状态(posOffset 文本另在调用方处理)。
+fn apply_drawing_elem(
+    e: &BytesStart,
+    name: &[u8],
+    (rel_id, extent): (&mut String, &mut Option<(Emu, Emu)>),
+    (anchored, behind): (&mut bool, &mut bool),
+    (rel_h, rel_v, axis): (&mut AnchorRef, &mut AnchorRef, &mut Option<bool>),
+) {
+    match name {
+        b"anchor" => {
+            *anchored = true;
+            if let Some(b) = attr_of(e, b"behindDoc") {
+                *behind = !(b == "0" || b.eq_ignore_ascii_case("false"));
+            }
+        }
+        b"extent" => {
+            let cx: Emu = attr_of(e, b"cx").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let cy: Emu = attr_of(e, b"cy").and_then(|s| s.parse().ok()).unwrap_or(0);
+            *extent = Some((cx, cy));
+        }
+        b"positionH" => {
+            *axis = Some(true);
+            if let Some(r) = attr_of(e, b"relativeFrom") {
+                *rel_h = AnchorRef::from_attr(&r);
+            }
+        }
+        b"positionV" => {
+            *axis = Some(false);
+            if let Some(r) = attr_of(e, b"relativeFrom") {
+                *rel_v = AnchorRef::from_attr(&r);
+            }
+        }
+        b"blip" => {
+            // r:embed 属性(命名空间前缀按本地名匹配)。
+            for attr in e.attributes().flatten() {
+                if local_name(attr.key.as_ref()) == b"embed" {
+                    *rel_id = attr_string(&attr);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 解析旧式 VML `w:pict`(以及 `w:object` 内的 VML):取 `v:imagedata@r:id`;
+/// 形状 `style` 属性里的 `width:`/`height:`(pt/px/in/cm/mm/pc)折算成 EMU 尺寸
+/// (C-8;VML 无 wp:extent)。已消费起始标签。无引用则返回 `None`。
+fn parse_vml_pict<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Picture> {
     let mut rel_id = String::new();
     let mut extent: Option<(Emu, Emu)> = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"extent" => {
-                        let cx: Emu = attr_of(&e, b"cx").and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let cy: Emu = attr_of(&e, b"cy").and_then(|s| s.parse().ok()).unwrap_or(0);
-                        extent = Some((cx, cy));
-                    }
-                    b"blip" => {
-                        // r:embed 属性(命名空间前缀按本地名匹配)。
-                        for attr in e.attributes().flatten() {
-                            if local_name(attr.key.as_ref()) == b"embed" {
-                                rel_id = attr_string(&attr);
-                            }
+                if local_name(e.name().as_ref()) == b"imagedata" {
+                    for attr in e.attributes().flatten() {
+                        if local_name(attr.key.as_ref()) == b"id" {
+                            rel_id = attr_string(&attr);
                         }
                     }
-                    _ => {}
+                } else if extent.is_none() {
+                    // v:shape / v:rect 等形状元素:style="width:36pt;height:24pt;…"。
+                    if let Some(style) = attr_of(&e, b"style") {
+                        extent = vml_style_extent(&style);
+                    }
                 }
             }
             Ok(Event::End(_)) => break,
@@ -893,30 +1015,47 @@ fn parse_drawing<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Opti
     resolve_picture(ctx, rel_id, extent)
 }
 
-/// 解析旧式 VML `w:pict`(以及 `w:object` 内的 VML):取 `v:imagedata@r:id`。
-/// 已消费起始标签。无引用则返回 `None`。
-fn parse_vml_pict<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Picture> {
-    let mut rel_id = String::new();
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                if local_name(e.name().as_ref()) == b"imagedata" {
-                    for attr in e.attributes().flatten() {
-                        if local_name(attr.key.as_ref()) == b"id" {
-                            rel_id = attr_string(&attr);
-                        }
-                    }
-                }
-            }
-            Ok(Event::End(_)) => break,
-            Ok(Event::Eof) => break,
-            Err(_) => break,
+/// 从 VML `style` 属性解析 `(width, height)` → EMU。两者都在才算(单边尺寸交
+/// 渲染侧按位图固有尺寸兜底)。
+fn vml_style_extent(style: &str) -> Option<(Emu, Emu)> {
+    let mut w = None;
+    let mut h = None;
+    for decl in style.split(';') {
+        let Some((key, value)) = decl.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "width" => w = css_length_emu(value),
+            "height" => h = css_length_emu(value),
             _ => {}
         }
-        buf.clear();
     }
-    resolve_picture(ctx, rel_id, None)
+    Some((w?, h?))
+}
+
+/// 把一个 CSS 风格长度(`36pt` / `48px` / `1in` / `2.54cm` / `25.4mm` / `3pc`;
+/// 裸数字按 px)折算成 EMU。非正值 / 未知单位 → `None`。
+fn css_length_emu(value: &str) -> Option<Emu> {
+    let v = value.trim();
+    let split = v
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+'))
+        .map(|(i, _)| i)
+        .unwrap_or(v.len());
+    let n: f64 = v[..split].parse().ok()?;
+    let pt = match v[split..].trim() {
+        "pt" => n,
+        "px" | "" => n * 0.75,
+        "in" => n * 72.0,
+        "cm" => n * 72.0 / 2.54,
+        "mm" => n * 72.0 / 25.4,
+        "pc" => n * 12.0,
+        _ => return None,
+    };
+    if pt <= 0.0 || !pt.is_finite() {
+        return None;
+    }
+    Some((pt * doc_core::geom::EMU_PER_POINT).round() as Emu)
 }
 
 /// 把图片的 rel id 经 rels 映射到 media 裸文件名,回填字节长度,组装 [`Picture`]。
@@ -938,6 +1077,8 @@ fn resolve_picture(ctx: &Ctx, rel_id: String, extent: Option<(Emu, Emu)>) -> Opt
         media_name,
         extent,
         image_bytes_len,
+        // 缺省行内;锚定浮动由调用方在解析 wp:anchor 后覆盖(C-8)。
+        placement: Placement::Inline,
     })
 }
 

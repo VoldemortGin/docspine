@@ -263,7 +263,7 @@ fn map_paragraph(
                 DEFAULT_LIST_GUTTER
             };
             props.first_line_indent = props.first_line_indent.max(0.0);
-            props.list = Some(ListLabel { text, gutter });
+            props.list = Some(ListLabel::new(text, gutter));
         }
     }
 
@@ -336,8 +336,8 @@ fn para_props(eff: &EffectiveParaProps) -> ParaProps {
     p.spacing = match eff.line_spacing {
         EffectiveLineSpacing::Multiple(m) => LineSpacing::Multiple(f64::from(m)),
         EffectiveLineSpacing::Exact(h) => LineSpacing::Exact(f64::from(h)),
-        // 引擎无 atLeast:按 exact 近似(正文行高常态下即其值)。
-        EffectiveLineSpacing::AtLeast(h) => LineSpacing::Exact(f64::from(h)),
+        // TS-8 起引擎有真 atLeast:行高 = max(自然行高, 给定值)。
+        EffectiveLineSpacing::AtLeast(h) => LineSpacing::AtLeast(f64::from(h)),
     };
     p.space_before = f64::from(eff.space_before_pt);
     p.space_after = f64::from(eff.space_after_pt);

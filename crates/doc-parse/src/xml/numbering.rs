@@ -126,8 +126,8 @@ fn apply_abstract_child(e: &BytesStart, abs: &mut AbstractNum) {
     }
 }
 
-/// 解析一个 `w:lvl`(层级定义):start / numFmt / lvlText / lvlJc + 层级 pPr。
-/// 已消费其起始标签。`w:rPr`(编号符 run 属性,v1 不渲染)整体跳过。
+/// 解析一个 `w:lvl`(层级定义):start / numFmt / lvlText / lvlJc + 层级 pPr +
+/// 编号符 rPr(标签字体/字号——Symbol/Wingdings 圆点靠它,C-9)。已消费其起始标签。
 fn parse_lvl<R: std::io::BufRead>(reader: &mut Reader<R>) -> NumLevel {
     let mut level = NumLevel::default();
     let mut buf = Vec::new();
@@ -136,7 +136,7 @@ fn parse_lvl<R: std::io::BufRead>(reader: &mut Reader<R>) -> NumLevel {
             Ok(Event::Empty(e)) => apply_lvl_prop(&e, &mut level),
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"pPr" => level.ppr = props::parse_ppr(reader),
-                b"rPr" => skip_element(reader),
+                b"rPr" => level.rpr = props::parse_rpr(reader),
                 _ => {
                     apply_lvl_prop(&e, &mut level);
                     skip_element(reader);
