@@ -640,3 +640,273 @@ fn direct_rpr_rstyle_szcs_underline_kind_highlight_vert_align() {
     assert_eq!(plain.highlight, Some(Highlight::Off));
     assert!(!p.runs[1].underline);
 }
+
+// ============================================================ C-6:numbering 部件接线
+
+/// 把 document.xml 与若干额外部件压成最小合法 docx(numbering / styles 部件测试用)。
+fn build_docx_with_parts(document_xml: &str, extra_parts: &[(&str, &str)]) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default();
+        let base = [
+            ("[Content_Types].xml", CONTENT_TYPES),
+            ("_rels/.rels", ROOT_RELS),
+            ("word/document.xml", document_xml),
+            ("word/_rels/document.xml.rels", DOC_RELS),
+        ];
+        for (name, body) in base.iter().copied().chain(extra_parts.iter().copied()) {
+            zip.start_file(name, opts).expect("start_file");
+            zip.write_all(body.as_bytes()).expect("write");
+        }
+        zip.finish().expect("finish zip");
+    }
+    buf.into_inner()
+}
+
+/// 便利:把 body 内容 + 额外部件解析成 [`ParsedDoc`]。
+fn parse_body_with_parts(body_xml: &str, extra_parts: &[(&str, &str)]) -> ParsedDoc {
+    let doc = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>{body_xml}</w:body>
+</w:document>"#
+    );
+    parse_bytes(&build_docx_with_parts(&doc, extra_parts)).expect("parse synthetic docx")
+}
+
+/// numbering.xml 部件接线 + `w:numPr` 的 numId/ilvl 捕获(C-6)。
+#[test]
+fn numbering_part_and_num_pr_wire_into_document() {
+    use doc_core::numbering::NumFmt;
+
+    let numbering = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0">
+      <w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
+      <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>
+    </w:lvl>
+    <w:lvl w:ilvl="1">
+      <w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/>
+      <w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>"#;
+    let parsed = parse_body_with_parts(
+        r#"<w:p>
+             <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:jc w:val="center"/></w:pPr>
+             <w:r><w:t>item</w:t></w:r>
+           </w:p>
+           <w:p>
+             <w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr>
+             <w:r><w:t>sub</w:t></w:r>
+           </w:p>"#,
+        &[("word/numbering.xml", numbering)],
+    );
+    let doc = &parsed.document;
+    assert!(!doc.numbering.is_empty(), "numbering 部件应接进 Document");
+    let lvl0 = doc.numbering.level(1, 0).expect("numId 1 / ilvl 0");
+    assert_eq!(lvl0.fmt, NumFmt::Decimal);
+    assert_eq!(lvl0.lvl_text.as_deref(), Some("%1."));
+    assert_eq!(lvl0.ppr.ind_left, Some(720));
+
+    let Block::Paragraph(p0) = &doc.body[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(p0.num_id, Some(1), "numId 捕获(历史缺陷修复)");
+    assert_eq!(p0.list_level, Some(0));
+    assert_eq!(p0.align.as_deref(), Some("center"), "numPr 之后的 jc 不丢");
+    let Block::Paragraph(p1) = &doc.body[1] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!((p1.num_id, p1.list_level), (Some(1), Some(1)));
+}
+
+/// 无 numbering 部件:空编号表(列表段按普通段渲染),numPr 字段照常捕获。
+#[test]
+fn missing_numbering_part_yields_empty_table() {
+    let parsed = parse_body_xml(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="9"/></w:numPr></w:pPr>
+           <w:r><w:t>x</w:t></w:r></w:p>"#,
+    );
+    assert!(parsed.document.numbering.is_empty());
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(p.num_id, Some(9));
+}
+
+// ============================================================ C-7:表格保真解析
+
+/// tblPr 的 C-7 属性:tblBorders(六槽)/ tblCellMar / tblInd / tblW(pct)/ jc。
+#[test]
+fn tblpr_borders_margins_indent_width_jc() {
+    use doc_core::model::TableWidth;
+    use doc_core::style::Justification;
+
+    let parsed = parse_body_xml(
+        r#"<w:tbl>
+             <w:tblPr>
+               <w:tblStyle w:val="TableGrid"/>
+               <w:tblW w:w="2500" w:type="pct"/>
+               <w:jc w:val="center"/>
+               <w:tblInd w:w="360" w:type="dxa"/>
+               <w:tblBorders>
+                 <w:top w:val="single" w:sz="8" w:color="FF0000"/>
+                 <w:bottom w:val="single" w:sz="8"/>
+                 <w:start w:val="single" w:sz="4"/>
+                 <w:end w:val="single" w:sz="4"/>
+                 <w:insideH w:val="dashed" w:sz="2"/>
+                 <w:insideV w:val="none"/>
+               </w:tblBorders>
+               <w:tblCellMar>
+                 <w:top w:w="60" w:type="dxa"/>
+                 <w:start w:w="200" w:type="dxa"/>
+               </w:tblCellMar>
+             </w:tblPr>
+             <w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>
+             <w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>
+           </w:tbl>"#,
+    );
+    let Block::Table(t) = &parsed.document.body[0] else {
+        panic!("expected a table");
+    };
+    assert_eq!(t.style.as_deref(), Some("TableGrid"));
+    assert_eq!(t.width, Some(TableWidth::Pct(50.0)), "2500/50 = 50%");
+    assert_eq!(t.jc, Some(Justification::Center));
+    assert_eq!(t.indent, Some(360));
+    let b = &t.borders;
+    let top = b.top.as_ref().expect("top");
+    assert_eq!((top.val.as_str(), top.sz_eighth_pt), ("single", 8));
+    assert!(top.color.is_some(), "显式色保真");
+    assert!(
+        b.left.is_some() && b.right.is_some(),
+        "start/end 别名落 left/right"
+    );
+    assert_eq!(b.inside_h.as_ref().map(|x| x.val.as_str()), Some("dashed"));
+    assert_eq!(b.inside_v.as_ref().map(|x| x.val.as_str()), Some("none"));
+    assert_eq!(
+        (t.cell_margins.top, t.cell_margins.left),
+        (Some(60), Some(200))
+    );
+    assert_eq!(t.cell_margins.bottom, None, "未给的边不猜");
+}
+
+/// trPr 的 C-7 属性(hRule / cantSplit)与 tcPr 的 C-7 属性
+/// (tcBorders / vAlign / tcMar / pct-tcW)。
+#[test]
+fn trpr_and_tcpr_c7_props() {
+    use doc_core::model::{CellVAlign, HeightRule};
+
+    let parsed = parse_body_xml(
+        r#"<w:tbl>
+             <w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>
+             <w:tr>
+               <w:trPr><w:trHeight w:val="600" w:hRule="exact"/><w:cantSplit/></w:trPr>
+               <w:tc>
+                 <w:tcPr>
+                   <w:tcW w:w="2500" w:type="pct"/>
+                   <w:tcBorders>
+                     <w:top w:val="single" w:sz="12"/>
+                     <w:bottom w:val="none"/>
+                   </w:tcBorders>
+                   <w:vAlign w:val="center"/>
+                   <w:tcMar><w:start w:w="288" w:type="dxa"/><w:top w:w="120" w:type="dxa"/></w:tcMar>
+                 </w:tcPr>
+                 <w:p><w:r><w:t>a</w:t></w:r></w:p>
+               </w:tc>
+               <w:tc>
+                 <w:tcPr><w:vAlign w:val="bottom"/></w:tcPr>
+                 <w:p><w:r><w:t>b</w:t></w:r></w:p>
+               </w:tc>
+             </w:tr>
+             <w:tr>
+               <w:trPr><w:trHeight w:val="400" w:hRule="auto"/></w:trPr>
+               <w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc>
+               <w:tc><w:p><w:r><w:t>d</w:t></w:r></w:p></w:tc>
+             </w:tr>
+           </w:tbl>"#,
+    );
+    let Block::Table(t) = &parsed.document.body[0] else {
+        panic!("expected a table");
+    };
+    let r0 = &t.rows[0];
+    assert_eq!(r0.height, Some(600));
+    assert_eq!(r0.height_rule, HeightRule::Exact);
+    assert!(r0.cant_split);
+    assert_eq!(t.rows[1].height_rule, HeightRule::Auto);
+    assert!(!t.rows[1].cant_split);
+
+    let c0 = &r0.cells[0];
+    assert_eq!(c0.width, None, "pct 不落 dxa 槽");
+    assert_eq!(c0.width_pct, Some(50.0));
+    assert_eq!(c0.borders.top.as_ref().map(|b| b.sz_eighth_pt), Some(12));
+    assert_eq!(
+        c0.borders.bottom.as_ref().map(|b| b.val.as_str()),
+        Some("none"),
+        "显式 none 保真(冲突消解在渲染侧)"
+    );
+    assert_eq!(c0.borders.left, None);
+    assert_eq!(c0.v_align, Some(CellVAlign::Center));
+    assert_eq!((c0.margins.left, c0.margins.top), (Some(288), Some(120)));
+    assert_eq!(c0.margins.right, None);
+    assert_eq!(r0.cells[1].v_align, Some(CellVAlign::Bottom));
+}
+
+/// 裸 `<w:vMerge/>`(省略 val)是**延续格**(ECMA-376 §17.4.85,Word 实写形)。
+#[test]
+fn bare_vmerge_is_continue() {
+    let parsed = parse_body_xml(
+        r#"<w:tbl>
+             <w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>
+             <w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>
+               <w:p><w:r><w:t>anchor</w:t></w:r></w:p></w:tc></w:tr>
+             <w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc></w:tr>
+           </w:tbl>"#,
+    );
+    let Block::Table(t) = &parsed.document.body[0] else {
+        panic!("expected a table");
+    };
+    assert_eq!(t.rows[0].cells[0].v_merge, VMerge::Restart);
+    assert_eq!(
+        t.rows[1].cells[0].v_merge,
+        VMerge::Continue,
+        "省略 val = continue"
+    );
+}
+
+/// styles.xml 的表样式 tblPr 片段(tblBorders + tblCellMar)接进 `Style.tblpr`(C-7)。
+#[test]
+fn style_tblpr_borders_and_margins_wire_into_style_table() {
+    let styles = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="table" w:styleId="TableGrid">
+    <w:name w:val="Table Grid"/>
+    <w:tblPr>
+      <w:tblBorders>
+        <w:top w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/>
+      </w:tblBorders>
+      <w:tblCellMar><w:start w:w="120" w:type="dxa"/></w:tblCellMar>
+    </w:tblPr>
+  </w:style>
+</w:styles>"#;
+    let parsed = parse_body_with_parts(
+        r#"<w:p><w:r><w:t>x</w:t></w:r></w:p>"#,
+        &[("word/styles.xml", styles)],
+    );
+    let style = parsed
+        .document
+        .styles
+        .styles
+        .get("TableGrid")
+        .expect("TableGrid style");
+    assert_eq!(
+        style.tblpr.borders.top.as_ref().map(|b| b.sz_eighth_pt),
+        Some(4)
+    );
+    assert!(style.tblpr.borders.inside_h.is_some());
+    assert_eq!(style.tblpr.cell_margins.left, Some(120));
+}

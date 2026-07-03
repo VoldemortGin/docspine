@@ -250,3 +250,214 @@ def test_direct_bold_italic_color_render_distinct_spans(pdf_export_docx_bytes):
     assert bold and red
     assert bold[0]["font"] != red[0]["font"], "粗体与斜体应是不同 face"
     assert red[0]["color"] != bold[0]["color"], "红色 run 颜色应异于黑色 run"
+
+
+# ============================================================ C-6:numbering 列表渲染门
+
+# 三级编号:十进制 %1. / 小写字母 %2. / 小写罗马 %3.,各带层级缩进(悬挂 360)。
+_NUMBERING_3LVL = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0">
+      <w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/>
+      <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>
+    </w:lvl>
+    <w:lvl w:ilvl="1">
+      <w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/>
+      <w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr>
+    </w:lvl>
+    <w:lvl w:ilvl="2">
+      <w:start w:val="1"/><w:numFmt w:val="lowerRoman"/><w:lvlText w:val="%3."/>
+      <w:pPr><w:ind w:left="2160" w:hanging="360"/></w:pPr>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+  <w:num w:numId="2"><w:abstractNumId w:val="0"/></w:num>
+  <w:num w:numId="3">
+    <w:abstractNumId w:val="0"/>
+    <w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride>
+  </w:num>
+</w:numbering>"""
+
+
+def _list_p(text: str, num_id: int, ilvl: int) -> str:
+    return (
+        f'<w:p><w:pPr><w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/>'
+        f"</w:numPr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"
+    )
+
+
+def _list_docx(body_xml: str) -> bytes:
+    return build_docx(
+        _DOC_HEADER + f"\n  <w:body>{body_xml}</w:body>\n</w:document>",
+        numbering_xml=_NUMBERING_3LVL,
+    )
+
+
+def test_three_level_list_labels_render_in_reading_order():
+    """C-6 门:三级嵌套 1. / a. / i. 标签按文档序与正文交错读回;计数与重置正确。"""
+    body = (
+        _list_p("Alpha", 1, 0)
+        + _list_p("Beta", 1, 1)
+        + _list_p("Gamma", 1, 2)
+        + _list_p("Delta", 1, 2)
+        + _list_p("Echo", 1, 0)
+        + _list_p("Foxtrot", 1, 1)
+    )
+    d = _open_pdf(_render(_list_docx(body)))
+    got = d[0].get_text().split()
+    want = [
+        "1.", "Alpha", "a.", "Beta", "i.", "Gamma", "ii.", "Delta",
+        "2.", "Echo", "a.", "Foxtrot",  # 上层推进后下层重置。
+    ]
+    assert got == want, got
+
+
+def test_list_label_sits_left_of_text_with_level_indent():
+    """C-6 门:标签 x0 < 正文 x0(gutter);层级缩进生效(正文落 边距+left)。"""
+    d = _open_pdf(_render(_list_docx(_list_p("Alpha", 1, 0) + _list_p("Beta", 1, 1))))
+    words = {w[4]: (w[0], w[1]) for w in d[0].get_text_words()}
+    label_x, alpha_x = words["1."][0], words["Alpha"][0]
+    assert label_x < alpha_x, "标签画在正文起点左侧"
+    assert abs(alpha_x - (72.0 + 36.0)) < 2.0, "一级正文对齐 left=720twip"
+    assert abs(words["Beta"][0] - (72.0 + 72.0)) < 2.0, "二级正文对齐 left=1440twip"
+    assert abs(words["a."][1] - words["Beta"][1]) < 1.0, "标签与正文同基线行"
+
+
+def test_independent_lists_restart_and_start_override():
+    """C-6 门:独立 numId 各自计数;startOverride 改写起值(restart 语义)。"""
+    body = (
+        _list_p("one", 1, 0)
+        + _list_p("two", 1, 0)
+        + _list_p("fresh", 2, 0)
+        + _list_p("fifth", 3, 0)
+    )
+    d = _open_pdf(_render(_list_docx(body)))
+    got = d[0].get_text().split()
+    assert got == ["1.", "one", "2.", "two", "1.", "fresh", "5.", "fifth"], got
+
+
+# ============================================================ C-7:表格保真渲染门
+
+_FULL_BORDERS = """<w:tblBorders>
+  <w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/>
+  <w:left w:val="single" w:sz="8"/><w:right w:val="single" w:sz="8"/>
+  <w:insideH w:val="single" w:sz="8"/><w:insideV w:val="single" w:sz="8"/>
+</w:tblBorders>"""
+
+
+def _stroke_segments(page) -> list:
+    """页上全部描边线段(引擎逐边独立线 op → 每条物理边一段)。"""
+    return [
+        it
+        for dr in page.get_drawings()
+        if dr.get("type") == "s"
+        for it in dr.get("items", [])
+        if it[0] == "l"
+    ]
+
+
+def test_full_borders_paint_conflict_resolved_edge_count():
+    """C-7 门:全边框 + gridSpan/vMerge 合并——线段数恰为消解后的物理边数,
+    合并区内无线;每格文字都在其网格矩形内(±2pt)。"""
+    body = f"""<w:tbl>
+      <w:tblPr>{_FULL_BORDERS}</w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:tcPr><w:gridSpan w:val="2"/><w:vMerge w:val="restart"/></w:tcPr>
+          <w:p><w:r><w:t>Wide</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:gridSpan w:val="2"/><w:vMerge/></w:tcPr><w:p/></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>Ada</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Bob</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"""
+    page = _open_pdf(_render(_body(body)))[0]
+    # 物理边:横 4×2=8 段,再减合并区内横线 2 段 = 6;竖:行0/行1 各 2(内竖线被合并
+    # 压掉)+ 行2 3 段 = 7;共 13。
+    assert len(_stroke_segments(page)) == 13
+    assert page.get_text().split() == ["Wide", "Ada", "Bob"]
+    # 词落在各自网格矩形内:表自边距 72 起,列宽 120pt。
+    words = {w[4]: w for w in page.get_text_words()}
+    assert 72.0 - 2.0 < words["Ada"][0] and words["Ada"][2] < 192.0 + 2.0
+    assert 192.0 - 2.0 < words["Bob"][0] and words["Bob"][2] < 312.0 + 2.0
+
+
+def test_tc_borders_override_tbl_borders_with_color():
+    """C-7 门:tcBorders(红,sz16)盖过 tblBorders(黑,sz8)——出现 2pt 红线。"""
+    body = f"""<w:tbl>
+      <w:tblPr>{_FULL_BORDERS}</w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>
+      <w:tr>
+        <w:tc>
+          <w:tcPr><w:tcBorders><w:top w:val="single" w:sz="16" w:color="FF0000"/></w:tcBorders></w:tcPr>
+          <w:p><w:r><w:t>hot</w:t></w:r></w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>"""
+    page = _open_pdf(_render(_body(body)))[0]
+    strokes = [dr for dr in page.get_drawings() if dr.get("type") == "s"]
+    red = [dr for dr in strokes if dr.get("color") == (1.0, 0.0, 0.0)]
+    assert red, [dr.get("color") for dr in strokes]
+    assert abs(red[0].get("width") - 2.0) < 1e-6, "sz=16 八分之一磅 → 2pt"
+
+
+def test_cell_margins_offset_text_x0():
+    """C-7 门:缺省左边距 108twip=5.4pt;tcMar left=288twip=14.4pt 逐边生效。"""
+
+    def first_word_x0(tcpr: str) -> float:
+        body = f"""<w:tbl>
+          <w:tblGrid><w:gridCol w:w="4800"/></w:tblGrid>
+          <w:tr><w:tc>{tcpr}<w:p><w:r><w:t>margined</w:t></w:r></w:p></w:tc></w:tr>
+        </w:tbl>"""
+        page = _open_pdf(_render(_body(body)))[0]
+        return page.get_text_words()[0][0]
+
+    assert abs(first_word_x0("") - (72.0 + 5.4)) < 2.0
+    wide = first_word_x0(
+        '<w:tcPr><w:tcMar><w:start w:w="288" w:type="dxa"/></w:tcMar></w:tcPr>'
+    )
+    assert abs(wide - (72.0 + 14.4)) < 2.0
+
+
+def test_valign_and_row_too_tall_warn_once():
+    """C-7 门:vAlign(center)与超页高行各浮一次降级告警。"""
+    body = """<w:tbl>
+      <w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>
+      <w:tr>
+        <w:trPr><w:trHeight w:val="20000" w:hRule="exact"/></w:trPr>
+        <w:tc><w:tcPr><w:vAlign w:val="center"/></w:tcPr>
+          <w:p><w:r><w:t>deep</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"""
+    doc = docspine.open_bytes(_body(body))
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        doc.to_pdf()
+    msgs = [str(w.message) for w in ws]
+    assert sum("vertical alignment" in m for m in msgs) == 1, msgs
+    assert sum("taller than the page body" in m for m in msgs) == 1, msgs
+
+
+def test_thirty_row_table_paginates_rows_whole():
+    """C-7 门:30 行表跨页——行整行挪页,同一行的左右两格永不分家。"""
+    rows = "".join(
+        f"""<w:tr><w:trPr><w:trHeight w:val="600"/></w:trPr>
+          <w:tc><w:p><w:r><w:t>L{i:02d}</w:t></w:r></w:p></w:tc>
+          <w:tc><w:p><w:r><w:t>R{i:02d}</w:t></w:r></w:p></w:tc></w:tr>"""
+        for i in range(30)
+    )
+    body = f"""<w:tbl>
+      <w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>
+      {rows}
+    </w:tbl>"""
+    d = _open_pdf(_render(_body(body)))
+    assert d.page_count == 2, "30 行 × 30pt > 一页正文高"
+    pages = [d[i].get_text().split() for i in range(d.page_count)]
+    for i in range(30):
+        on = [n for n, toks in enumerate(pages) if f"L{i:02d}" in toks]
+        assert len(on) == 1, f"行 {i} 应恰好落在一页"
+        assert f"R{i:02d}" in pages[on[0]], f"行 {i} 的两格必须同页"

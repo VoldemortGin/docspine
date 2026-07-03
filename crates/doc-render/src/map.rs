@@ -15,16 +15,20 @@
 //! - caps/smallCaps → 文本大写(smallCaps 不缩小,v1 近似);vanish → 跳过(隐藏);
 //!   上/下标 → 字号 ×0.65 近似(引擎无基线偏移)。
 //! - `pageBreakBefore` → 段前插 `Block::PageBreak`(节首块除外——本就新起一页)。
-//! - 段落边框 / 底纹 / 图片:解析保真,渲染降级 + 一次性告警(C-7/C-8 落地)。
+//! - **列表(C-6)**:带 `numPr` 的段落按文档顺序推进 [`ListCounters`],最终标签串
+//!   喂引擎的 [`ListLabel`](标签右对齐到正文起点前 `gutter` 处);悬挂缩进折成
+//!   gutter(文本对齐 left 缩进,与 Word 的列表版式一致)。
+//! - 段落边框 / 底纹 / 图片:解析保真,渲染降级 + 一次性告警(C-8 落地图片)。
 
 use doc_core::model::{
     Block as DocBlock, BreakKind, Document, Paragraph, RunSegment, Table as DocTable, TextRun,
 };
+use doc_core::numbering::ListCounters;
 use doc_core::style::{
     resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveLineSpacing,
     EffectiveParaProps, EffectiveRunProps, Justification, VertAlign,
 };
-use pdf_typeset::{Align, Block, LineSpacing, PageGeom, ParaProps, Rgb, Run, RunStyle};
+use pdf_typeset::{Align, Block, LineSpacing, ListLabel, PageGeom, ParaProps, Rgb, Run, RunStyle};
 
 use crate::section::page_geom;
 use crate::table::map_table;
@@ -32,6 +36,14 @@ use crate::warn::RenderWarning;
 
 /// 上/下标的字号近似缩放(引擎无基线偏移,v1 只缩字号)。
 const VERT_ALIGN_SCALE: f64 = 0.65;
+
+/// 列表标签与正文起点的缺省空隙(磅;层级无悬挂缩进时用)。
+const DEFAULT_LIST_GUTTER: f64 = 4.0;
+
+/// 悬挂缩进折算标签空隙的比例(引擎不知标签宽,标签右对齐到正文起点前 gutter 处;
+/// 取 0.35×hanging 并夹在 2..=10pt——Word 缺省 360twip=18pt 悬挂 → 6.3pt 空隙,
+/// 标签左缘落点与 Word 的首行缩进位相近)。
+const LIST_GUTTER_RATIO: f64 = 0.35;
 
 /// 一节的渲染计划:页面几何 + 引擎块序列。
 pub(crate) struct SectionPlan {
@@ -45,22 +57,57 @@ pub(crate) struct MappedDoc {
     pub(crate) warnings: Vec<RenderWarning>,
 }
 
-/// 映射期的告警收集器:docspine 侧的降级每种只报一次(引擎侧自带去重)。
-pub(crate) struct Warnings {
+/// 映射期上下文:告警收集(docspine 侧的降级每种只报一次,引擎侧自带去重)+
+/// 列表计数器(C-6,按文档顺序推进)+ 当前节的正文框架(C-7,表格 pct 宽解析
+/// 与 RowTooTall 检测用)。
+pub(crate) struct MapCtx {
     list: Vec<RenderWarning>,
+    /// per-numId per-level 列表计数(一份文档一实例,含表格内段落,文档序推进)。
+    counters: ListCounters,
+    /// 当前节的正文区宽(磅:页面宽 − 左右边距)。
+    body_w: f64,
+    /// 当前节的正文区高(磅:页面高 − 上下边距)。
+    body_h: f64,
     border_warned: bool,
     shading_warned: bool,
     picture_warned: bool,
+    valign_warned: bool,
+    row_warned: bool,
+    numbering_warned: bool,
 }
 
-impl Warnings {
+impl MapCtx {
     fn new() -> Self {
-        Warnings {
+        let mut ctx = MapCtx {
             list: Vec::new(),
+            counters: ListCounters::new(),
+            body_w: 1.0,
+            body_h: 1.0,
             border_warned: false,
             shading_warned: false,
             picture_warned: false,
-        }
+            valign_warned: false,
+            row_warned: false,
+            numbering_warned: false,
+        };
+        ctx.set_frame(&page_geom(&doc_core::model::Section::default()));
+        ctx
+    }
+
+    /// 切换到一节的正文框架(每节映射前调用)。
+    fn set_frame(&mut self, geom: &PageGeom) {
+        self.body_w = (geom.width - geom.margin_left - geom.margin_right).max(1.0);
+        self.body_h = (geom.height - geom.margin_top - geom.margin_bottom).max(1.0);
+    }
+
+    /// 当前节的正文区宽(磅)。
+    pub(crate) fn body_width(&self) -> f64 {
+        self.body_w
+    }
+
+    /// 当前节的正文区高(磅)。
+    pub(crate) fn body_height(&self) -> f64 {
+        self.body_h
     }
 
     fn para_border(&mut self) {
@@ -83,33 +130,58 @@ impl Warnings {
             self.list.push(RenderWarning::PictureSkipped);
         }
     }
+
+    fn numbering_indirection(&mut self) {
+        if !self.numbering_warned {
+            self.numbering_warned = true;
+            self.list.push(RenderWarning::NumberingIndirectionSkipped);
+        }
+    }
+
+    /// 单元格 vAlign(center/bottom)按顶对齐渲染的一次性降级(table.rs 调用)。
+    pub(crate) fn cell_valign(&mut self) {
+        if !self.valign_warned {
+            self.valign_warned = true;
+            self.list.push(RenderWarning::CellVAlignIgnored);
+        }
+    }
+
+    /// 行高超过一页正文高度的一次性降级(table.rs 调用)。
+    pub(crate) fn row_too_tall(&mut self) {
+        if !self.row_warned {
+            self.row_warned = true;
+            self.list.push(RenderWarning::RowTooTall);
+        }
+    }
 }
 
 /// 把整篇文档映射成按节分组的引擎块序列(纯计算,不触引擎状态)。
 pub(crate) fn map_document(doc: &Document) -> MappedDoc {
-    let mut w = Warnings::new();
+    let mut ctx = MapCtx::new();
     // 渲染前体检一次样式表:basedOn 环 / 悬空引用浮成告警(解析自身带防环)。
     for sw in doc.styles.validate() {
-        w.list.push(RenderWarning::Style(sw));
+        ctx.list.push(RenderWarning::Style(sw));
     }
 
     let mut sections = Vec::new();
     let mut start = 0usize;
     for sect in &doc.sections {
         if sect.cols > 1 {
-            w.list
+            ctx.list
                 .push(RenderWarning::MultiColumnFlattened { cols: sect.cols });
         }
         let end = sect.end_block.min(doc.body.len()).max(start);
+        let geom = page_geom(sect);
+        ctx.set_frame(&geom);
         sections.push(SectionPlan {
-            geom: page_geom(sect),
-            blocks: map_blocks(doc, &doc.body[start..end], None, &mut w),
+            geom,
+            blocks: map_blocks(doc, &doc.body[start..end], None, &mut ctx),
         });
         start = end;
     }
     // 防御:节序列缺失 / 未覆盖全部块(解析层保证不发生)也不丢内容。
     if start < doc.body.len() {
-        let tail = map_blocks(doc, &doc.body[start..], None, &mut w);
+        let tail = map_blocks(doc, &doc.body[start..], None, &mut ctx);
         match sections.last_mut() {
             Some(last) => last.blocks.extend(tail),
             None => sections.push(SectionPlan {
@@ -126,7 +198,7 @@ pub(crate) fn map_document(doc: &Document) -> MappedDoc {
     }
     MappedDoc {
         sections,
-        warnings: w.list,
+        warnings: ctx.list,
     }
 }
 
@@ -136,24 +208,25 @@ pub(crate) fn map_blocks(
     doc: &Document,
     blocks: &[DocBlock],
     table: Option<&DocTable>,
-    w: &mut Warnings,
+    ctx: &mut MapCtx,
 ) -> Vec<Block> {
     let mut out = Vec::new();
     for block in blocks {
         match block {
-            DocBlock::Paragraph(p) => map_paragraph(doc, p, table, w, &mut out),
-            DocBlock::Table(t) => out.push(Block::Table(map_table(doc, t, w))),
+            DocBlock::Paragraph(p) => map_paragraph(doc, p, table, ctx, &mut out),
+            DocBlock::Table(t) => out.push(Block::Table(map_table(doc, t, ctx))),
         }
     }
     out
 }
 
-/// 映射一个段落:有效样式 → 引擎段落属性;run 分段折叠;段内换页把段落切成多段。
+/// 映射一个段落:有效样式 → 引擎段落属性;run 分段折叠;段内换页把段落切成多段;
+/// 带 `numPr` 的段落推进列表计数产出标签(C-6)。
 fn map_paragraph(
     doc: &Document,
     para: &Paragraph,
     table: Option<&DocTable>,
-    w: &mut Warnings,
+    ctx: &mut MapCtx,
     out: &mut Vec<Block>,
 ) {
     let eff = match table {
@@ -161,22 +234,44 @@ fn map_paragraph(
         None => resolve_para(doc, para),
     };
     if eff.borders.any() {
-        w.para_border();
+        ctx.para_border();
     }
     if eff.shading.is_some() {
-        w.para_shading();
+        ctx.para_shading();
     }
     // 段前分页:引擎支持,直接插 PageBreak(节首块除外——该页本就新起)。
     if eff.page_break_before && !out.is_empty() {
         out.push(Block::PageBreak);
     }
-    let props = para_props(&eff);
+    let mut props = para_props(&eff);
+
+    // 列表标签(C-6):按文档顺序推进计数;numId=0 / 层级无定义 / numFmt=none 不产
+    // 标签(缩进仍经层级 pPr 级联生效);numStyleLink 间接 v1 不解 → 一次性告警。
+    if let Some(num_id) = para.num_id {
+        if doc.numbering.uses_num_style_link(num_id) {
+            ctx.numbering_indirection();
+        }
+        let ilvl = para.list_level.unwrap_or(0);
+        if let Some(text) = ctx.counters.advance(&doc.numbering, num_id, ilvl) {
+            // Word 列表版式:标签画在首行缩进位(left − hanging),正文**含首行**对齐
+            // left。引擎把标签右对齐到首行文本起点前 gutter 处——因此清零负首行缩进
+            // (文本全部落在 left),悬挂量按比例折成 gutter。
+            let hanging = f64::from(-eff.first_line_indent_pt).max(0.0);
+            let gutter = if hanging > 0.0 {
+                (hanging * LIST_GUTTER_RATIO).clamp(2.0, 10.0)
+            } else {
+                DEFAULT_LIST_GUTTER
+            };
+            props.first_line_indent = props.first_line_indent.max(0.0);
+            props.list = Some(ListLabel { text, gutter });
+        }
+    }
 
     // run 序列 → 若干「段落片」,段内换页/换栏是切分点。
     let mut parts: Vec<Vec<Run>> = vec![Vec::new()];
     for run in &para.runs {
         if !run.pictures.is_empty() {
-            w.picture(); // 图片布局是 C-8;文字照常。
+            ctx.picture(); // 图片布局是 C-8;文字照常。
         }
         let eff_r = match table {
             Some(t) => resolve_run_in_table(doc, t, para, run),
@@ -220,7 +315,11 @@ fn map_paragraph(
         } else {
             part
         };
-        out.push(Block::Paragraph(props.clone(), runs));
+        let mut p = props.clone();
+        if i > 0 {
+            p.list = None; // 标签只画在首片(段内换页不重复编号)。
+        }
+        out.push(Block::Paragraph(p, runs));
     }
 }
 
@@ -618,6 +717,7 @@ mod tests {
                 height: Some(400),
                 ..Row::default()
             }],
+            ..Table::default()
         };
         doc.body = vec![DocBlock::Table(table)];
         doc.sections[0].end_block = 1;
@@ -643,5 +743,169 @@ mod tests {
             panic!("cell content should be a paragraph");
         };
         assert_eq!(runs[0].style.size, 9.0, "表格样式链在表内生效");
+    }
+
+    // ------------------------------------------------------------ C-6:列表标签
+
+    /// 造一张两级编号表:lvl0 = 十进制 `%1.`(ind 720/hanging 360),
+    /// lvl1 = 小写字母 `%2.`(ind 1440/hanging 360);numId 1、2 都指向它。
+    fn install_numbering(doc: &mut Document) {
+        use doc_core::numbering::{AbstractNum, Num, NumFmt, NumLevel};
+        let lvl = |fmt: NumFmt, text: &str, left: i64| NumLevel {
+            fmt,
+            lvl_text: Some(text.to_string()),
+            ppr: doc_core::style::ParaProps {
+                ind_left: Some(left),
+                ind_hanging: Some(360),
+                ..Default::default()
+            },
+            ..NumLevel::default()
+        };
+        doc.numbering.abstracts.insert(
+            0,
+            AbstractNum {
+                levels: [
+                    (0u32, lvl(NumFmt::Decimal, "%1.", 720)),
+                    (1u32, lvl(NumFmt::LowerLetter, "%2.", 1440)),
+                ]
+                .into_iter()
+                .collect(),
+                ..AbstractNum::default()
+            },
+        );
+        for id in [1u32, 2u32] {
+            doc.numbering.nums.insert(
+                id,
+                doc_core::numbering::Num {
+                    abstract_id: 0,
+                    ..Num::default()
+                },
+            );
+        }
+    }
+
+    fn list_para(text: &str, num_id: u32, ilvl: u32) -> DocBlock {
+        let mut p = para_with_text(text);
+        p.num_id = Some(num_id);
+        p.list_level = Some(ilvl);
+        DocBlock::Paragraph(p)
+    }
+
+    /// 两级嵌套计数与重置、独立 numId 各自计数;悬挂缩进折成 gutter、
+    /// 文本(含首行)对齐 left 缩进;层级缩进经级联生效。
+    #[test]
+    fn list_labels_count_reset_and_fold_hanging_into_gutter() {
+        let mut doc = doc_with_body(vec![
+            list_para("one", 1, 0),
+            list_para("sub a", 1, 1),
+            list_para("sub b", 1, 1),
+            list_para("two", 1, 0),
+            list_para("fresh", 2, 0),
+            DocBlock::Paragraph(para_with_text("plain")),
+        ]);
+        install_numbering(&mut doc);
+        let blocks = &map_document(&doc).sections[0].blocks;
+        let labels: Vec<Option<String>> = blocks
+            .iter()
+            .map(|b| {
+                let Block::Paragraph(props, _) = b else {
+                    panic!("expected paragraphs only");
+                };
+                props.list.as_ref().map(|l| l.text.clone())
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                Some("1.".into()),
+                Some("a.".into()),
+                Some("b.".into()),
+                Some("2.".into()),
+                Some("1.".into()), // 新 numId:独立计数。
+                None,              // 无 numPr 的普通段。
+            ]
+        );
+        let Block::Paragraph(props, _) = &blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(props.indent_left, 36.0, "层级 pPr 缩进 720 twip");
+        assert_eq!(
+            props.first_line_indent, 0.0,
+            "悬挂折进 gutter,文本对齐 left"
+        );
+        let label = props.list.as_ref().expect("list label");
+        assert!((label.gutter - 6.3).abs() < 1e-6, "0.35 × 18pt 悬挂");
+        let Block::Paragraph(props, _) = &blocks[1] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(props.indent_left, 72.0, "二级缩进 1440 twip");
+    }
+
+    /// 段内换页把列表段切成多片:标签只画在首片。
+    #[test]
+    fn list_label_only_on_first_part_after_page_break() {
+        let mut run = TextRun::from_text("before");
+        run.segments.push(RunSegment::Break(BreakKind::Page));
+        run.segments.push(RunSegment::Text("after".into()));
+        let mut p = Paragraph {
+            runs: vec![run],
+            ..Paragraph::default()
+        };
+        p.num_id = Some(1);
+        p.list_level = Some(0);
+        let mut doc = doc_with_body(vec![DocBlock::Paragraph(p)]);
+        install_numbering(&mut doc);
+        let blocks = &map_document(&doc).sections[0].blocks;
+        let Block::Paragraph(first, _) = &blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        assert!(first.list.is_some(), "首片带标签");
+        let Block::Paragraph(second, _) = &blocks[2] else {
+            panic!("expected a paragraph");
+        };
+        assert!(second.list.is_none(), "换页后的尾片不重复编号");
+    }
+
+    /// numId=0(显式去编号)与未登记 numId:不产标签;numStyleLink 间接:
+    /// 一次性降级告警。
+    #[test]
+    fn list_degradations_no_label_and_num_style_link_warning() {
+        let mut doc = doc_with_body(vec![
+            list_para("off", 0, 0),
+            list_para("dangling", 9, 0),
+            list_para("linked", 3, 0),
+            list_para("linked again", 3, 0),
+        ]);
+        install_numbering(&mut doc);
+        doc.numbering.abstracts.insert(
+            1,
+            doc_core::numbering::AbstractNum {
+                num_style_link: Some("ListStyle".into()),
+                ..Default::default()
+            },
+        );
+        doc.numbering.nums.insert(
+            3,
+            doc_core::numbering::Num {
+                abstract_id: 1,
+                ..Default::default()
+            },
+        );
+        let mapped = map_document(&doc);
+        for b in &mapped.sections[0].blocks {
+            let Block::Paragraph(props, _) = b else {
+                panic!("expected paragraphs only");
+            };
+            assert!(props.list.is_none());
+        }
+        let kinds: Vec<&str> = mapped.warnings.iter().map(RenderWarning::kind).collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == "numbering-indirection-skipped")
+                .count(),
+            1,
+            "两个 linked 段只报一次"
+        );
     }
 }

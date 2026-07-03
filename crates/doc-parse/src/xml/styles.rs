@@ -15,7 +15,8 @@
 //! ```
 //!
 //! 解析是**机械搬运**:把 docDefaults 与每条 `w:style` 的 id / 种类 / basedOn / default
-//! 标志 + rPr/pPr 片段(经共享的 [`props`] 解析器)装进 [`StyleTable`],**不做级联**——
+//! 标志 + rPr/pPr/tblPr 片段(经共享的 [`props`] 解析器;tblPr 仅表样式的边框/边距,
+//! C-7)装进 [`StyleTable`],**不做级联**——
 //! 级联合并在 doc-core 的 `style::resolve_*`(纯模型计算)。容错:未知元素跳过、
 //! 缺失属性 → 缺省、绝不 panic。
 
@@ -132,6 +133,7 @@ fn parse_style<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesStart) 
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"rPr" => style.rpr = props::parse_rpr(reader),
                 b"pPr" => style.ppr = props::parse_ppr(reader),
+                b"tblPr" => style.tblpr = props::parse_style_tblpr(reader),
                 _ => {
                     apply_style_child(&e, &mut style);
                     skip_element(reader);

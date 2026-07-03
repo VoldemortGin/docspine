@@ -11,7 +11,10 @@
 //!   区分 `restart` 起始格与 `continue` 延续格)。
 
 use crate::geom::{Emu, Twips};
-use crate::style::{ParaProps, RunProps, StyleTable, Theme};
+use crate::numbering::NumberingTable;
+use crate::style::{
+    CellBorders, CellMargins, Justification, ParaProps, RunProps, StyleTable, TableBorders, Theme,
+};
 
 /// 一份解析好的 Word 文档。
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -27,6 +30,9 @@ pub struct Document {
     pub styles: StyleTable,
     /// 主题(`word/theme/theme1.xml`:fontScheme + clrScheme)。部件缺失时为空主题。
     pub theme: Theme,
+    /// 编号表(`word/numbering.xml`:abstractNum 层级 + num 实例)。部件缺失时为空表。
+    /// 计数与标签经 [`crate::numbering::ListCounters`] 在渲染侧推进。
+    pub numbering: NumberingTable,
 }
 
 /// 一节(`w:sectPr`)的页面几何:页面尺寸 / 页边距 / 纸向 / 分栏。
@@ -126,6 +132,9 @@ pub struct Paragraph {
     pub align: Option<String>,
     /// 列表/大纲层级(`w:pPr` > `w:numPr` > `w:ilvl@w:val`),缺省 `None`。
     pub list_level: Option<u32>,
+    /// 编号实例 id(`w:pPr` > `w:numPr` > `w:numId@w:val`),缺省 `None`。
+    /// `Some(0)` 是 Word 的「显式去编号」语义;标签经 [`Document::numbering`] 解析。
+    pub num_id: Option<u32>,
     /// 直接格式化的 pPr 原始片段(**全 Option**,C-4:spacing / ind / pBdr / shd /
     /// keep 系列;`jc` 与上面的 `align` 便利字段并存,契约不变)。
     /// 渲染侧走 [`crate::style::resolve_para`] 消费本片段。
@@ -223,6 +232,15 @@ pub enum BreakKind {
     Column,
 }
 
+/// 表格总宽(`w:tblPr` > `w:tblW`):dxa 绝对宽或百分比宽。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TableWidth {
+    /// 绝对宽(twip,`@w:type="dxa"`)。
+    Dxa(Twips),
+    /// 百分比宽(0..=100,`@w:type="pct"`,原始值以 1/50 个百分点存储)。
+    Pct(f32),
+}
+
 /// 一张表格(`w:tbl`)。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Table {
@@ -232,6 +250,17 @@ pub struct Table {
     pub rows: Vec<Row>,
     /// 表格样式名(`w:tblPr` > `w:tblStyle@w:val`),原样保留。
     pub style: Option<String>,
+    /// 表级边框(`w:tblPr` > `w:tblBorders`:外四边 + insideH/insideV)。
+    /// 冲突消解(`tcBorders` > `tblBorders` > 表样式)在渲染侧进行。
+    pub borders: TableBorders,
+    /// 表级单元格缺省边距(`w:tblPr` > `w:tblCellMar`)。
+    pub cell_margins: CellMargins,
+    /// 表格缩进(twip,`w:tblPr` > `w:tblInd@w:w`,仅 `type="dxa"`)。
+    pub indent: Option<Twips>,
+    /// 表格整体对齐(`w:tblPr` > `w:jc@w:val`)。
+    pub jc: Option<Justification>,
+    /// 表格总宽(`w:tblPr` > `w:tblW`)。
+    pub width: Option<TableWidth>,
 }
 
 impl Table {
@@ -247,14 +276,42 @@ impl Table {
     }
 }
 
+/// 行高规则(`w:trPr` > `w:trHeight@w:hRule`)。缺省 `atLeast`(内容可长高)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeightRule {
+    /// 至少(缺省):`w:val` 是下限,内容可长高。
+    #[default]
+    AtLeast,
+    /// 精确:`w:val` 即行高(v1 渲染按下限近似,内容不截断)。
+    Exact,
+    /// 自动:高度随内容,`w:val` 忽略。
+    Auto,
+}
+
+impl HeightRule {
+    /// 解析 `@w:hRule`。未知值按缺省 `atLeast` 容错。
+    pub fn from_attr(s: &str) -> Self {
+        match s {
+            "exact" => HeightRule::Exact,
+            "auto" => HeightRule::Auto,
+            _ => HeightRule::AtLeast,
+        }
+    }
+}
+
 /// 表格的一行(`w:tr`)。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Row {
     pub cells: Vec<Cell>,
     /// 行高(twip,`w:trPr` > `w:trHeight@w:val`)。
     pub height: Option<Twips>,
+    /// 行高规则(`w:trPr` > `w:trHeight@w:hRule`)。
+    pub height_rule: HeightRule,
     /// 是否为表头行(`w:trPr` > `w:tblHeader`)。
     pub is_header: bool,
+    /// 行不跨页(`w:trPr` > `w:cantSplit`)。v1 渲染对**所有**行整行挪页
+    /// (引擎内建),该标志仅保真刻画。
+    pub cant_split: bool,
 }
 
 /// 表格单元格(`w:tc`)。内容是块序列(段落 + 可嵌套的表),所以嵌套表天然落在这里。
@@ -268,8 +325,40 @@ pub struct Cell {
     pub v_merge: VMerge,
     /// 单元格宽度(twip,`w:tcPr` > `w:tcW@w:w`,仅当 `w:type="dxa"` 时为绝对 twip)。
     pub width: Option<Twips>,
+    /// 单元格百分比宽(0..=100,`w:tcPr` > `w:tcW@w:type="pct"`;渲染侧对正文宽解析)。
+    pub width_pct: Option<f32>,
     /// 单元格底纹/填充色(`w:tcPr` > `w:shd@w:fill`,`"RRGGBB"`;`"auto"` -> `None`)。
     pub fill: Option<Color>,
+    /// 单元格边框(`w:tcPr` > `w:tcBorders`)。冲突消解在渲染侧(优先于表级)。
+    pub borders: CellBorders,
+    /// 单元格内容纵向对齐(`w:tcPr` > `w:vAlign@w:val`)。
+    pub v_align: Option<CellVAlign>,
+    /// 单元格边距覆盖(`w:tcPr` > `w:tcMar`,逐边覆盖表级 tblCellMar)。
+    pub margins: CellMargins,
+}
+
+/// 单元格内容纵向对齐(`w:vAlign@w:val`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CellVAlign {
+    /// 顶对齐(缺省)。
+    #[default]
+    Top,
+    /// 垂直居中。
+    Center,
+    /// 底对齐。
+    Bottom,
+}
+
+impl CellVAlign {
+    /// 解析 `w:vAlign@w:val`。未知值 → `None`(容错,当未设置)。
+    pub fn from_attr(s: &str) -> Option<Self> {
+        Some(match s {
+            "top" => CellVAlign::Top,
+            "center" => CellVAlign::Center,
+            "bottom" => CellVAlign::Bottom,
+            _ => return None,
+        })
+    }
 }
 
 impl Cell {
@@ -294,8 +383,9 @@ impl Cell {
 
 /// 纵向合并(`w:vMerge`)状态。
 ///
-/// WordprocessingML 的纵向合并语义:`w:vMerge w:val="restart"`(或省略 `val` 但元素存在)是
-/// 合并区的**起始格**(承载内容并向下吞并);`w:val="continue"` 是被吞并的**延续格**(通常空);
+/// WordprocessingML 的纵向合并语义(ECMA-376 §17.4.85):`w:vMerge w:val="restart"` 是
+/// 合并区的**起始格**(承载内容并向下吞并);`w:val="continue"` **或省略 `val` 但元素存在**
+/// 是被吞并的**延续格**(通常空——Word 写延续格就是裸 `<w:vMerge/>`);
 /// 完全没有 `w:vMerge` 元素则该格不参与纵向合并。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VMerge {

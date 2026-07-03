@@ -8,6 +8,7 @@ pub mod error;
 pub mod export;
 pub mod geom;
 pub mod model;
+pub mod numbering;
 pub mod style;
 
 pub use error::{DocError, Result};
@@ -16,11 +17,12 @@ pub use geom::{
     TWIPS_PER_POINT,
 };
 pub use model::{
-    Block, BreakKind, Cell, Color, Document, Orientation, PageMargins, Paragraph, Picture, Row,
-    RunSegment, Section, Table, TextRun, VMerge,
+    Block, BreakKind, Cell, CellVAlign, Color, Document, HeightRule, Orientation, PageMargins,
+    Paragraph, Picture, Row, RunSegment, Section, Table, TableWidth, TextRun, VMerge,
 };
+pub use numbering::{ListCounters, NumberingTable};
 pub use style::{
-    resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveLineSpacing,
-    EffectiveParaProps, EffectiveRunProps, StyleTable, StyleWarning, Theme, UnderlineKind,
-    VertAlign,
+    resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, resolve_table,
+    EffectiveLineSpacing, EffectiveParaProps, EffectiveRunProps, EffectiveTableProps, StyleTable,
+    StyleWarning, Theme, UnderlineKind, VertAlign,
 };

@@ -27,6 +27,15 @@ pub enum RenderWarning {
     ParaShadingOmitted,
     /// 内嵌图片本批不渲染(图片布局是 C-8)。
     PictureSkipped,
+    /// 列表编号落在未解的 `styleLink`/`numStyleLink` 间接上(C-6 声明降级):
+    /// 该 numId 无自有层级定义,段落按普通段渲染(缩进照常级联)。
+    NumberingIndirectionSkipped,
+    /// 单元格纵向对齐(`w:vAlign` center/bottom)按顶对齐渲染(引擎单元格
+    /// 暂无 vAlign 槽;解析保真,C-7 声明降级)。
+    CellVAlignIgnored,
+    /// 表格行高超过一页正文高度:行不跨页(整行挪页)语义下该行溢出页面
+    /// (引擎“行不分割”的 v1 限制)。
+    RowTooTall,
 }
 
 impl RenderWarning {
@@ -52,6 +61,9 @@ impl RenderWarning {
             RenderWarning::ParaBorderOmitted => "para-border-omitted",
             RenderWarning::ParaShadingOmitted => "para-shading-omitted",
             RenderWarning::PictureSkipped => "picture-skipped",
+            RenderWarning::NumberingIndirectionSkipped => "numbering-indirection-skipped",
+            RenderWarning::CellVAlignIgnored => "cell-valign-ignored",
+            RenderWarning::RowTooTall => "row-too-tall",
         }
     }
 }
@@ -83,6 +95,25 @@ impl fmt::Display for RenderWarning {
             }
             RenderWarning::PictureSkipped => {
                 write!(f, "embedded pictures are not rendered yet (planned)")
+            }
+            RenderWarning::NumberingIndirectionSkipped => {
+                write!(
+                    f,
+                    "numbering styleLink/numStyleLink indirection is not resolved; \
+                     affected list paragraphs render without labels"
+                )
+            }
+            RenderWarning::CellVAlignIgnored => {
+                write!(
+                    f,
+                    "table cell vertical alignment (vAlign) renders as top in this version"
+                )
+            }
+            RenderWarning::RowTooTall => {
+                write!(
+                    f,
+                    "a table row is taller than the page body; rows never split across pages"
+                )
             }
         }
     }

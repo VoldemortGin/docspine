@@ -27,8 +27,9 @@ _CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
 </Types>"""
 
-# styles / theme 部件的 Content-Types Override(build_docx 按需拼接)。
+# styles / numbering / theme 部件的 Content-Types Override(build_docx 按需拼接)。
 _STYLES_OVERRIDE = '  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+_NUMBERING_OVERRIDE = '  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>'
 _THEME_OVERRIDE = '  <Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'
 
 _ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -180,18 +181,24 @@ def build_docx(
     *,
     image: bytes | None = None,
     styles_xml: str | None = None,
+    numbering_xml: str | None = None,
     theme_xml: str | None = None,
 ) -> bytes:
     """用纯 ``zipfile`` 把给定的 ``word/document.xml`` 包成最小合法 ``.docx``。
 
     ``image`` 给定时写入 ``word/media/image1.png``(主文档关系把 ``rId10`` 指向它);
-    不给时该关系悬空、无伤(图片测试才用)。``styles_xml`` / ``theme_xml`` 给定时
-    写入对应部件(含 Content-Types Override),供样式级联 / 导出测试合成带样式的文档。
+    不给时该关系悬空、无伤(图片测试才用)。``styles_xml`` / ``numbering_xml`` /
+    ``theme_xml`` 给定时写入对应部件(含 Content-Types Override),供样式级联 /
+    列表编号 / 导出测试合成带样式的文档。
     """
     types = _CONTENT_TYPES
     overrides = "".join(
         f"\n{line}"
-        for part, line in [(styles_xml, _STYLES_OVERRIDE), (theme_xml, _THEME_OVERRIDE)]
+        for part, line in [
+            (styles_xml, _STYLES_OVERRIDE),
+            (numbering_xml, _NUMBERING_OVERRIDE),
+            (theme_xml, _THEME_OVERRIDE),
+        ]
         if part is not None
     )
     if overrides:
@@ -204,6 +211,8 @@ def build_docx(
         z.writestr("word/_rels/document.xml.rels", _DOC_RELS)
         if styles_xml is not None:
             z.writestr("word/styles.xml", styles_xml)
+        if numbering_xml is not None:
+            z.writestr("word/numbering.xml", numbering_xml)
         if theme_xml is not None:
             z.writestr("word/theme/theme1.xml", theme_xml)
         if image is not None:

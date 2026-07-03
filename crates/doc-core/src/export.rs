@@ -288,16 +288,15 @@ mod tests {
             blocks: vec![Block::Paragraph(para(text, None))],
             grid_span,
             v_merge: v,
-            width: None,
-            fill: None,
+            ..Cell::default()
         }
     }
 
     fn row(cells: Vec<Cell>, is_header: bool) -> Row {
         Row {
             cells,
-            height: None,
             is_header,
+            ..Row::default()
         }
     }
 
@@ -322,7 +321,7 @@ mod tests {
                     false,
                 ),
             ],
-            style: None,
+            ..Table::default()
         };
         Document {
             body: vec![
@@ -365,7 +364,7 @@ mod tests {
                     false,
                 ),
             ],
-            style: None,
+            ..Table::default()
         };
         let doc = Document {
             body: vec![Block::Table(t)],

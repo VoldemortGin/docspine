@@ -403,6 +403,84 @@ impl ParaBorders {
     }
 }
 
+/// 表级边框(`w:tblBorders` / 表样式 `w:tblPr > w:tblBorders`)的六槽:
+/// 外四边 + 内横线(insideH)+ 内竖线(insideV)。每边独立参与级联。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableBorders {
+    pub top: Option<Border>,
+    pub bottom: Option<Border>,
+    pub left: Option<Border>,
+    pub right: Option<Border>,
+    /// 行与行之间的内横线(`w:insideH`)。
+    pub inside_h: Option<Border>,
+    /// 列与列之间的内竖线(`w:insideV`)。
+    pub inside_v: Option<Border>,
+}
+
+impl TableBorders {
+    /// 逐边就近覆盖合并(`other` 是级联链上更靠近直接格式化的一层)。
+    pub fn overlay(&mut self, other: &TableBorders) {
+        for (slot, o) in [
+            (&mut self.top, &other.top),
+            (&mut self.bottom, &other.bottom),
+            (&mut self.left, &other.left),
+            (&mut self.right, &other.right),
+            (&mut self.inside_h, &other.inside_h),
+            (&mut self.inside_v, &other.inside_v),
+        ] {
+            if o.is_some() {
+                *slot = o.clone();
+            }
+        }
+    }
+}
+
+/// 单元格边框(`w:tcBorders`)的四槽(对角线 tl2br/tr2bl v1 忽略)。
+/// 冲突消解(`tcBorders` > `tblBorders` > 表样式;共享边归并)在渲染侧进行。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CellBorders {
+    pub top: Option<Border>,
+    pub bottom: Option<Border>,
+    pub left: Option<Border>,
+    pub right: Option<Border>,
+}
+
+/// 单元格边距(`w:tblCellMar` / `w:tcMar` 的 top/left/bottom/right,twip,仅
+/// `type="dxa"`)。逐边独立级联:tcMar 覆盖表级 tblCellMar 覆盖 Word 缺省
+/// (左右 108 twip、上下 0)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CellMargins {
+    pub top: Option<Twips>,
+    pub left: Option<Twips>,
+    pub bottom: Option<Twips>,
+    pub right: Option<Twips>,
+}
+
+impl CellMargins {
+    /// 逐边就近覆盖合并。
+    pub fn overlay(&mut self, other: &CellMargins) {
+        for (slot, o) in [
+            (&mut self.top, &other.top),
+            (&mut self.left, &other.left),
+            (&mut self.bottom, &other.bottom),
+            (&mut self.right, &other.right),
+        ] {
+            if o.is_some() {
+                *slot = *o;
+            }
+        }
+    }
+}
+
+/// 样式定义里的表格属性片段(`w:style > w:tblPr` 的 C-7 子集)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableProps {
+    /// 表级边框(`w:tblBorders`)。
+    pub borders: TableBorders,
+    /// 表级单元格缺省边距(`w:tblCellMar`)。
+    pub cell_margins: CellMargins,
+}
+
 /// 行距规则(`w:spacing@w:line` + `@w:lineRule`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineSpacingRule {
@@ -625,6 +703,8 @@ pub struct Style {
     pub rpr: RunProps,
     /// 段落属性片段(`w:style > w:pPr`)。
     pub ppr: ParaProps,
+    /// 表格属性片段(`w:style > w:tblPr`,仅表样式有意义)。
+    pub tblpr: TableProps,
 }
 
 /// 样式表(`word/styles.xml`):docDefaults + `styleId → Style` 映射 + 各类缺省样式 id。
@@ -800,6 +880,28 @@ pub fn resolve_para_in_table(
 /// 解析一个 run 的有效 run 属性(非表格内;表格内用 [`resolve_run_in_table`])。
 pub fn resolve_run(doc: &Document, para: &Paragraph, run: &TextRun) -> EffectiveRunProps {
     resolve_run_props(doc, None, para, run)
+}
+
+/// 一张表格的**有效**表级属性:表样式链(basedOn 递归,根先)→ 直接 tblPr,逐边合并。
+/// 单元格级冲突消解(tcBorders 优先、共享边归并)在渲染侧做,这里只出表级底座。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EffectiveTableProps {
+    /// 表级边框(六槽,级联合并后)。
+    pub borders: TableBorders,
+    /// 表级单元格缺省边距(级联合并后;Word 缺省兜底由渲染侧给)。
+    pub cell_margins: CellMargins,
+}
+
+/// 解析一张表格的有效表级属性(表样式链 → 直接 tblPr)。
+pub fn resolve_table(doc: &Document, table: &Table) -> EffectiveTableProps {
+    let mut eff = EffectiveTableProps::default();
+    for s in style_chain(&doc.styles, table.style.as_deref()) {
+        eff.borders.overlay(&s.tblpr.borders);
+        eff.cell_margins.overlay(&s.tblpr.cell_margins);
+    }
+    eff.borders.overlay(&table.borders);
+    eff.cell_margins.overlay(&table.cell_margins);
+    eff
 }
 
 /// 解析表格内 run 的有效 run 属性(表格样式链参与级联与 toggle 计数)。
@@ -991,10 +1093,17 @@ fn resolve_para_props(
     let st = &doc.styles;
     let chain = full_chain(st, table_style, para);
 
-    // 值属性:docDefaults → 样式链(根先)→ 直接格式化(`Paragraph.ppr` 共享片段)。
+    // 值属性:docDefaults → 样式链(根先)→ numbering 层级 pPr → 直接格式化
+    // (`Paragraph.ppr` 共享片段)。numbering.xml 的层级缩进插在样式层之下、
+    // 直格之上(ECMA-376 §17.9.5 的实践序,C-6)。
     let mut merged = st.doc_default_ppr.clone();
     for s in &chain {
         merged.overlay_values(&s.ppr);
+    }
+    if let Some(num_id) = para.num_id {
+        if let Some(level) = doc.numbering.level(num_id, para.list_level.unwrap_or(0)) {
+            merged.overlay_values(&level.ppr);
+        }
     }
     merged.overlay_values(&para.ppr);
 
@@ -1071,6 +1180,139 @@ mod tests {
             style: style.map(str::to_string),
             ..Paragraph::default()
         }
+    }
+
+    /// numbering 层级 pPr 的级联位置(C-6):样式层之下、直接格式化之上。
+    /// 样式 ind_left=300 被层级 720 盖过;直格 900 再盖过层级。
+    #[test]
+    fn numbering_level_ppr_sits_between_style_and_direct() {
+        use crate::numbering::{AbstractNum, Num, NumLevel};
+        let mut doc = doc_with_styles(vec![(
+            "Listy",
+            para_style(
+                None,
+                RunProps::default(),
+                ParaProps {
+                    ind_left: Some(300),
+                    ind_right: Some(150),
+                    ..ParaProps::default()
+                },
+            ),
+        )]);
+        doc.numbering.abstracts.insert(
+            0,
+            AbstractNum {
+                levels: [(
+                    0u32,
+                    NumLevel {
+                        ppr: ParaProps {
+                            ind_left: Some(720),
+                            ind_hanging: Some(360),
+                            ..ParaProps::default()
+                        },
+                        ..NumLevel::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..AbstractNum::default()
+            },
+        );
+        doc.numbering.nums.insert(
+            1,
+            Num {
+                abstract_id: 0,
+                ..Num::default()
+            },
+        );
+        let mut para = styled_para(Some("Listy"));
+        para.num_id = Some(1);
+        para.list_level = Some(0);
+        let eff = resolve_para(&doc, &para);
+        assert_eq!(eff.indent_left_pt, 36.0, "层级 720 twip 盖过样式 300");
+        assert_eq!(eff.indent_right_pt, 7.5, "层级未设的槽位从样式继承");
+        assert_eq!(eff.first_line_indent_pt, -18.0, "层级 hanging 360 生效");
+        // 直接格式化盖过层级。
+        para.ppr.ind_left = Some(900);
+        let eff = resolve_para(&doc, &para);
+        assert_eq!(eff.indent_left_pt, 45.0, "直格 900 twip 盖过层级 720");
+        // 无 numPr 的段落不受层级影响。
+        let plain = styled_para(Some("Listy"));
+        assert_eq!(resolve_para(&doc, &plain).indent_left_pt, 15.0);
+    }
+
+    /// 表样式链的表级属性级联(C-7):basedOn 根先、派生后,直接 tblPr 最末。
+    #[test]
+    fn resolve_table_cascades_style_chain_then_direct() {
+        let base_borders = TableBorders {
+            top: Some(Border {
+                val: "single".into(),
+                sz_eighth_pt: 4,
+                space_pt: 0,
+                color: None,
+            }),
+            inside_h: Some(Border {
+                val: "single".into(),
+                sz_eighth_pt: 4,
+                space_pt: 0,
+                color: None,
+            }),
+            ..TableBorders::default()
+        };
+        let mut doc = doc_with_styles(vec![
+            (
+                "TBase",
+                Style {
+                    kind: StyleKind::Table,
+                    tblpr: TableProps {
+                        borders: base_borders,
+                        cell_margins: CellMargins {
+                            left: Some(200),
+                            ..CellMargins::default()
+                        },
+                    },
+                    ..Style::default()
+                },
+            ),
+            (
+                "TDerived",
+                Style {
+                    kind: StyleKind::Table,
+                    based_on: Some("TBase".into()),
+                    tblpr: TableProps {
+                        borders: TableBorders {
+                            top: Some(Border {
+                                val: "single".into(),
+                                sz_eighth_pt: 16,
+                                space_pt: 0,
+                                color: None,
+                            }),
+                            ..TableBorders::default()
+                        },
+                        ..TableProps::default()
+                    },
+                    ..Style::default()
+                },
+            ),
+        ]);
+        doc.styles.styles.get_mut("TBase").expect("TBase").kind = StyleKind::Table;
+        let mut table = Table {
+            style: Some("TDerived".into()),
+            ..Table::default()
+        };
+        table.cell_margins.left = Some(288);
+        let eff = resolve_table(&doc, &table);
+        assert_eq!(
+            eff.borders.top.as_ref().map(|b| b.sz_eighth_pt),
+            Some(16),
+            "派生样式盖过基样式的 top"
+        );
+        assert_eq!(
+            eff.borders.inside_h.as_ref().map(|b| b.sz_eighth_pt),
+            Some(4),
+            "未覆盖的 insideH 从基样式继承"
+        );
+        assert_eq!(eff.cell_margins.left, Some(288), "直接 tblCellMar 最末覆盖");
     }
 
     /// 空文档 + 无任何样式/直接格式化:落 Word 内置缺省(Calibri 11pt,全开关关)。

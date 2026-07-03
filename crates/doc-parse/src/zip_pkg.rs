@@ -63,6 +63,11 @@ impl Package {
         self.part_str("word/styles.xml")
     }
 
+    /// 编号部件 `word/numbering.xml` 的文本(可缺;缺失即空编号表,列表段按普通段渲染)。
+    pub fn numbering_xml_str(&self) -> Option<String> {
+        self.part_str("word/numbering.xml")
+    }
+
     /// 主题部件文本:标准名 `word/theme/theme1.xml`;容错取 `word/theme/` 下第一个
     /// `.xml`(BTreeMap 序,确定性)。可缺;缺失即空主题。
     pub fn theme_xml_str(&self) -> Option<String> {

@@ -2,13 +2,15 @@
 //!
 //! - [`document`]:解析 `word/document.xml`(`w:body` -> `Vec<Block>`,表格是重点)。
 //! - [`styles`]:解析 `word/styles.xml`(docDefaults + 样式定义 -> `StyleTable`,C-5)。
+//! - [`numbering`]:解析 `word/numbering.xml`(编号层级 + 实例 -> `NumberingTable`,C-6)。
 //! - [`theme`]:解析 `word/theme/theme1.xml`(fontScheme + clrScheme -> `Theme`,C-5)。
-//! - [`props`]:document.xml 与 styles.xml 共用的 rPr / pPr 属性片段解析器。
+//! - [`props`]:document.xml 与 styles.xml 共用的 rPr / pPr / 表格属性片段解析器。
 //!
 //! 本模块根放**关系(`.rels`)解析**与一批被多处复用的小工具(本地名、属性读取、跳树等)。
 //! 所有 walker 都遵循家族约定:未知元素跳过、缺失属性 → `None`、**绝不 panic**。
 
 pub mod document;
+pub mod numbering;
 pub mod props;
 pub mod styles;
 pub mod theme;

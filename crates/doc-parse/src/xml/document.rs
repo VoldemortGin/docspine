@@ -10,7 +10,7 @@
 //! - `w:tblGrid` > `w:gridCol` 给出逻辑列定义(列数 + 各列宽 twip)。
 //! - `w:tr` 行;`w:tc` 单元格。单元格属性 `w:tcPr` 里:
 //!   - `w:gridSpan@w:val` —— 横向跨列合并。
-//!   - `w:vMerge`         —— 纵向合并(`restart` 起始 / `continue` 延续 / 省略 val 视作 restart)。
+//!   - `w:vMerge`         —— 纵向合并(`restart` 起始 / `continue` **或省略 val** 延续)。
 //!   - `w:tcW@w:w`(`type="dxa"`)—— 单元格绝对宽度 twip。
 //!   - `w:shd@w:fill`     —— 单元格底纹填充色。
 //! - **嵌套表**天然支持:单元格内容是块序列,里头再出现 `w:tbl` 就递归成 [`Block::Table`]。
@@ -23,10 +23,10 @@ use std::collections::BTreeMap;
 
 use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
-    Block, BreakKind, Cell, Color, Orientation, Paragraph, Picture, Row, RunSegment, Section,
-    Table, TextRun, VMerge,
+    Block, BreakKind, Cell, CellVAlign, Color, HeightRule, Orientation, Paragraph, Picture, Row,
+    RunSegment, Section, Table, TableWidth, TextRun, VMerge,
 };
-use doc_core::style::{ColorRef, FontRef, RunProps};
+use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -363,6 +363,9 @@ fn apply_ppr_prop(e: &BytesStart, para: &mut Paragraph) {
         b"ilvl" => {
             para.list_level = attr_of(e, b"val").and_then(|s| s.parse().ok());
         }
+        b"numId" => {
+            para.num_id = attr_of(e, b"val").and_then(|s| s.parse().ok());
+        }
         _ => {}
     }
 }
@@ -573,23 +576,76 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Table 
     table
 }
 
-/// 解析 `w:tblPr`(表格属性):目前取 `w:tblStyle@w:val`。已消费 `<w:tblPr>` 起始标签。
+/// 解析 `w:tblPr`(表格属性,C-7):`w:tblStyle`、`w:tblBorders`、`w:tblCellMar`、
+/// `w:tblInd`、`w:tblW`、`w:jc`。已消费 `<w:tblPr>` 起始标签。边框/边距子树走
+/// 专用子 walker(其子元素名 top/left/… 会与别的属性撞车);其余以深度计数兜底。
 fn parse_tblpr<R: std::io::BufRead>(reader: &mut Reader<R>, table: &mut Table) {
+    let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"tblStyle" {
-                    table.style = attr_of(&e, b"val").or(table.style.take());
+            Ok(Event::Empty(e)) => apply_tblpr_prop(&e, table),
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"tblBorders" => table.borders = props::parse_tbl_borders(reader),
+                b"tblCellMar" => table.cell_margins = props::parse_cell_margins(reader),
+                _ => {
+                    apply_tblpr_prop(&e, table);
+                    depth += 1;
                 }
+            },
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    break; // tblPr 自身结束。
+                }
+                depth -= 1;
             }
-            Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
         buf.clear();
+    }
+}
+
+/// 把一个 tblPr 子元素的属性应用到 [`Table`] 上(边框/边距子树除外)。
+fn apply_tblpr_prop(e: &BytesStart, table: &mut Table) {
+    match local_name(e.name().as_ref()) {
+        b"tblStyle" => table.style = attr_of(e, b"val").or(table.style.take()),
+        b"tblInd" => {
+            // 仅 type="dxa"(缺省按 dxa)记表格缩进。
+            let is_dxa = attr_of(e, b"type")
+                .map(|t| t.eq_ignore_ascii_case("dxa"))
+                .unwrap_or(true);
+            if is_dxa {
+                table.indent = attr_of(e, b"w")
+                    .and_then(|s| s.parse().ok())
+                    .or(table.indent);
+            }
+        }
+        b"tblW" => table.width = parse_measure(e).or(table.width),
+        b"jc" => {
+            if let Some(j) = attr_of(e, b"val").and_then(|s| Justification::from_attr(&s)) {
+                table.jc = Some(j);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 解析一个 CT_TblWidth 度量(`@w:w` + `@w:type`):`dxa` → 绝对 twip;`pct` →
+/// 百分比(原始值 1/50 个百分点,兼容 `"50%"` 后缀形);`auto`/其它 → `None`。
+fn parse_measure(e: &BytesStart) -> Option<TableWidth> {
+    let w = attr_of(e, b"w")?;
+    match attr_of(e, b"type").as_deref() {
+        Some("pct") => {
+            let pct = match w.strip_suffix('%') {
+                Some(p) => p.trim().parse::<f32>().ok()?,
+                None => w.parse::<f32>().ok()? / 50.0,
+            };
+            Some(TableWidth::Pct(pct))
+        }
+        Some("dxa") | None => w.parse().ok().map(TableWidth::Dxa),
+        _ => None, // "auto" / "nil" 等:不定宽。
     }
 }
 
@@ -640,29 +696,46 @@ fn parse_table_row<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Ro
     row
 }
 
-/// 解析 `w:trPr`(行属性):`w:trHeight@w:val`、`w:tblHeader`。已消费 `<w:trPr>` 起始标签。
+/// 解析 `w:trPr`(行属性,C-7):`w:trHeight@w:val/@w:hRule`、`w:tblHeader`、
+/// `w:cantSplit`。已消费 `<w:trPr>` 起始标签。深度计数兜底嵌套子树。
 fn parse_trpr<R: std::io::BufRead>(reader: &mut Reader<R>, row: &mut Row) {
+    let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"trHeight" => {
-                        row.height = attr_of(&e, b"val")
-                            .and_then(|s| s.parse().ok())
-                            .or(row.height);
-                    }
-                    b"tblHeader" => row.is_header = on_off_val(&e),
-                    _ => {}
-                }
+            Ok(Event::Empty(e)) => apply_trpr_prop(&e, row),
+            Ok(Event::Start(e)) => {
+                apply_trpr_prop(&e, row);
+                depth += 1;
             }
-            Ok(Event::End(_)) => break,
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    break; // trPr 自身结束。
+                }
+                depth -= 1;
+            }
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
         buf.clear();
+    }
+}
+
+/// 把一个 trPr 子元素的属性应用到 [`Row`] 上。
+fn apply_trpr_prop(e: &BytesStart, row: &mut Row) {
+    match local_name(e.name().as_ref()) {
+        b"trHeight" => {
+            row.height = attr_of(e, b"val")
+                .and_then(|s| s.parse().ok())
+                .or(row.height);
+            if let Some(r) = attr_of(e, b"hRule") {
+                row.height_rule = HeightRule::from_attr(&r);
+            }
+        }
+        b"tblHeader" => row.is_header = on_off_val(e),
+        b"cantSplit" => row.cant_split = on_off_val(e),
+        _ => {}
     }
 }
 
@@ -705,52 +778,79 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> C
     cell
 }
 
-/// 解析 `w:tcPr`(单元格属性):`w:gridSpan`(横向合并)、`w:vMerge`(纵向合并)、
-/// `w:tcW`(宽度)、`w:shd`(填充)。已消费 `<w:tcPr>` 起始标签。
+/// 解析 `w:tcPr`(单元格属性,C-7):`w:gridSpan`(横向合并)、`w:vMerge`(纵向
+/// 合并)、`w:tcW`(dxa 绝对宽 / pct 百分比宽)、`w:shd`(填充)、`w:tcBorders`、
+/// `w:vAlign`、`w:tcMar`。已消费 `<w:tcPr>` 起始标签。边框/边距子树走专用子
+/// walker(其子元素名 top/left/… 会与别的属性撞车);其余以深度计数兜底。
 fn parse_tcpr<R: std::io::BufRead>(reader: &mut Reader<R>, cell: &mut Cell) {
+    let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"gridSpan" => {
-                        cell.grid_span = attr_of(&e, b"val")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(1);
-                    }
-                    b"vMerge" => {
-                        // val="restart" 起始;val="continue" 延续;省略 val 视作 restart。
-                        cell.v_merge = match attr_of(&e, b"val") {
-                            Some(v) if v.eq_ignore_ascii_case("continue") => VMerge::Continue,
-                            _ => VMerge::Restart,
-                        };
-                    }
-                    b"tcW" => {
-                        // 仅当 type="dxa"(绝对 twip)时记宽度;pct/auto 不记。
-                        let is_dxa = attr_of(&e, b"type")
-                            .map(|t| t.eq_ignore_ascii_case("dxa"))
-                            .unwrap_or(true);
-                        if is_dxa {
-                            cell.width = attr_of(&e, b"w")
-                                .and_then(|s| s.parse().ok())
-                                .or(cell.width);
-                        }
-                    }
-                    b"shd" => {
-                        cell.fill = attr_of(&e, b"fill")
-                            .and_then(|h| Color::from_hex(&h))
-                            .or(cell.fill.take());
-                    }
-                    _ => {}
+            Ok(Event::Empty(e)) => apply_tcpr_prop(&e, cell),
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"tcBorders" => cell.borders = props::parse_tc_borders(reader),
+                b"tcMar" => cell.margins = props::parse_cell_margins(reader),
+                _ => {
+                    apply_tcpr_prop(&e, cell);
+                    depth += 1;
                 }
+            },
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    break; // tcPr 自身结束。
+                }
+                depth -= 1;
             }
-            Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
         buf.clear();
+    }
+}
+
+/// 把一个 tcPr 子元素的属性应用到 [`Cell`] 上(边框/边距子树除外)。
+fn apply_tcpr_prop(e: &BytesStart, cell: &mut Cell) {
+    match local_name(e.name().as_ref()) {
+        b"gridSpan" => {
+            cell.grid_span = attr_of(e, b"val").and_then(|s| s.parse().ok()).unwrap_or(1);
+        }
+        b"vMerge" => {
+            // val="restart" 起始;val="continue" **或省略 val** 是延续
+            // (ECMA-376 §17.4.85:缺省 continue——Word 写延续格就是裸 <w:vMerge/>)。
+            cell.v_merge = match attr_of(e, b"val") {
+                Some(v) if v.eq_ignore_ascii_case("restart") => VMerge::Restart,
+                _ => VMerge::Continue,
+            };
+        }
+        b"tcW" => match attr_of(e, b"type").as_deref() {
+            // pct:原始值 1/50 个百分点(兼容 "50%" 后缀形),对正文宽在渲染侧解析。
+            Some("pct") => {
+                if let Some(w) = attr_of(e, b"w") {
+                    cell.width_pct = match w.strip_suffix('%') {
+                        Some(p) => p.trim().parse().ok(),
+                        None => w.parse::<f32>().ok().map(|v| v / 50.0),
+                    };
+                }
+            }
+            // dxa(缺省按 dxa):绝对 twip。"auto"/其它不记。
+            Some("dxa") | None => {
+                cell.width = attr_of(e, b"w").and_then(|s| s.parse().ok()).or(cell.width);
+            }
+            _ => {}
+        },
+        b"shd" => {
+            cell.fill = attr_of(e, b"fill")
+                .and_then(|h| Color::from_hex(&h))
+                .or(cell.fill.take());
+        }
+        b"vAlign" => {
+            if let Some(v) = attr_of(e, b"val").and_then(|s| CellVAlign::from_attr(&s)) {
+                cell.v_align = Some(v);
+            }
+        }
+        _ => {}
     }
 }
 

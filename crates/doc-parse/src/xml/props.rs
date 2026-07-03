@@ -12,8 +12,8 @@
 
 use doc_core::model::Color;
 use doc_core::style::{
-    Border, ColorRef, FontRef, Highlight, Justification, LineSpacingRule, ParaProps, RunProps,
-    ThemeColor, ThemeFont, UnderlineKind, VertAlign,
+    Border, CellBorders, CellMargins, ColorRef, FontRef, Highlight, Justification, LineSpacingRule,
+    ParaProps, RunProps, TableBorders, TableProps, ThemeColor, ThemeFont, UnderlineKind, VertAlign,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -273,8 +273,126 @@ fn apply_border_edge(e: &BytesStart, p: &mut ParaProps) {
     *slot = Some(parse_border(e));
 }
 
+/// 解析 `w:tblBorders`(表级边框)子树:外四边 + `w:insideH` / `w:insideV`。
+/// 已消费起始标签,消费到其结束标签为止。`left/right` 兼 `start/end` 别名。
+pub fn parse_tbl_borders<R: std::io::BufRead>(reader: &mut Reader<R>) -> TableBorders {
+    let mut borders = TableBorders::default();
+    walk_border_edges(reader, |name, e| {
+        let slot = match name {
+            b"top" => &mut borders.top,
+            b"bottom" => &mut borders.bottom,
+            b"left" | b"start" => &mut borders.left,
+            b"right" | b"end" => &mut borders.right,
+            b"insideH" => &mut borders.inside_h,
+            b"insideV" => &mut borders.inside_v,
+            _ => return,
+        };
+        *slot = Some(parse_border(e));
+    });
+    borders
+}
+
+/// 解析 `w:tcBorders`(单元格边框)子树:四边(对角线 tl2br/tr2bl v1 忽略)。
+/// 已消费起始标签,消费到其结束标签为止。
+pub fn parse_tc_borders<R: std::io::BufRead>(reader: &mut Reader<R>) -> CellBorders {
+    let mut borders = CellBorders::default();
+    walk_border_edges(reader, |name, e| {
+        let slot = match name {
+            b"top" => &mut borders.top,
+            b"bottom" => &mut borders.bottom,
+            b"left" | b"start" => &mut borders.left,
+            b"right" | b"end" => &mut borders.right,
+            _ => return,
+        };
+        *slot = Some(parse_border(e));
+    });
+    borders
+}
+
+/// 解析 `w:tblCellMar` / `w:tcMar` 子树:四边 `@w:w`(twip,仅 `type="dxa"`,
+/// 缺省按 dxa)。已消费起始标签,消费到其结束标签为止。
+pub fn parse_cell_margins<R: std::io::BufRead>(reader: &mut Reader<R>) -> CellMargins {
+    let mut margins = CellMargins::default();
+    walk_border_edges(reader, |name, e| {
+        let slot = match name {
+            b"top" => &mut margins.top,
+            b"bottom" => &mut margins.bottom,
+            b"left" | b"start" => &mut margins.left,
+            b"right" | b"end" => &mut margins.right,
+            _ => return,
+        };
+        let is_dxa = attr_of(e, b"type")
+            .map(|t| t.eq_ignore_ascii_case("dxa"))
+            .unwrap_or(true);
+        if is_dxa {
+            if let Some(v) = attr_of(e, b"w").and_then(|s| s.parse().ok()) {
+                *slot = Some(v);
+            }
+        }
+    });
+    margins
+}
+
+/// 解析样式定义里的 `w:tblPr` 片段(`w:style > w:tblPr` 的 C-7 子集:`w:tblBorders` +
+/// `w:tblCellMar`;其余属性 v1 不入级联)。已消费起始标签,消费到其结束标签为止。
+pub fn parse_style_tblpr<R: std::io::BufRead>(reader: &mut Reader<R>) -> TableProps {
+    let mut props = TableProps::default();
+    let mut depth = 0usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"tblBorders" => props.borders = parse_tbl_borders(reader),
+                b"tblCellMar" => props.cell_margins = parse_cell_margins(reader),
+                _ => depth += 1,
+            },
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    break; // tblPr 自身结束。
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    props
+}
+
+/// 遍历一个「边集合」子树(tblBorders/tcBorders/tblCellMar/tcMar 同构:直接子元素
+/// 按本地名分派,`Empty` 与 `Start` 统一处理,`Start` 子树以深度计数兜底)。
+fn walk_border_edges<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    mut apply: impl FnMut(&[u8], &BytesStart),
+) {
+    let mut depth = 0usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(e)) => apply(local_name(e.name().as_ref()), &e),
+            Ok(Event::Start(e)) => {
+                apply(local_name(e.name().as_ref()), &e);
+                depth += 1;
+            }
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    break; // 集合自身结束。
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
 /// 解析一条 CT_Border 边(`@val` / `@sz` / `@space` / `@color` / `@themeColor`)。
-fn parse_border(e: &BytesStart) -> Border {
+pub fn parse_border(e: &BytesStart) -> Border {
     let color = if let Some(tc) = attr_of(e, b"themeColor").and_then(|s| ThemeColor::from_attr(&s))
     {
         Some(ColorRef::Theme(tc))
