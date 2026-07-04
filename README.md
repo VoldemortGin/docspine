@@ -10,7 +10,11 @@ and embedded pictures. Tables are a first-class focus. Embedded images can
 additionally be OCR'd locally, offline, and deterministically via the sibling
 [`ocrspine`](https://github.com/VoldemortGin/ocrspine) crate (PP-OCRv5 through
 `tract-onnx` — no cloud, no network), and an image that *is* a table can be
-reconstructed into a grid from its OCR word boxes.
+reconstructed into a grid from its OCR word boxes. A parsed document can also
+be **exported to PDF** (`to_pdf()` / `save_pdf()`) with flowed layout and
+pagination through the shared pure-Rust `pdf-typeset` engine from
+[`pdfspine`](https://github.com/VoldemortGin/pdfspine) — no LibreOffice, no
+cloud converter.
 
 docspine is the document-engine sibling of [`pdfspine`](https://github.com/VoldemortGin/pdfspine)
 (PDF) and [`pptspine`](https://github.com/VoldemortGin/pptspine) (PowerPoint),
@@ -32,6 +36,7 @@ all sharing the same `ocrspine` OCR core.
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent | parsed |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table reconstruction from OCR boxes → grid | working (`reconstruct_image_table`) |
+| PDF export: `to_pdf()` / `save_pdf()` — flowed layout + pagination; per-section page geometry (`sectPr`), styles.xml + theme effective styles, numbering engine, table fidelity (borders/merges/margins/vAlign, cross-page) | working |
 | Legacy binary `.doc` (OLE/CFB) | probe + typed downgrade (full body deferred) |
 
 Parsing is tolerant: unknown elements are skipped, missing attributes become
@@ -98,6 +103,24 @@ for table in docspine.reconstruct_image_table(open("table.png", "rb").read()):
         print(cell["row"], cell["col"], cell["text"])
 ```
 
+## Export to PDF
+
+```python
+doc = docspine.open("report.docx")
+doc.save_pdf("report.pdf")         # flowed layout + pagination
+pdf_bytes = doc.to_pdf()           # or in-memory bytes
+
+# Optional: map a requested font family to a local font file (or to another
+# installed family), layered on top of the built-in substitution table:
+doc.save_pdf("report.pdf", font_map={"Calibri": "/path/to/Carlito.ttf"})
+```
+
+Per-section page geometry from `sectPr` is honored (paper size, orientation,
+margins per section). Rendering is deterministic and fully offline. Missing
+fonts degrade gracefully: an available face is substituted and a Python
+`UserWarning` is emitted **once per warning kind** — the export never fails on
+a missing font.
+
 ## Rust workspace
 
 ```
@@ -106,6 +129,7 @@ crates/
   doc-parse   OOXML reader: zip extract + quick-xml walk -> Document.
               Legacy binary .doc probing behind the `legacy-doc` feature.
   doc-ocr     image-OCR bridge over ocrspine (PaddleOcr) + image-table reconstruction.
+  doc-render  docx -> PDF renderer over the shared pdf-typeset engine (from pdfspine).
   py-bindings PyO3 _core extension (the FFI chokepoint); `ocr` feature gates OCR.
 ```
 
