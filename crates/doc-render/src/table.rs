@@ -54,7 +54,12 @@ struct Region<'a> {
 type Grid = Vec<Vec<Option<usize>>>;
 
 /// 映射一张表格(嵌套表经 [`map_blocks`] 递归,表格样式上下文取最内层表)。
-pub(crate) fn map_table(doc: &Document, table: &DocTable, ctx: &mut MapCtx) -> TableSpec {
+pub(crate) fn map_table(
+    doc: &Document,
+    table: &DocTable,
+    ctx: &mut MapCtx,
+    media: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> TableSpec {
     let eff = resolve_table(doc, table);
     let columns = column_policies(table, ctx);
     let ncols = columns.len();
@@ -70,7 +75,7 @@ pub(crate) fn map_table(doc: &Document, table: &DocTable, ctx: &mut MapCtx) -> T
             let mut tc = match region {
                 // 锚位:内容 + 底纹 + 边距落这里。
                 Some(rg) if (rg.row, rg.col) == (r, c) => {
-                    anchor_cell(doc, table, rg.cell, &eff, ctx)
+                    anchor_cell(doc, table, rg.cell, &eff, ctx, media)
                 }
                 // 被合并吞并的占位:底纹延续,无内容。
                 Some(rg) => {
@@ -301,6 +306,7 @@ fn anchor_cell(
     cell: &DocCell,
     eff: &EffectiveTableProps,
     ctx: &mut MapCtx,
+    media: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> TableCell {
     let mut margins = DEFAULT_MARGINS;
     margins.overlay(&eff.cell_margins);
@@ -313,7 +319,7 @@ fn anchor_cell(
         (pt(margins.left) - pad).max(0.0),
         (pt(margins.right) - pad).max(0.0),
     );
-    let mut blocks = map_blocks(doc, &cell.blocks, Some(table), ctx);
+    let mut blocks = map_blocks(doc, &cell.blocks, Some(table), ctx, media);
     for block in &mut blocks {
         if let Block::Paragraph(props, _) = block {
             props.indent_left += extra_left;

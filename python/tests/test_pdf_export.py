@@ -461,3 +461,23 @@ def test_thirty_row_table_paginates_rows_whole():
         on = [n for n, toks in enumerate(pages) if f"L{i:02d}" in toks]
         assert len(on) == 1, f"行 {i} 应恰好落在一页"
         assert f"R{i:02d}" in pages[on[0]], f"行 {i} 的两格必须同页"
+
+
+# ============================================================ C-8:内嵌图片渲染
+
+
+def test_inline_image_is_embedded_in_pdf(minimal_docx_bytes):
+    """C-8:含内嵌图片的 docx 导出后,图片真正嵌入 PDF(不再只发 skip 告警)。
+
+    ``minimal_docx_bytes`` 带一张 ``wp:inline`` 的 1×1 PNG(``wp:extent`` 1in×1in)。
+    设 ``DOCSPINE_E2E_PNG`` 环境变量时另存一张光栅供人工目检。
+    """
+    import os
+
+    pdf = _render(minimal_docx_bytes)
+    doc = _open_pdf(pdf)
+    assert doc.page_count >= 1
+    imgs = doc[0].get_images()
+    assert len(imgs) >= 1, "内嵌图片应出现在导出的 PDF 里"
+    if os.environ.get("DOCSPINE_E2E_PNG"):
+        doc[0].get_pixmap(dpi=120).save(os.environ["DOCSPINE_E2E_PNG"])

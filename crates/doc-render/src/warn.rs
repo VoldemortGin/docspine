@@ -25,8 +25,12 @@ pub enum RenderWarning {
     ParaBorderOmitted,
     /// 段落底纹(`w:pPr > w:shd`)已解析但本批不绘制。
     ParaShadingOmitted,
-    /// 内嵌图片本批不渲染(图片布局是 C-8)。
+    /// 内嵌图片无法渲染(缺 media 字节 / 缺 `wp:extent` 尺寸 / 尺寸非法):
+    /// 该图跳过,其余内容照常(C-8:有字节且有尺寸的图已按块级渲染)。
     PictureSkipped,
+    /// 浮动/锚定图片(`wp:anchor`)按块级内联近似渲染(v1 不做绝对定位 /
+    /// 文字环绕;C-8 声明降级)。
+    FloatingImageInlined,
     /// 列表编号落在未解的 `styleLink`/`numStyleLink` 间接上(C-6 声明降级):
     /// 该 numId 无自有层级定义,段落按普通段渲染(缩进照常级联)。
     NumberingIndirectionSkipped,
@@ -61,6 +65,7 @@ impl RenderWarning {
             RenderWarning::ParaBorderOmitted => "para-border-omitted",
             RenderWarning::ParaShadingOmitted => "para-shading-omitted",
             RenderWarning::PictureSkipped => "picture-skipped",
+            RenderWarning::FloatingImageInlined => "floating-image-inlined",
             RenderWarning::NumberingIndirectionSkipped => "numbering-indirection-skipped",
             RenderWarning::CellVAlignIgnored => "cell-valign-ignored",
             RenderWarning::RowTooTall => "row-too-tall",
@@ -94,7 +99,17 @@ impl fmt::Display for RenderWarning {
                 write!(f, "paragraph shading is not drawn in this version")
             }
             RenderWarning::PictureSkipped => {
-                write!(f, "embedded pictures are not rendered yet (planned)")
+                write!(
+                    f,
+                    "an embedded picture was skipped (missing media bytes or size)"
+                )
+            }
+            RenderWarning::FloatingImageInlined => {
+                write!(
+                    f,
+                    "a floating (anchored) image is rendered inline; no absolute \
+                     positioning or text wrap in this version"
+                )
             }
             RenderWarning::NumberingIndirectionSkipped => {
                 write!(

@@ -65,7 +65,7 @@ pub fn render_pdf(
 fn render_with(
     mut ts: Typesetter,
     doc: &Document,
-    _media: &BTreeMap<String, Vec<u8>>,
+    media: &BTreeMap<String, Vec<u8>>,
     options: &RenderOptions,
 ) -> Result<RenderResult> {
     // 字体替换覆盖要在任何布局之前配置(引擎按样式 memoize 解析结果)。
@@ -74,7 +74,7 @@ fn render_with(
             .add_substitution(requested, &[candidate.as_str()]);
     }
 
-    let mapped = map::map_document(doc);
+    let mapped = map::map_document_with_media(doc, media);
     let mut pages = Vec::new();
     for plan in &mapped.sections {
         // 每节一个分页回调(节内页页同几何);引擎每起一页调用一次,含首页。

@@ -20,15 +20,21 @@
 //!   gutter(文本对齐 left 缩进,与 Word 的列表版式一致)。
 //! - 段落边框 / 底纹 / 图片:解析保真,渲染降级 + 一次性告警(C-8 落地图片)。
 
+use std::collections::BTreeMap;
+
+use doc_core::geom::emu_to_points;
 use doc_core::model::{
-    Block as DocBlock, BreakKind, Document, Paragraph, RunSegment, Table as DocTable, TextRun,
+    Block as DocBlock, BreakKind, Document, Paragraph, Picture, Placement, RunSegment,
+    Table as DocTable, TextRun,
 };
 use doc_core::numbering::ListCounters;
 use doc_core::style::{
     resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveLineSpacing,
     EffectiveParaProps, EffectiveRunProps, Justification, VertAlign,
 };
-use pdf_typeset::{Align, Block, LineSpacing, ListLabel, PageGeom, ParaProps, Rgb, Run, RunStyle};
+use pdf_typeset::{
+    Align, Block, ImageSpec, LineSpacing, ListLabel, PageGeom, ParaProps, Rgb, Run, RunStyle,
+};
 
 use crate::section::page_geom;
 use crate::table::map_table;
@@ -71,6 +77,7 @@ pub(crate) struct MapCtx {
     border_warned: bool,
     shading_warned: bool,
     picture_warned: bool,
+    floating_warned: bool,
     valign_warned: bool,
     row_warned: bool,
     numbering_warned: bool,
@@ -86,6 +93,7 @@ impl MapCtx {
             border_warned: false,
             shading_warned: false,
             picture_warned: false,
+            floating_warned: false,
             valign_warned: false,
             row_warned: false,
             numbering_warned: false,
@@ -131,6 +139,13 @@ impl MapCtx {
         }
     }
 
+    fn floating_image(&mut self) {
+        if !self.floating_warned {
+            self.floating_warned = true;
+            self.list.push(RenderWarning::FloatingImageInlined);
+        }
+    }
+
     fn numbering_indirection(&mut self) {
         if !self.numbering_warned {
             self.numbering_warned = true;
@@ -156,7 +171,17 @@ impl MapCtx {
 }
 
 /// 把整篇文档映射成按节分组的引擎块序列(纯计算,不触引擎状态)。
+/// 无 media 的便利入口(测试用;图片一律跳过)。生产路径走
+/// [`map_document_with_media`]。
+#[cfg(test)]
 pub(crate) fn map_document(doc: &Document) -> MappedDoc {
+    map_document_with_media(doc, &BTreeMap::new())
+}
+
+pub(crate) fn map_document_with_media(
+    doc: &Document,
+    media: &BTreeMap<String, Vec<u8>>,
+) -> MappedDoc {
     let mut ctx = MapCtx::new();
     // 渲染前体检一次样式表:basedOn 环 / 悬空引用浮成告警(解析自身带防环)。
     for sw in doc.styles.validate() {
@@ -175,13 +200,13 @@ pub(crate) fn map_document(doc: &Document) -> MappedDoc {
         ctx.set_frame(&geom);
         sections.push(SectionPlan {
             geom,
-            blocks: map_blocks(doc, &doc.body[start..end], None, &mut ctx),
+            blocks: map_blocks(doc, &doc.body[start..end], None, &mut ctx, media),
         });
         start = end;
     }
     // 防御:节序列缺失 / 未覆盖全部块(解析层保证不发生)也不丢内容。
     if start < doc.body.len() {
-        let tail = map_blocks(doc, &doc.body[start..], None, &mut ctx);
+        let tail = map_blocks(doc, &doc.body[start..], None, &mut ctx, media);
         match sections.last_mut() {
             Some(last) => last.blocks.extend(tail),
             None => sections.push(SectionPlan {
@@ -209,12 +234,13 @@ pub(crate) fn map_blocks(
     blocks: &[DocBlock],
     table: Option<&DocTable>,
     ctx: &mut MapCtx,
+    media: &BTreeMap<String, Vec<u8>>,
 ) -> Vec<Block> {
     let mut out = Vec::new();
     for block in blocks {
         match block {
-            DocBlock::Paragraph(p) => map_paragraph(doc, p, table, ctx, &mut out),
-            DocBlock::Table(t) => out.push(Block::Table(map_table(doc, t, ctx))),
+            DocBlock::Paragraph(p) => map_paragraph(doc, p, table, ctx, &mut out, media),
+            DocBlock::Table(t) => out.push(Block::Table(map_table(doc, t, ctx, media))),
         }
     }
     out
@@ -228,6 +254,7 @@ fn map_paragraph(
     table: Option<&DocTable>,
     ctx: &mut MapCtx,
     out: &mut Vec<Block>,
+    media: &BTreeMap<String, Vec<u8>>,
 ) {
     let eff = match table {
         Some(t) => resolve_para_in_table(doc, t, para),
@@ -267,12 +294,27 @@ fn map_paragraph(
         }
     }
 
+    // 内嵌图片(C-8):按文档顺序收集成块级 Block::Image。有 media 字节且有
+    // wp:extent 尺寸的图渲染;缺字节/缺尺寸的图跳过 + 一次性告警;浮动(锚定)
+    // 图按块级内联近似(不做绝对定位/文字环绕)+ 一次性告警。
+    let mut image_blocks: Vec<Block> = Vec::new();
+    for run in &para.runs {
+        for pic in &run.pictures {
+            match picture_block(pic, media) {
+                Some(block) => {
+                    if matches!(pic.placement, Placement::Anchored { .. }) {
+                        ctx.floating_image();
+                    }
+                    image_blocks.push(block);
+                }
+                None => ctx.picture(),
+            }
+        }
+    }
+
     // run 序列 → 若干「段落片」,段内换页/换栏是切分点。
     let mut parts: Vec<Vec<Run>> = vec![Vec::new()];
     for run in &para.runs {
-        if !run.pictures.is_empty() {
-            ctx.picture(); // 图片布局是 C-8;文字照常。
-        }
         let eff_r = match table {
             Some(t) => resolve_run_in_table(doc, t, para, run),
             None => resolve_run(doc, para, run),
@@ -305,22 +347,44 @@ fn map_paragraph(
         };
         run_style(&eff_r, &eff_r.font_ascii)
     };
-    for (i, part) in parts.into_iter().enumerate() {
-        if i > 0 {
-            out.push(Block::PageBreak);
+    // 图片独占段落(无可见文字)时跳过「空段落占一行」,只 emit 图片——避免图前
+    // 多一条空行(真实 docx 里图片常独占一段)。有文字则文字先排、图片紧随其后。
+    let has_text = parts.iter().any(|part| !part.is_empty());
+    if has_text || image_blocks.is_empty() {
+        for (i, part) in parts.into_iter().enumerate() {
+            if i > 0 {
+                out.push(Block::PageBreak);
+            }
+            let runs = if part.is_empty() {
+                // 空段落 / 换页后的空尾片:仍占一行(Word:段落标记独占一行)。
+                vec![Run::new("", mark_style())]
+            } else {
+                part
+            };
+            let mut p = props.clone();
+            if i > 0 {
+                p.list = None; // 标签只画在首片(段内换页不重复编号)。
+            }
+            out.push(Block::Paragraph(p, runs));
         }
-        let runs = if part.is_empty() {
-            // 空段落 / 换页后的空尾片:仍占一行(Word:段落标记独占一行)。
-            vec![Run::new("", mark_style())]
-        } else {
-            part
-        };
-        let mut p = props.clone();
-        if i > 0 {
-            p.list = None; // 标签只画在首片(段内换页不重复编号)。
-        }
-        out.push(Block::Paragraph(p, runs));
     }
+    for block in image_blocks {
+        out.push(block);
+    }
+}
+
+/// 一张内嵌图片 → 块级 [`Block::Image`]。缺 `media_name` / media 字节 / `wp:extent`
+/// 尺寸,或尺寸非法(≤0),返回 `None`(调用方跳过 + 告警)。引擎按可用列宽等比
+/// 缩小(绝不放大),故此处传图片的自然显示尺寸(EMU → pt)即可。
+fn picture_block(pic: &Picture, media: &BTreeMap<String, Vec<u8>>) -> Option<Block> {
+    let name = pic.media_name.as_ref()?;
+    let bytes = media.get(name)?;
+    let (w_emu, h_emu) = pic.extent?;
+    let (w, h) = (emu_to_points(w_emu), emu_to_points(h_emu));
+    if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
+        return None;
+    }
+    Some(Block::Image(ImageSpec::new(bytes.clone(), w, h)))
 }
 
 /// 有效段落属性 → 引擎段落属性。
@@ -457,6 +521,95 @@ mod tests {
             }],
             ..Document::default()
         }
+    }
+
+    fn para_with_picture(
+        media_name: &str,
+        extent: Option<(i64, i64)>,
+        placement: Placement,
+    ) -> Paragraph {
+        let mut run = TextRun::default();
+        run.pictures.push(Picture {
+            rel_id: "rId1".into(),
+            media_name: Some(media_name.into()),
+            extent,
+            image_bytes_len: 3,
+            placement,
+        });
+        Paragraph {
+            runs: vec![run],
+            ..Paragraph::default()
+        }
+    }
+
+    /// C-8:有 media 字节 + wp:extent 的内嵌图 → 块级 `Block::Image`,尺寸 EMU→pt;
+    /// 图片独占段落时不产多余空段落。
+    #[test]
+    fn inline_image_renders_as_block_image() {
+        // 914400 EMU = 1 in = 72 pt;457200 EMU = 0.5 in = 36 pt。
+        let doc = doc_with_body(vec![DocBlock::Paragraph(para_with_picture(
+            "img.png",
+            Some((914_400, 457_200)),
+            Placement::Inline,
+        ))]);
+        let mut media = BTreeMap::new();
+        media.insert("img.png".to_string(), vec![1u8, 2, 3]);
+        let blocks = &map_document_with_media(&doc, &media).sections[0].blocks;
+        assert_eq!(blocks.len(), 1, "图片独占段应只 emit 图片本身,无空段落");
+        match &blocks[0] {
+            Block::Image(spec) => {
+                assert!((spec.width - 72.0).abs() < 0.01);
+                assert!((spec.height - 36.0).abs() < 0.01);
+            }
+            other => panic!("expected Block::Image, got {other:?}"),
+        }
+    }
+
+    /// 缺 media 字节 → 跳过图片 + 一次性 picture-skipped 告警(不产 Block::Image)。
+    #[test]
+    fn missing_media_skips_image_with_warning() {
+        let doc = doc_with_body(vec![DocBlock::Paragraph(para_with_picture(
+            "gone.png",
+            Some((914_400, 457_200)),
+            Placement::Inline,
+        ))]);
+        let mapped = map_document_with_media(&doc, &BTreeMap::new());
+        assert!(!mapped.sections[0]
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Image(_))));
+        assert!(mapped
+            .warnings
+            .iter()
+            .any(|w| w.kind() == "picture-skipped"));
+    }
+
+    /// 浮动/锚定图片:仍按块级渲染,并发一次 floating-image-inlined 告警。
+    #[test]
+    fn floating_image_renders_inline_with_warning() {
+        let placement = Placement::Anchored {
+            x: 0,
+            y: 0,
+            rel_h: Default::default(),
+            rel_v: Default::default(),
+            behind: false,
+        };
+        let doc = doc_with_body(vec![DocBlock::Paragraph(para_with_picture(
+            "f.png",
+            Some((914_400, 914_400)),
+            placement,
+        ))]);
+        let mut media = BTreeMap::new();
+        media.insert("f.png".to_string(), vec![9u8]);
+        let mapped = map_document_with_media(&doc, &media);
+        assert!(mapped.sections[0]
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Image(_))));
+        assert!(mapped
+            .warnings
+            .iter()
+            .any(|w| w.kind() == "floating-image-inlined"));
     }
 
     /// 默认节:Letter 纵向 612x792 pt、四边 72 pt(1440 twip)边距。
