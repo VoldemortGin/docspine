@@ -137,5 +137,5 @@ crates/
 
 - Full legacy binary `.doc` (OLE/CFB / `[MS-DOC]`) body reconstruction (FIB,
   piece table, CHPX/PAPX). Today: detection + typed downgrade + `probe_doc`.
-- Richer styling (theme colors, styles.xml inheritance), headers/footers,
-  footnotes/endnotes, comments, fields, hyperlinks targets, SmartArt/charts.
+- Richer styling, headers/footers, footnotes/endnotes, comments, fields,
+  hyperlinks targets, SmartArt/charts.
