@@ -434,3 +434,70 @@ def make_docx_with_image():
         return build_docx(_IMAGE_ONLY_DOCUMENT, image=png)
 
     return _make
+
+
+# --- EMF 矢量图 fixture(C-8:不支持格式 → 占位框 + UnsupportedImageFormat) --------
+
+# 主文档关系:把 r:embed="rId10" 指向一张 EMF(而非 png)。
+_EMF_DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.emf"/>
+</Relationships>"""
+
+# 仅含一张内嵌 EMF(r:embed=rId10 -> media/image1.emf;wp:extent 2in×1in)。
+_EMF_IMAGE_DOCUMENT = (
+    _DOC_HEADER
+    + """
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:extent cx="1828800" cy="914400"/>
+            <a:graphic>
+              <a:graphicData>
+                <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                  <pic:blipFill><a:blip r:embed="rId10"/></pic:blipFill>
+                </pic:pic>
+              </a:graphicData>
+            </a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>"""
+)
+
+
+def _emf_bytes() -> bytes:
+    """造一个最小合法 EMF 头(ENHMETAHEADER):含 iType=1(EMR_HEADER)与偏移 40 处
+    ``" EMF"`` 签名,足以被魔数识别且引擎解码失败时不 panic(纯 struct,不落二进制)。"""
+    header = bytearray(88)
+    struct.pack_into("<I", header, 0, 1)  # iType = EMR_HEADER
+    struct.pack_into("<I", header, 4, 88)  # nSize
+    struct.pack_into("<I", header, 40, 0x464D4520)  # dSignature = " EMF"
+    struct.pack_into("<I", header, 48, 88)  # nBytes
+    struct.pack_into("<I", header, 52, 1)  # nRecords
+    return bytes(header)
+
+
+def _build_emf_docx() -> bytes:
+    types = _CONTENT_TYPES.replace(
+        '  <Default Extension="png"',
+        '  <Default Extension="emf" ContentType="image/x-emf"/>\n  <Default Extension="png"',
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", types)
+        z.writestr("_rels/.rels", _ROOT_RELS)
+        z.writestr("word/document.xml", _EMF_IMAGE_DOCUMENT)
+        z.writestr("word/_rels/document.xml.rels", _EMF_DOC_RELS)
+        z.writestr("word/media/image1.emf", _emf_bytes())
+    return buf.getvalue()
+
+
+@pytest.fixture(scope="session")
+def emf_docx_bytes() -> bytes:
+    """含一张内嵌 EMF 矢量图的合成 ``.docx`` 字节(C-8:占位框渲染)。"""
+    return _build_emf_docx()

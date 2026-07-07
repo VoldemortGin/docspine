@@ -31,6 +31,9 @@ pub enum RenderWarning {
     /// 浮动/锚定图片(`wp:anchor`)按块级内联近似渲染(v1 不做绝对定位 /
     /// 文字环绕;C-8 声明降级)。
     FloatingImageInlined,
+    /// 不支持的矢量图格式(EMF/WMF):引擎无法解码,改画一个与显示尺寸等大的
+    /// 浅灰占位框(C-8 声明降级;文本/表格照常)。
+    UnsupportedImageFormat,
     /// 列表编号落在未解的 `styleLink`/`numStyleLink` 间接上(C-6 声明降级):
     /// 该 numId 无自有层级定义,段落按普通段渲染(缩进照常级联)。
     NumberingIndirectionSkipped,
@@ -66,6 +69,7 @@ impl RenderWarning {
             RenderWarning::ParaShadingOmitted => "para-shading-omitted",
             RenderWarning::PictureSkipped => "picture-skipped",
             RenderWarning::FloatingImageInlined => "floating-image-inlined",
+            RenderWarning::UnsupportedImageFormat => "unsupported-image-format",
             RenderWarning::NumberingIndirectionSkipped => "numbering-indirection-skipped",
             RenderWarning::CellVAlignIgnored => "cell-valign-ignored",
             RenderWarning::RowTooTall => "row-too-tall",
@@ -109,6 +113,13 @@ impl fmt::Display for RenderWarning {
                     f,
                     "a floating (anchored) image is rendered inline; no absolute \
                      positioning or text wrap in this version"
+                )
+            }
+            RenderWarning::UnsupportedImageFormat => {
+                write!(
+                    f,
+                    "an unsupported vector image format (EMF/WMF) is shown as a \
+                     placeholder box; it cannot be decoded in this version"
                 )
             }
             RenderWarning::NumberingIndirectionSkipped => {

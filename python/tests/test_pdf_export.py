@@ -481,3 +481,26 @@ def test_inline_image_is_embedded_in_pdf(minimal_docx_bytes):
     assert len(imgs) >= 1, "内嵌图片应出现在导出的 PDF 里"
     if os.environ.get("DOCSPINE_E2E_PNG"):
         doc[0].get_pixmap(dpi=120).save(os.environ["DOCSPINE_E2E_PNG"])
+
+
+def test_emf_image_draws_placeholder_and_warns_once(emf_docx_bytes):
+    """C-8:EMF 矢量图无法解码 → 画浅灰占位框(``get_drawings`` 见填充 + 描边),
+    并发恰一条 ``UnsupportedImageFormat``(``UserWarning``);PDF 仍产出、无 panic。"""
+    doc = docspine.open_bytes(emf_docx_bytes)
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = doc.to_pdf()
+    assert pdf.startswith(b"%PDF-")
+    d = _open_pdf(pdf)
+    assert d.page_count >= 1
+    # EMF 不解码 → 不作为图片 XObject 嵌入,而是画一个占位框(填充 + 四边线)。
+    assert not d[0].get_images(), "EMF 不应作为图片嵌入 PDF"
+    kinds = [dr.get("type") for dr in d[0].get_drawings()]
+    assert "f" in kinds, f"占位框应画填充: {kinds}"
+    assert "s" in kinds, f"占位框应画描边: {kinds}"
+    # 首页光栅非空白(占位框可见)。
+    assert any(b != 0xFF for b in bytes(d[0].get_pixmap().samples)), "占位框应使首页非全白"
+    # 告警恰一条,且是 UnsupportedImageFormat 那一类(UserWarning)。
+    fmt = [w for w in ws if "EMF" in str(w.message)]
+    assert len(fmt) == 1, [str(w.message) for w in ws]
+    assert issubclass(fmt[0].category, UserWarning)

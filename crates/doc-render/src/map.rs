@@ -33,7 +33,8 @@ use doc_core::style::{
     EffectiveParaProps, EffectiveRunProps, Justification, VertAlign,
 };
 use pdf_typeset::{
-    Align, Block, ImageSpec, LineSpacing, ListLabel, PageGeom, ParaProps, Rgb, Run, RunStyle,
+    Align, Block, BorderEdge, CellBorders, ColumnWidth, ImageSpec, LineSpacing, ListLabel,
+    PageGeom, ParaProps, Rgb, Run, RunStyle, TableCell, TableRow, TableSpec,
 };
 
 use crate::section::page_geom;
@@ -42,6 +43,11 @@ use crate::warn::RenderWarning;
 
 /// 上/下标的字号近似缩放(引擎无基线偏移,v1 只缩字号)。
 const VERT_ALIGN_SCALE: f64 = 0.65;
+
+/// 不支持矢量图(EMF/WMF)占位框的浅灰填充与描边(观感对齐 pptspine 的图表灰框)。
+const PLACEHOLDER_FILL: Rgb = Rgb::new(0.90, 0.90, 0.90);
+const PLACEHOLDER_STROKE: Rgb = Rgb::new(0.60, 0.60, 0.60);
+const PLACEHOLDER_STROKE_PT: f64 = 0.75;
 
 /// 列表标签与正文起点的缺省空隙(磅;层级无悬挂缩进时用)。
 const DEFAULT_LIST_GUTTER: f64 = 4.0;
@@ -77,6 +83,7 @@ pub(crate) struct MapCtx {
     border_warned: bool,
     shading_warned: bool,
     picture_warned: bool,
+    unsupported_format_warned: bool,
     floating_warned: bool,
     valign_warned: bool,
     row_warned: bool,
@@ -93,6 +100,7 @@ impl MapCtx {
             border_warned: false,
             shading_warned: false,
             picture_warned: false,
+            unsupported_format_warned: false,
             floating_warned: false,
             valign_warned: false,
             row_warned: false,
@@ -136,6 +144,13 @@ impl MapCtx {
         if !self.picture_warned {
             self.picture_warned = true;
             self.list.push(RenderWarning::PictureSkipped);
+        }
+    }
+
+    fn unsupported_format(&mut self) {
+        if !self.unsupported_format_warned {
+            self.unsupported_format_warned = true;
+            self.list.push(RenderWarning::UnsupportedImageFormat);
         }
     }
 
@@ -294,20 +309,29 @@ fn map_paragraph(
         }
     }
 
-    // 内嵌图片(C-8):按文档顺序收集成块级 Block::Image。有 media 字节且有
-    // wp:extent 尺寸的图渲染;缺字节/缺尺寸的图跳过 + 一次性告警;浮动(锚定)
-    // 图按块级内联近似(不做绝对定位/文字环绕)+ 一次性告警。
+    // 内嵌图片(C-8):按文档顺序收集成块级块。有 media 字节且有 wp:extent 尺寸
+    // 的光栅图渲染成 Block::Image;EMF/WMF 等矢量格式画等大的浅灰占位框(表格原语)
+    // + UnsupportedImageFormat 告警;缺字节/缺尺寸的图跳过 + PictureSkipped 告警;
+    // 浮动(锚定)图按块级内联近似(不做绝对定位/文字环绕)+ 一次性告警。
     let mut image_blocks: Vec<Block> = Vec::new();
     for run in &para.runs {
         for pic in &run.pictures {
+            let anchored = matches!(pic.placement, Placement::Anchored { .. });
             match picture_block(pic, media) {
-                Some(block) => {
-                    if matches!(pic.placement, Placement::Anchored { .. }) {
+                PicOutcome::Raster(block) => {
+                    if anchored {
                         ctx.floating_image();
                     }
                     image_blocks.push(block);
                 }
-                None => ctx.picture(),
+                PicOutcome::Placeholder(block) => {
+                    if anchored {
+                        ctx.floating_image();
+                    }
+                    ctx.unsupported_format();
+                    image_blocks.push(block);
+                }
+                PicOutcome::Skip => ctx.picture(),
             }
         }
     }
@@ -373,18 +397,85 @@ fn map_paragraph(
     }
 }
 
-/// 一张内嵌图片 → 块级 [`Block::Image`]。缺 `media_name` / media 字节 / `wp:extent`
-/// 尺寸,或尺寸非法(≤0),返回 `None`(调用方跳过 + 告警)。引擎按可用列宽等比
-/// 缩小(绝不放大),故此处传图片的自然显示尺寸(EMU → pt)即可。
-fn picture_block(pic: &Picture, media: &BTreeMap<String, Vec<u8>>) -> Option<Block> {
-    let name = pic.media_name.as_ref()?;
-    let bytes = media.get(name)?;
-    let (w_emu, h_emu) = pic.extent?;
+/// 一张内嵌图片的映射去向。
+enum PicOutcome {
+    /// 可解码的光栅图:块级 [`Block::Image`]。
+    Raster(Block),
+    /// 不支持的矢量格式(EMF/WMF):等大的浅灰占位框(块级表格)。
+    Placeholder(Block),
+    /// 跳过(缺 media 名 / 字节 / 尺寸,或尺寸非法):调用方发 PictureSkipped 告警。
+    Skip,
+}
+
+/// 把一张内嵌图片分类映射。缺 `media_name` / media 字节 / `wp:extent` 尺寸,或尺寸
+/// 非法(≤0),→ [`PicOutcome::Skip`]。EMF/WMF(名后缀或魔数命中)→
+/// [`PicOutcome::Placeholder`];其余光栅图 → [`PicOutcome::Raster`]。引擎按可用列宽
+/// 等比缩小(绝不放大),故传图片的自然显示尺寸(EMU → pt)即可。
+fn picture_block(pic: &Picture, media: &BTreeMap<String, Vec<u8>>) -> PicOutcome {
+    let Some(name) = pic.media_name.as_ref() else {
+        return PicOutcome::Skip;
+    };
+    let Some(bytes) = media.get(name) else {
+        return PicOutcome::Skip;
+    };
+    let Some((w_emu, h_emu)) = pic.extent else {
+        return PicOutcome::Skip;
+    };
     let (w, h) = (emu_to_points(w_emu), emu_to_points(h_emu));
     if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
-        return None;
+        return PicOutcome::Skip;
     }
-    Some(Block::Image(ImageSpec::new(bytes.clone(), w, h)))
+    if is_unsupported_vector(name, bytes) {
+        return PicOutcome::Placeholder(placeholder_box(w, h));
+    }
+    PicOutcome::Raster(Block::Image(ImageSpec::new(bytes.clone(), w, h)))
+}
+
+/// EMF/WMF 识别(名后缀 + 魔数双保险):
+/// - 后缀 `.emf` / `.wmf`(忽略大小写);
+/// - EMF 魔数:首个 `EMR_HEADER` 记录类型 `0x00000001` + 偏移 40 处 " EMF" 签名;
+/// - WMF 魔数:可置放头 `0xD7 0xCD 0xC6 0x9A`,或标准 METAHEADER(`mtType`∈{1,2}、
+///   `mtHeaderSize = 0x0009`)。
+fn is_unsupported_vector(name: &str, bytes: &[u8]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".emf") || lower.ends_with(".wmf") {
+        return true;
+    }
+    is_emf_magic(bytes) || is_wmf_magic(bytes)
+}
+
+/// EMF 魔数:`iType == 1` 且偏移 40..44 为 ASCII " EMF"(`0x20 0x45 0x4D 0x46`)。
+fn is_emf_magic(b: &[u8]) -> bool {
+    b.len() >= 44 && b[0..4] == [0x01, 0x00, 0x00, 0x00] && b[40..44] == [0x20, 0x45, 0x4D, 0x46]
+}
+
+/// WMF 魔数:可置放头,或标准内存/磁盘 METAHEADER(`mtHeaderSize` 恒为 9)。
+fn is_wmf_magic(b: &[u8]) -> bool {
+    if b.len() >= 4 && b[0..4] == [0xD7, 0xCD, 0xC6, 0x9A] {
+        return true; // 可置放 WMF。
+    }
+    b.len() >= 4 && (b[0..2] == [0x01, 0x00] || b[0..2] == [0x02, 0x00]) && b[2..4] == [0x09, 0x00]
+}
+
+/// 不支持的矢量图 → 与图片显示尺寸等大的浅灰占位框:单列单行表(浅灰填充 + 四边
+/// 细线),引擎按可用列宽等比收窄。家族占位画法对齐 pptspine 的灰框——那里是形状
+/// Op,这里落成流式表格原语。
+fn placeholder_box(width: f64, height: f64) -> Block {
+    let edge = BorderEdge {
+        width: PLACEHOLDER_STROKE_PT,
+        color: PLACEHOLDER_STROKE,
+    };
+    let mut cell = TableCell::new(Vec::new());
+    cell.fill = Some(PLACEHOLDER_FILL);
+    cell.borders = CellBorders {
+        top: Some(edge),
+        right: Some(edge),
+        bottom: Some(edge),
+        left: Some(edge),
+    };
+    let mut row = TableRow::new(vec![cell]);
+    row.min_height = Some(height);
+    Block::Table(TableSpec::new(vec![ColumnWidth::Fixed(width)], vec![row]))
 }
 
 /// 有效段落属性 → 引擎段落属性。
@@ -610,6 +701,79 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.kind() == "floating-image-inlined"));
+    }
+
+    /// C-8:EMF/WMF 矢量图无法解码 → 画等大的浅灰占位框(块级表格:浅灰填充 +
+    /// 四边细线、行高 = 显示高),两张只发一次 unsupported-image-format 告警。
+    #[test]
+    fn unsupported_vector_image_draws_placeholder_box_once() {
+        let doc = doc_with_body(vec![
+            DocBlock::Paragraph(para_with_picture(
+                "chart.emf",
+                Some((914_400, 457_200)), // 1in × 0.5in = 72 × 36 pt。
+                Placement::Inline,
+            )),
+            DocBlock::Paragraph(para_with_picture(
+                "diagram.wmf",
+                Some((914_400, 914_400)),
+                Placement::Inline,
+            )),
+        ]);
+        let mut media = BTreeMap::new();
+        media.insert("chart.emf".to_string(), vec![0u8; 4]);
+        media.insert("diagram.wmf".to_string(), vec![0u8; 4]);
+        let mapped = map_document_with_media(&doc, &media);
+        let blocks = &mapped.sections[0].blocks;
+        // 无光栅图;两张矢量图各出一个占位表格。
+        assert!(!blocks.iter().any(|b| matches!(b, Block::Image(_))));
+        let tables: Vec<&TableSpec> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables.len(), 2, "两张矢量图各一个占位框");
+        let first = tables[0];
+        assert_eq!(first.columns, vec![ColumnWidth::Fixed(72.0)]);
+        assert_eq!(first.rows[0].min_height, Some(36.0));
+        let cell = &first.rows[0].cells[0];
+        assert!(cell.fill.is_some(), "占位框有填充(get_drawings 可见)");
+        assert!(cell.borders.top.is_some() && cell.borders.left.is_some());
+        let kinds: Vec<&str> = mapped.warnings.iter().map(RenderWarning::kind).collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == "unsupported-image-format")
+                .count(),
+            1,
+            "两张矢量图同类去重,只报一次"
+        );
+    }
+
+    /// 魔数兜底:名后缀非 emf/wmf,但字节是 EMF 头(iType=1 + 偏移 40 " EMF")→
+    /// 仍识别为矢量占位。
+    #[test]
+    fn emf_magic_bytes_trigger_placeholder_without_suffix() {
+        let mut bytes = vec![0u8; 44];
+        bytes[0] = 0x01; // iType = EMR_HEADER
+        bytes[40..44].copy_from_slice(b" EMF"); // 签名。
+        let doc = doc_with_body(vec![DocBlock::Paragraph(para_with_picture(
+            "image1.dat",
+            Some((914_400, 914_400)),
+            Placement::Inline,
+        ))]);
+        let mut media = BTreeMap::new();
+        media.insert("image1.dat".to_string(), bytes);
+        let mapped = map_document_with_media(&doc, &media);
+        assert!(mapped.sections[0]
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Table(_))));
+        assert!(mapped
+            .warnings
+            .iter()
+            .any(|w| w.kind() == "unsupported-image-format"));
     }
 
     /// 默认节:Letter 纵向 612x792 pt、四边 72 pt(1440 twip)边距。
