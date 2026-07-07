@@ -21,6 +21,7 @@ mod table;
 pub mod warn;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use doc_core::model::Document;
 use doc_core::{DocError, Result};
@@ -28,11 +29,13 @@ use pdf_typeset::Typesetter;
 
 pub use warn::RenderWarning;
 
-/// 渲染选项。`font_map` 是用户的字体替换覆盖(请求名 → 候选名,如
-/// `{"宋体": "Songti SC"}`),喂给引擎字体解析器的替换表。
+/// 渲染选项。`font_map` 是用户的字体替换覆盖(请求 family → 覆盖值,如
+/// `{"宋体": "Songti SC"}` 或 `{"Calibri": "/path/to/Carlito.ttf"}`),喂给引擎
+/// 字体解析器。
 #[derive(Clone, Debug, Default)]
 pub struct RenderOptions {
-    /// 字体替换覆盖(请求 family → 替换 family)。
+    /// 请求字体族 → 覆盖目标。值为**存在的文件路径**时,把该字体文件注入解析器
+    /// (文件须包含所请求的字体族);否则视为**替代字体族名**,叠加进引擎替换表。
     pub font_map: BTreeMap<String, String>,
 }
 
@@ -70,8 +73,15 @@ fn render_with(
 ) -> Result<RenderResult> {
     // 字体替换覆盖要在任何布局之前配置(引擎按样式 memoize 解析结果)。
     for (requested, candidate) in &options.font_map {
-        ts.resolver_mut()
-            .add_substitution(requested, &[candidate.as_str()]);
+        let path = Path::new(candidate);
+        if path.is_file() {
+            if let Ok(bytes) = std::fs::read(path) {
+                ts.resolver_mut().add_font_data(bytes);
+            }
+        } else {
+            ts.resolver_mut()
+                .add_substitution(requested, &[candidate.as_str()]);
+        }
     }
 
     let mapped = map::map_document_with_media(doc, media);
@@ -208,6 +218,74 @@ mod tests {
             .insert("NoSuchFamily".into(), "Liberation Serif".into());
         let res = render_with(deterministic(), &doc, &BTreeMap::new(), &options).expect("render");
         assert!(res.warnings.iter().any(|w| w.kind() == "font-substituted"));
+    }
+
+    /// UTF-16BE 字节(name 表 Windows 平台字符串编码)。
+    fn utf16be(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_be_bytes).collect()
+    }
+
+    /// 等长字节替换(name 表改族名不动表长,校验和不重算,ttf-parser/fontdb 不校验)。
+    fn replace_bytes(haystack: &mut [u8], needle: &[u8], repl: &[u8]) {
+        assert_eq!(needle.len(), repl.len());
+        let mut i = 0;
+        while i + needle.len() <= haystack.len() {
+            if haystack[i..i + needle.len()] == *needle {
+                haystack[i..i + needle.len()].copy_from_slice(repl);
+                i += needle.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// 改名 name 表里的字体族(同 pdf-typeset 自己的 fontres 测试写法):等长
+    /// 同时替换 Latin-1/Mac-Roman 与 UTF-16BE 两种编码,产出一个不会与内置/系统
+    /// 字体撞名的合成字体。
+    fn rename_family(font: &[u8], from: &str, to: &str) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let mut out = font.to_vec();
+        replace_bytes(&mut out, from.as_bytes(), to.as_bytes());
+        replace_bytes(&mut out, &utf16be(from), &utf16be(to));
+        out
+    }
+
+    /// font_map 的文件路径分支:值是磁盘上存在的字体文件 → 直接把字节注入解析器
+    /// (`add_font_data`),而非仅仅注册一条替换族名。用改名后的内嵌 Liberation Sans
+    /// 写临时文件,请求族名与注入字体的真实族名一致;零 `font-substituted` 告警才
+    /// 说明确实是这份文件的字节被解析并命中,不是巧合撞上了内置替换表。
+    #[test]
+    fn font_map_file_path_injects_font_bytes() {
+        use pdf_fonts::liberation::{liberation_face, LiberationFamily};
+
+        let renamed = rename_family(
+            liberation_face(LiberationFamily::Sans, false, false),
+            "Liberation Sans",
+            "DocspineTestFnt",
+        );
+        let path =
+            std::env::temp_dir().join(format!("docspine-font-map-test-{}.ttf", std::process::id()));
+        std::fs::write(&path, &renamed).expect("write temp font fixture");
+
+        let mut run = TextRun::from_text("embedded");
+        run.rpr.fonts.ascii = Some(doc_core::style::FontRef::Named("DocspineTestFnt".into()));
+        let doc = doc_of(vec![DocBlock::Paragraph(Paragraph {
+            runs: vec![run],
+            ..Paragraph::default()
+        })]);
+        let mut options = RenderOptions::default();
+        options.font_map.insert(
+            "DocspineTestFnt".into(),
+            path.to_str().expect("utf8 temp path").into(),
+        );
+        let res = render_with(deterministic(), &doc, &BTreeMap::new(), &options).expect("render");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !res.warnings.iter().any(|w| w.kind() == "font-substituted"),
+            "font_map 文件路径注入的字体应直接命中,不应触发替换告警: {:?}",
+            res.warnings
+        );
     }
 
     /// 样式表 basedOn 环:渲染不悬挂,体检告警浮出。

@@ -325,6 +325,7 @@ name = "doc-render"
 version = "0.0.1"
 dependencies = [
  "doc-core",
+ "pdf-fonts",
  "pdf-typeset",
 ]
 
