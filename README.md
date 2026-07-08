@@ -36,7 +36,7 @@ all sharing the same `ocrspine` OCR core.
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent | parsed |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table reconstruction from OCR boxes → grid | working (`reconstruct_image_table`) |
-| PDF export: `to_pdf()` / `save_pdf()` — flowed layout + pagination; per-section page geometry (`sectPr`), styles.xml + theme effective styles, numbering engine, table fidelity (borders/merges/margins, cross-page; vAlign top-only) | working |
+| PDF export: `to_pdf()` / `save_pdf()` — flowed layout + pagination; per-section page geometry (`sectPr`), styles.xml + theme effective styles, numbering engine, table fidelity (borders/merges/margins, cross-page; vAlign top-only), inline/anchored images, `defaultTabStop` tab advance | working |
 | Legacy binary `.doc` (OLE/CFB) | probe + typed downgrade (full body deferred) |
 
 Parsing is tolerant: unknown elements are skipped, missing attributes become

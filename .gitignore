@@ -21,3 +21,6 @@ venv/
 dist/
 build/
 wheelhouse/
+
+# LibreOffice oracle advisory 中间产物(local-only,scripts/lo_oracle_ssim.py)
+.lo-oracle/
