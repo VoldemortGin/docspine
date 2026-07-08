@@ -19,4 +19,4 @@ pdf-typeset = { workspace = true }
 # 测试用:借 pdf-typeset 同仓的已内嵌 Liberation 字体字节造 font_map 文件路径测试
 # fixture(改名后写临时文件),不新增二进制 fixture。同 git repo + 同 rev,复用已拉取的
 # checkout,不额外增网络开销。
-pdf-fonts = { git = "https://github.com/VoldemortGin/pdfspine", rev = "7ccee8aca1df01c63b6fefe7280021e04fc687d3", package = "pdf-fonts" }
+pdf-fonts = { git = "https://github.com/VoldemortGin/pdfspine", rev = "93214453167535c424079470aefb13773e79d717", package = "pdf-fonts" }

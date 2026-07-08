@@ -31,6 +31,7 @@ _CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 _STYLES_OVERRIDE = '  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
 _NUMBERING_OVERRIDE = '  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>'
 _THEME_OVERRIDE = '  <Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'
+_SETTINGS_OVERRIDE = '  <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
 
 _ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -183,6 +184,7 @@ def build_docx(
     styles_xml: str | None = None,
     numbering_xml: str | None = None,
     theme_xml: str | None = None,
+    settings_xml: str | None = None,
 ) -> bytes:
     """用纯 ``zipfile`` 把给定的 ``word/document.xml`` 包成最小合法 ``.docx``。
 
@@ -198,6 +200,7 @@ def build_docx(
             (styles_xml, _STYLES_OVERRIDE),
             (numbering_xml, _NUMBERING_OVERRIDE),
             (theme_xml, _THEME_OVERRIDE),
+            (settings_xml, _SETTINGS_OVERRIDE),
         ]
         if part is not None
     )
@@ -215,6 +218,8 @@ def build_docx(
             z.writestr("word/numbering.xml", numbering_xml)
         if theme_xml is not None:
             z.writestr("word/theme/theme1.xml", theme_xml)
+        if settings_xml is not None:
+            z.writestr("word/settings.xml", settings_xml)
         if image is not None:
             z.writestr("word/media/image1.png", image)
     return buf.getvalue()

@@ -88,6 +88,7 @@ pub(crate) struct MapCtx {
     valign_warned: bool,
     row_warned: bool,
     numbering_warned: bool,
+    tab_warned: bool,
 }
 
 impl MapCtx {
@@ -105,6 +106,7 @@ impl MapCtx {
             valign_warned: false,
             row_warned: false,
             numbering_warned: false,
+            tab_warned: false,
         };
         ctx.set_frame(&page_geom(&doc_core::model::Section::default()));
         ctx
@@ -165,6 +167,14 @@ impl MapCtx {
         if !self.numbering_warned {
             self.numbering_warned = true;
             self.list.push(RenderWarning::NumberingIndirectionSkipped);
+        }
+    }
+
+    /// 段落声明自定义制表位(`w:tabs`)的一次性降级:v1 按缺省间隔推进 `\t`。
+    fn custom_tab_stops(&mut self) {
+        if !self.tab_warned {
+            self.tab_warned = true;
+            self.list.push(RenderWarning::CustomTabStopsIgnored);
         }
     }
 
@@ -280,6 +290,10 @@ fn map_paragraph(
     }
     if eff.shading.is_some() {
         ctx.para_shading();
+    }
+    if !eff.tabs.is_empty() {
+        // 自定义制表位(pos/leader/对齐)v1 不实现:`\t` 仍按缺省间隔等距推进。
+        ctx.custom_tab_stops();
     }
     // 段前分页:引擎支持,直接插 PageBreak(节首块除外——该页本就新起)。
     if eff.page_break_before && !out.is_empty() {

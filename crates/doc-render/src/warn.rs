@@ -43,6 +43,10 @@ pub enum RenderWarning {
     /// 表格行高超过一页正文高度:行不跨页(整行挪页)语义下该行溢出页面
     /// (引擎“行不分割”的 v1 限制)。
     RowTooTall,
+    /// 段落声明了自定义制表位(`w:tabs > w:tab`,含 pos/leader/对齐):v1 只按
+    /// 缺省制表位间隔(`defaultTabStop`)等距推进 `\t`,自定义停位/前导符/对齐被
+    /// 忽略(C-9 声明降级;正文照常)。
+    CustomTabStopsIgnored,
 }
 
 impl RenderWarning {
@@ -73,6 +77,7 @@ impl RenderWarning {
             RenderWarning::NumberingIndirectionSkipped => "numbering-indirection-skipped",
             RenderWarning::CellVAlignIgnored => "cell-valign-ignored",
             RenderWarning::RowTooTall => "row-too-tall",
+            RenderWarning::CustomTabStopsIgnored => "custom-tab-stops-ignored",
         }
     }
 }
@@ -139,6 +144,13 @@ impl fmt::Display for RenderWarning {
                 write!(
                     f,
                     "a table row is taller than the page body; rows never split across pages"
+                )
+            }
+            RenderWarning::CustomTabStopsIgnored => {
+                write!(
+                    f,
+                    "custom tab stops (w:tabs) are ignored; tabs advance by the \
+                     default interval in this version"
                 )
             }
         }

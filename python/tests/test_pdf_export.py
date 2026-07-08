@@ -139,6 +139,60 @@ def test_degradation_warnings_dedupe_by_kind():
     assert issubclass(col_warnings[0].category, UserWarning)
 
 
+# ============================================================ C-9:制表位推进 + 降级
+
+
+def _post_tab_word_x0(data: bytes) -> float:
+    """渲染含 ``A<w:tab/>B`` 的段落,回读后返回制表位后单词 'B' 的 x0(磅)。"""
+    d = _open_pdf(_render(data))
+    words = d[0].get_text_words()
+    b = next(w for w in words if "B" in w[4])
+    return b[0]
+
+
+def test_c9_tab_advances_to_default_stop():
+    r"""无 settings.xml:``\t`` 按引擎缺省 36pt 间隔推进;制表位后 x0 落在 72+36k ±1pt。"""
+    data = _body("<w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r></w:p>")
+    rel = _post_tab_word_x0(data) - 72.0  # 页左边距(Word 缺省 1 英寸)
+    nearest = round(rel / 36.0) * 36.0
+    assert abs(rel - nearest) <= 1.0, f"制表位后 x0 rel={rel} 不在 36pt 停位"
+    assert rel >= 36.0 - 1.0, f"tab 至少推进一个 36pt 停位,rel={rel}"
+
+
+def test_c9_default_tab_stop_from_settings():
+    """settings.xml defaultTabStop=1440(72pt):制表位后 x0 落在 72+72k ±1pt。"""
+    settings = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:defaultTabStop w:val="1440"/></w:settings>'
+    )
+    data = build_docx(
+        _DOC_HEADER
+        + "\n  <w:body><w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r></w:p></w:body>"
+        + "\n</w:document>",
+        settings_xml=settings,
+    )
+    rel = _post_tab_word_x0(data) - 72.0
+    nearest = round(rel / 72.0) * 72.0
+    assert abs(rel - nearest) <= 1.0, f"制表位后 x0 rel={rel} 不在 72pt 停位"
+    assert rel >= 72.0 - 1.0, f"defaultTabStop=1440 应推进到 72pt,rel={rel}"
+
+
+def test_c9_custom_tab_stops_warn_once():
+    """段落声明 w:tabs 自定义制表位:恰好一条 custom-tab-stops UserWarning。"""
+    body = (
+        '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="2160"/></w:tabs></w:pPr>'
+        "<w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r></w:p>"
+    )
+    doc = docspine.open_bytes(_body(body))
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        doc.to_pdf()
+    tab_warnings = [w for w in ws if "tab stop" in str(w.message)]
+    assert len(tab_warnings) == 1, [str(w.message) for w in ws]
+    assert issubclass(tab_warnings[0].category, UserWarning)
+
+
 # ============================================================ C-4:直接格式化渲染门
 
 

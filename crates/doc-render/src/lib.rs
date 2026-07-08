@@ -72,6 +72,12 @@ fn render_with(
     media: &BTreeMap<String, Vec<u8>>,
     options: &RenderOptions,
 ) -> Result<RenderResult> {
+    // 缺省制表位间隔(C-9):settings.xml 的 defaultTabStop(twip → 磅)喂给引擎;
+    // 部件/属性缺失时不设置,沿用引擎缺省(36pt = 720 twip = Word 缺省 0.5 英寸)。
+    if let Some(tw) = doc.default_tab_stop {
+        ts.set_tab_interval(doc_core::geom::twips_to_points(tw));
+    }
+
     // 字体替换覆盖要在任何布局之前配置(引擎按样式 memoize 解析结果)。
     for (requested, candidate) in &options.font_map {
         let path = Path::new(candidate);
