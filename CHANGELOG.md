@@ -13,6 +13,8 @@ change.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-08
+
 ### Added
 
 - **Inline & anchored images in PDF export (C-8).** Embedded pictures are
