@@ -29,6 +29,14 @@ change.
   `w:between` edge (between consecutive same-bordered paragraphs) and complex
   cases (an intra-paragraph page break) still degrade with a single
   `ParaBorderOmitted` / `ParaShadingOmitted` warning.
+- **Committed `.ssimref` self-render CI gate (C-10 layer 4).**
+  `scripts/ssim_selfref.py` re-renders the export fixture matrix deterministically
+  (`DOCSPINE_DETERMINISTIC_FONTS=1`, bundled fonts only) and SSIM-compares it
+  against committed baseline PDFs under `conformance/ssimref/`, both rasterised by
+  the runner's `pdfspine` so the gate is raster-version-independent. It runs
+  CI-blocking on one runner at `--min-ssim 0.97`; regenerate with `--update`.
+  Unlike the LibreOffice oracle (advisory, never CI), this gate is a self-baseline
+  and blocks on layout regressions.
 
 ### Changed
 

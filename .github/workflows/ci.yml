@@ -66,3 +66,13 @@ jobs:
         # OCR models resolve from ocrspine's cargo git checkout via the build-time
         # fallback; no OCRSPINE_MODELS needed. Parsing tests need no models at all.
         run: python -m pytest python/tests -q
+      - name: ssim self-ref gate (C-10 layer 4)
+        # Committed deterministic baseline (conformance/ssimref/*.pdf) vs a fresh
+        # deterministic re-render, both rasterized by the runner's pdfspine (so the
+        # gate is raster-version-independent). A real layout regression drops SSIM
+        # below 0.97. Single-OS: the render is bundled-font deterministic, so one
+        # runner suffices. NOT the LibreOffice oracle (that stays local-only).
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          DOCSPINE_DETERMINISTIC_FONTS: "1"
+        run: python scripts/ssim_selfref.py --min-ssim 0.97
