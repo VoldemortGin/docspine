@@ -71,7 +71,7 @@ crates/
     src/lib.rs     render_pdf / RenderOptions{font_map} / RenderResult{pdf, warnings};按节 layout_flow
     src/map.rs     doc-core IR → 引擎 Block:有效样式驱动 + run 分段 + 列表标签 + 图片/EMF·WMF 占位
     src/section.rs 节 → PageGeom + 分页回调(节内页页同几何,节界换几何)
-    src/table.rs   表格映射:span map 压平 + 边框冲突消解 + 单元格边距/行高/vAlign 降级
+    src/table.rs   表格映射:span map 压平 + 边框冲突消解 + 单元格边距/行高 + vAlign 引擎锚定
     src/warn.rs    RenderWarning 枚举(引擎侧 + docspine 侧降级)+ kind() 去重标签
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]
     src/lib.rs     open -> Document handle;body()/paragraphs()/tables()/text() -> list[dict];ocr_image / reconstruct_image_table(ocr 特性);probe_doc;异常层级

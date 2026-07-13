@@ -477,8 +477,9 @@ def test_cell_margins_offset_text_x0():
     assert abs(wide - (72.0 + 14.4)) < 2.0
 
 
-def test_valign_and_row_too_tall_warn_once():
-    """C-7 门:vAlign(center)与超页高行各浮一次降级告警。"""
+def test_row_too_tall_warns_and_valign_no_longer_degrades():
+    """C-7 收口:vAlign 已真渲染(引擎垂直锚定,TS-11)——不再发 vAlign 降级告警;
+    超页高行仍各浮一次 row-too-tall。"""
     body = """<w:tbl>
       <w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>
       <w:tr>
@@ -492,8 +493,44 @@ def test_valign_and_row_too_tall_warn_once():
         warnings.simplefilter("always")
         doc.to_pdf()
     msgs = [str(w.message) for w in ws]
-    assert sum("vertical alignment" in m for m in msgs) == 1, msgs
+    assert sum("vertical alignment" in m for m in msgs) == 0, msgs
     assert sum("taller than the page body" in m for m in msgs) == 1, msgs
+
+
+def test_cell_valign_bottom_shifts_text_below_top():
+    """C-7 收口:同一行里 bottom 对齐格的文字 y 明显低于 top 对齐格(引擎垂直锚定)。"""
+    body = """<w:tbl>
+      <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
+      <w:tr>
+        <w:trPr><w:trHeight w:val="2000" w:hRule="atLeast"/></w:trPr>
+        <w:tc><w:tcPr><w:vAlign w:val="top"/></w:tcPr><w:p><w:r><w:t>TOP</w:t></w:r></w:p></w:tc>
+        <w:tc><w:tcPr><w:vAlign w:val="bottom"/></w:tcPr><w:p><w:r><w:t>BOT</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>"""
+    page = _open_pdf(_render(_body(body)))[0]
+    y = {w[4]: w[1] for w in page.get_text_words()}
+    assert "TOP" in y and "BOT" in y, y
+    # 行高 2000twip=100pt:bottom 对齐把单行推到行底,y 显著大于 top。
+    assert y["BOT"] - y["TOP"] > 30.0, (y["TOP"], y["BOT"])
+
+
+def test_hyperlink_emits_pdf_link_annotation(hyperlink_docx_bytes):
+    """§3j 收口:外链超链接导出成 PDF /Link 注解(``get_links`` 读回 URI + 矩形),
+    矩形覆盖链接文字(x0 落在正文左缘附近 ±2pt);内部书签跳转只发一次性降级告警。"""
+    doc = docspine.open_bytes(hyperlink_docx_bytes)
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = doc.to_pdf()
+    d = _open_pdf(pdf)
+    links = d[0].get_links()
+    uris = [ln.get("uri") for ln in links if ln.get("uri")]
+    assert "https://example.com/spec" in uris, links
+    ln = next(ln for ln in links if ln.get("uri") == "https://example.com/spec")
+    r = ln["from"]
+    assert abs(r.x0 - 72.0) < 3.0, f"链接矩形左缘落在正文左缘附近: {r}"
+    assert r.width > 0 and r.height > 0
+    # 内部书签跳转不渲染成链接,发一次性降级告警。
+    assert sum("internal-anchor" in str(w.message) for w in ws) == 1, [str(w.message) for w in ws]
 
 
 def test_thirty_row_table_paginates_rows_whole():

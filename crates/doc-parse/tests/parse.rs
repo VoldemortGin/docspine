@@ -910,3 +910,53 @@ fn style_tblpr_borders_and_margins_wire_into_style_table() {
     assert!(style.tblpr.borders.inside_h.is_some());
     assert_eq!(style.tblpr.cell_margins.left, Some(120));
 }
+
+/// §3j:`w:hyperlink@r:id` 经 `word/_rels` 解出外链 URI、`@w:anchor` 存成 "#书签",
+/// 都盖到容器内 run 的 `link_target`;超链接之外的 run 不受影响。
+#[test]
+fn hyperlink_targets_resolve_external_and_internal() {
+    let document = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:hyperlink r:id="rId20"><w:r><w:t>ext</w:t></w:r></w:hyperlink>
+      <w:r><w:t>plain</w:t></w:r>
+      <w:hyperlink w:anchor="bm1"><w:r><w:t>int</w:t></w:r></w:hyperlink>
+    </w:p>
+  </w:body>
+</w:document>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId20" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/x" TargetMode="External"/>
+</Relationships>"#;
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default();
+        for (name, body) in [
+            ("[Content_Types].xml", CONTENT_TYPES),
+            ("_rels/.rels", ROOT_RELS),
+            ("word/document.xml", document),
+            ("word/_rels/document.xml.rels", rels),
+        ] {
+            zip.start_file(name, opts).expect("start_file");
+            zip.write_all(body.as_bytes()).expect("write");
+        }
+        zip.finish().expect("finish zip");
+    }
+    let parsed = parse_bytes(&buf.into_inner()).expect("parse hyperlink docx");
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(p.runs.len(), 3);
+    assert_eq!(p.runs[0].text(), "ext");
+    assert_eq!(
+        p.runs[0].link_target.as_deref(),
+        Some("https://example.com/x")
+    );
+    assert_eq!(p.runs[1].text(), "plain");
+    assert_eq!(p.runs[1].link_target, None, "非超链接 run 不带目标");
+    assert_eq!(p.runs[2].text(), "int");
+    assert_eq!(p.runs[2].link_target.as_deref(), Some("#bm1"));
+}

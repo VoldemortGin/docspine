@@ -509,6 +509,40 @@ def para_box_docx_bytes() -> bytes:
     return build_docx(_PARA_BOX_DOCUMENT)
 
 
+# --- 超链接 fixture(§3j:外链 → PDF /Link 注解;内部书签跳转 → 只存不画降级) ---
+_HYPERLINK_DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId20" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/spec" TargetMode="External"/>
+</Relationships>"""
+
+_HYPERLINK_DOCUMENT = (
+    _DOC_HEADER
+    + """
+  <w:body>
+    <w:p>
+      <w:hyperlink r:id="rId20"><w:r><w:t>Spec link</w:t></w:r></w:hyperlink>
+    </w:p>
+    <w:p>
+      <w:hyperlink w:anchor="bookmark1"><w:r><w:t>Jump to bookmark</w:t></w:r></w:hyperlink>
+    </w:p>
+  </w:body>
+</w:document>"""
+)
+
+
+@pytest.fixture(scope="session")
+def hyperlink_docx_bytes() -> bytes:
+    """含外链(``r:id``)+ 内部书签跳转(``w:anchor``)两种 ``w:hyperlink`` 的合成
+    ``.docx`` 字节(§3j:超链接 PDF 注解)。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        z.writestr("_rels/.rels", _ROOT_RELS)
+        z.writestr("word/document.xml", _HYPERLINK_DOCUMENT)
+        z.writestr("word/_rels/document.xml.rels", _HYPERLINK_DOC_RELS)
+    return buf.getvalue()
+
+
 # --- EMF 矢量图 fixture(C-8:不支持格式 → 占位框 + UnsupportedImageFormat) --------
 
 # 主文档关系:把 r:embed="rId10" 指向一张 EMF(而非 png)。

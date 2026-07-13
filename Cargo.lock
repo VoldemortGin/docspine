@@ -325,7 +325,7 @@ name = "doc-render"
 version = "0.0.1"
 dependencies = [
  "doc-core",
- "pdf-fonts",
+ "pdf-fonts 0.2.0",
  "pdf-typeset",
 ]
 
@@ -927,12 +927,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "pdf-edit"
-version = "0.2.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=93214453167535c424079470aefb13773e79d717#93214453167535c424079470aefb13773e79d717"
+name = "pdf-core"
+version = "0.3.1"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=509a932e92f6d804c2b5345040715d7fbf3d6326#509a932e92f6d804c2b5345040715d7fbf3d6326"
 dependencies = [
- "pdf-core",
- "pdf-fonts",
+ "bytes",
+ "flate2",
+ "thiserror",
+ "weezl 0.2.1",
+]
+
+[[package]]
+name = "pdf-edit"
+version = "0.3.1"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=509a932e92f6d804c2b5345040715d7fbf3d6326#509a932e92f6d804c2b5345040715d7fbf3d6326"
+dependencies = [
+ "pdf-core 0.3.1",
+ "pdf-fonts 0.3.1",
  "pdf-text",
  "ttf-parser",
 ]
@@ -942,7 +953,18 @@ name = "pdf-fonts"
 version = "0.2.0"
 source = "git+https://github.com/VoldemortGin/pdfspine?rev=93214453167535c424079470aefb13773e79d717#93214453167535c424079470aefb13773e79d717"
 dependencies = [
- "pdf-core",
+ "pdf-core 0.2.0",
+ "smol_str",
+ "ttf-parser",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "pdf-fonts"
+version = "0.3.1"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=509a932e92f6d804c2b5345040715d7fbf3d6326#509a932e92f6d804c2b5345040715d7fbf3d6326"
+dependencies = [
+ "pdf-core 0.3.1",
  "smol_str",
  "ttf-parser",
  "unicode-normalization",
@@ -950,8 +972,8 @@ dependencies = [
 
 [[package]]
 name = "pdf-image"
-version = "0.2.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=93214453167535c424079470aefb13773e79d717#93214453167535c424079470aefb13773e79d717"
+version = "0.3.1"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=509a932e92f6d804c2b5345040715d7fbf3d6326#509a932e92f6d804c2b5345040715d7fbf3d6326"
 dependencies = [
  "fax",
  "flate2",
@@ -960,7 +982,7 @@ dependencies = [
  "hayro-jpeg2000",
  "image",
  "jpeg-decoder",
- "pdf-core",
+ "pdf-core 0.3.1",
  "thiserror",
  "weezl 0.2.1",
  "zune-jpeg",
@@ -968,24 +990,24 @@ dependencies = [
 
 [[package]]
 name = "pdf-text"
-version = "0.2.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=93214453167535c424079470aefb13773e79d717#93214453167535c424079470aefb13773e79d717"
+version = "0.3.1"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=509a932e92f6d804c2b5345040715d7fbf3d6326#509a932e92f6d804c2b5345040715d7fbf3d6326"
 dependencies = [
- "pdf-core",
- "pdf-fonts",
+ "pdf-core 0.3.1",
+ "pdf-fonts 0.3.1",
  "smol_str",
  "unicode-normalization",
 ]
 
 [[package]]
 name = "pdf-typeset"
-version = "0.2.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=93214453167535c424079470aefb13773e79d717#93214453167535c424079470aefb13773e79d717"
+version = "0.3.1"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=509a932e92f6d804c2b5345040715d7fbf3d6326#509a932e92f6d804c2b5345040715d7fbf3d6326"
 dependencies = [
  "fontdb",
- "pdf-core",
+ "pdf-core 0.3.1",
  "pdf-edit",
- "pdf-fonts",
+ "pdf-fonts 0.3.1",
  "pdf-image",
  "ttf-parser",
  "unicode-normalization",

@@ -111,7 +111,7 @@ Verdicts against `crates/doc-parse` as of 2026-07-02. "Model growth" = which doc
 | h | theme1.xml fontScheme (major/minor latin+eastAsia) + clrScheme | **MISSING entirely** | grep `theme\|fontScheme` → 0; `zip_pkg.rs:44-72` | M | new `Theme { fonts, colors }` — without it Word's default body font (`minorHAnsi` → Calibri) is unresolvable |
 | i | `w:br`/`w:cr` **folded to `'\n'`; `@w:type` never read — bonus bug**: explicit page breaks invisible | **PARTIAL (lossy)** | `document.rs:210-212, 230-232` | S–M | run content → `Vec<RunSegment>` (Text/Tab/Break{Line,Page,Column}) — ripples into `export.rs` |
 | i | Tab stops (`w:tabs`, settings.xml `defaultTabStop`) | **MISSING** (`w:tab` folded to `'\t'`, `document.rs:206-209`; settings.xml never read) | no `tabs` arm in `parse_ppr` | M (parse S, render M) | `ParaProps.tabs`; `Document.default_tab_stop` |
-| j | Hyperlink targets | **PARTIAL** (runs kept, `@r:id` unread) | `document.rs:118-124`; rels retain type (`xml/mod.rs:16-27`) | S (nice-to-have: PDF link annots) | `Run.link_target` |
+| j | Hyperlink targets | **DONE** — `@r:id`→rels URI in `TextRun.link_target`; renders as a PDF `/Link` annotation via the engine's `RunStyle.link` (TS-11); internal `@w:anchor` stored as `"#name"`, not drawn + one-time warning | `document.rs` `hyperlink_target`; `map.rs` `push_runs` link threading | done | `TextRun.link_target` (landed) |
 | j | Footnotes/endnotes | **MISSING** | parts never read; refs skipped (`document.rs:224`) | L — **OUT v1** | — |
 | j | Headers/footers | **MISSING** | inside skipped sectPr (`document.rs:82-83`); parts never read | M–L — **OUT v1** | — |
 | + | **Bonus bug: `w:sdt` content dropped wholesale** — cover pages / TOC text LOST | **MISSING** | `document.rs:82-83` + `skip_element` (`document.rs:620-638`) | S — fix in C-3 | none (transparent container) |
@@ -349,6 +349,8 @@ first** (C-1..C-4); C-2..C-4 are parse-side and can proceed in parallel with pdf
   bordered merged-cell fixture — token-F1 ≥ 0.99 in reading order; `get_drawings` edge count equals the
   conflict-resolved expectation (merged edges suppressed); every cell's words lie inside its grid rect ± 2
   pt; 30-row table paginates with rows moved whole; taller-than-page row emits RowTooTall.
+  **Status: done.** Cell `vAlign` center/bottom now renders via the engine's `TableCell.v_align`
+  (`VAnchor`, TS-11) — the earlier `CellVAlignIgnored` top-only degradation is gone.
 - **C-8 · Images (M).** Placement model (inline vs anchored + offsets, §3g); inline atoms with EMU→pt
   extents; anchored overlays (no wrap + warning); VML style-attr size parse; EMF/WMF placeholder + warning.
   **Green:** inline PNG fixture — exactly 1 image XObject on page 1 (`extract_image_info`), placed rect

@@ -174,6 +174,10 @@ pub struct TextRun {
     /// (缺省 = false/None,契约不变),导出与 Python 侧继续用便利字段;
     /// 渲染侧走 [`crate::style::resolve_run`] 消费本片段。
     pub rpr: RunProps,
+    /// 超链接目标(`w:hyperlink`):外链为 `r:id` 经 `word/_rels` 解出的 URI;
+    /// 文档内部书签跳转(`w:hyperlink@w:anchor`)存成 `"#书签名"`(渲染侧只存不画 +
+    /// 一次性降级告警)。`None` = 该 run 不在任何超链接内。
+    pub link_target: Option<String>,
 }
 
 impl TextRun {

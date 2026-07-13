@@ -37,9 +37,9 @@ pub enum RenderWarning {
     /// 列表编号落在未解的 `styleLink`/`numStyleLink` 间接上(C-6 声明降级):
     /// 该 numId 无自有层级定义,段落按普通段渲染(缩进照常级联)。
     NumberingIndirectionSkipped,
-    /// 单元格纵向对齐(`w:vAlign` center/bottom)按顶对齐渲染(引擎单元格
-    /// 暂无 vAlign 槽;解析保真,C-7 声明降级)。
-    CellVAlignIgnored,
+    /// 文档内部书签跳转的超链接(`w:hyperlink@w:anchor`,如目录/交叉引用):目标存成
+    /// `"#书签名"` 但**不渲染**成 PDF 链接注解(v1 只发外链注解;§3j 声明降级)。
+    InternalLinkNotRendered,
     /// 表格行高超过一页正文高度:行不跨页(整行挪页)语义下该行溢出页面
     /// (引擎“行不分割”的 v1 限制)。
     RowTooTall,
@@ -75,7 +75,7 @@ impl RenderWarning {
             RenderWarning::FloatingNoWrap => "floating-no-wrap",
             RenderWarning::UnsupportedImageFormat => "unsupported-image-format",
             RenderWarning::NumberingIndirectionSkipped => "numbering-indirection-skipped",
-            RenderWarning::CellVAlignIgnored => "cell-valign-ignored",
+            RenderWarning::InternalLinkNotRendered => "internal-link-not-rendered",
             RenderWarning::RowTooTall => "row-too-tall",
             RenderWarning::CustomTabStopsIgnored => "custom-tab-stops-ignored",
         }
@@ -134,10 +134,10 @@ impl fmt::Display for RenderWarning {
                      affected list paragraphs render without labels"
                 )
             }
-            RenderWarning::CellVAlignIgnored => {
+            RenderWarning::InternalLinkNotRendered => {
                 write!(
                     f,
-                    "table cell vertical alignment (vAlign) renders as top in this version"
+                    "an internal-anchor hyperlink is not rendered as a PDF link in this version"
                 )
             }
             RenderWarning::RowTooTall => {

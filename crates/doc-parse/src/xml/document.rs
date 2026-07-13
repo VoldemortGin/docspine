@@ -271,10 +271,22 @@ fn parse_paragraph<R: std::io::BufRead>(
                             para.runs.push(run);
                         }
                     }
-                    // 超链接 `w:hyperlink` / 修订插入 `w:ins` / 字段 `w:fldSimple`(缓存的
-                    // 字段结果)都是 run 的容器:不要 skip,展开解析其中的 run。`w:ins`
-                    // (修订插入)按“接受修订”语义当作正常正文保留。
-                    b"hyperlink" | b"ins" | b"fldSimple" => {
+                    // 超链接 `w:hyperlink`:run 容器,展开其中 run 并盖上链接目标
+                    // (外链 URI / 内部书签 "#anchor";§3j)。
+                    b"hyperlink" => {
+                        let link = hyperlink_target(&e, ctx);
+                        for mut run in parse_run_container(reader, ctx) {
+                            if run.link_target.is_none() {
+                                run.link_target = link.clone();
+                            }
+                            if !run.segments.is_empty() || !run.pictures.is_empty() {
+                                para.runs.push(run);
+                            }
+                        }
+                    }
+                    // 修订插入 `w:ins` / 字段 `w:fldSimple`(缓存的字段结果)也是 run
+                    // 容器:展开其中的 run。`w:ins`(修订插入)按“接受修订”语义保留正文。
+                    b"ins" | b"fldSimple" => {
                         for run in parse_run_container(reader, ctx) {
                             if !run.segments.is_empty() || !run.pictures.is_empty() {
                                 para.runs.push(run);
@@ -372,6 +384,24 @@ fn apply_ppr_prop(e: &BytesStart, para: &mut Paragraph) {
 
 // ============================================================ run (w:r)
 
+/// 求一个 `w:hyperlink` 的链接目标:优先外链(`r:id` 经 `word/_rels` 解出 `Target`
+/// URI),否则文档内部书签跳转(`w:anchor` → `"#书签名"`);都无则 `None`。
+fn hyperlink_target(e: &BytesStart, ctx: &Ctx) -> Option<String> {
+    // 外链:`r:id`(本地名 "id")→ rels 的 Target(External 关系即目标 URL)。
+    if let Some(rid) = attr_of(e, b"id") {
+        if let Some(rel) = ctx.rels.get(&rid) {
+            if !rel.target.is_empty() {
+                return Some(rel.target.clone());
+            }
+        }
+    }
+    // 内部锚点:`w:anchor` → "#书签名"(渲染侧只存不画 + 一次性降级告警)。
+    match attr_of(e, b"anchor") {
+        Some(anchor) if !anchor.is_empty() => Some(format!("#{anchor}")),
+        _ => None,
+    }
+}
+
 /// 解析一个可能含若干 `w:r` 的容器(如 `w:hyperlink` / `w:ins` / `w:fldSimple`)。已消费
 /// 容器起始标签。嵌套的同类容器与行内 `w:sdt` 递归展开其 run;其余(含 `w:del`)整体跳过。
 fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<TextRun> {
@@ -383,9 +413,16 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"r" => runs.push(parse_run(reader, ctx)),
-                    b"hyperlink" | b"ins" | b"fldSimple" => {
-                        runs.extend(parse_run_container(reader, ctx))
+                    b"hyperlink" => {
+                        let link = hyperlink_target(&e, ctx);
+                        for mut run in parse_run_container(reader, ctx) {
+                            if run.link_target.is_none() {
+                                run.link_target = link.clone();
+                            }
+                            runs.push(run);
+                        }
                     }
+                    b"ins" | b"fldSimple" => runs.extend(parse_run_container(reader, ctx)),
                     b"sdt" => runs.extend(parse_sdt_runs(reader, ctx)),
                     _ => skip_element(reader),
                 }

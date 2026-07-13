@@ -21,7 +21,7 @@
 //!   `min_height`(引擎无“精确封顶”,exact 按下限近似,内容不截断)。行高超过
 //!   一页正文高度 → [`RowTooTall`](crate::warn::RenderWarning::RowTooTall) 一次性
 //!   告警(行不跨页语义下整行溢出);`cantSplit` 引擎内建(所有行整行挪页)。
-//! - **vAlign**:center/bottom 按顶对齐渲染 + 一次性告警(引擎格无 vAlign 槽)。
+//! - **vAlign**:center/bottom 映射到引擎单元格垂直锚定(`VAnchor`,TS-11)。
 //! - **列宽**:`tblGrid` 的 dxa → `Fixed`;无 grid 时从首行 `tcW` 推导(dxa 绝对宽、
 //!   pct 对当前节正文宽解析),都无 → `Auto`。`tblInd`/表级 `jc` 解析保真、v1 不
 //!   参与布局(引擎表格自正文左缘起排)。嵌套表经块映射天然递归。
@@ -30,7 +30,7 @@ use doc_core::model::{Cell as DocCell, CellVAlign, HeightRule, Table as DocTable
 use doc_core::style::{resolve_table, Border, CellMargins, ColorRef, EffectiveTableProps};
 use doc_core::Document;
 use pdf_typeset::{
-    Block, BorderEdge, CellBorders, ColumnWidth, Rgb, TableCell, TableRow, TableSpec,
+    Block, BorderEdge, CellBorders, ColumnWidth, Rgb, TableCell, TableRow, TableSpec, VAnchor,
 };
 
 use crate::map::{map_blocks, rgb, MapCtx};
@@ -299,7 +299,7 @@ pub(crate) fn stroke(doc: &Document, b: &Border) -> Option<BorderEdge> {
 }
 
 /// 造一个锚格:内容块递归映射;有效边距(缺省 ← 表级 ← tcMar)折成
-/// 「上下均值标量 padding + 顶层段落左右缩进」;vAlign center/bottom 一次性降级。
+/// 「上下均值标量 padding + 顶层段落左右缩进」;vAlign 映射到引擎垂直锚定。
 fn anchor_cell(
     doc: &Document,
     table: &DocTable,
@@ -329,9 +329,12 @@ fn anchor_cell(
     let mut tc = TableCell::new(blocks);
     tc.fill = cell.fill.map(rgb);
     tc.padding = pad;
-    if matches!(cell.v_align, Some(CellVAlign::Center | CellVAlign::Bottom)) {
-        ctx.cell_valign(); // 引擎格无 vAlign 槽:按顶对齐渲染(一次性告警)。
-    }
+    // vAlign(TS-11):center/bottom 映射到引擎的单元格垂直锚定(行高定型后偏移内容)。
+    tc.v_align = match cell.v_align {
+        Some(CellVAlign::Center) => VAnchor::Middle,
+        Some(CellVAlign::Bottom) => VAnchor::Bottom,
+        _ => VAnchor::Top,
+    };
     tc
 }
 
@@ -345,7 +348,7 @@ mod tests {
     };
     use doc_core::style::{Border, ColorRef, TableBorders};
     use doc_core::Document;
-    use pdf_typeset::{Block, ColumnWidth, Rgb, TableSpec};
+    use pdf_typeset::{Block, ColumnWidth, Rgb, TableSpec, VAnchor};
 
     use crate::map::map_document;
     use crate::warn::RenderWarning;
@@ -622,14 +625,14 @@ mod tests {
         assert_eq!(spec.rows[0].min_height, Some(1000.0), "exact 按下限近似");
         assert_eq!(spec.rows[1].min_height, None, "auto 忽略数值");
         assert_eq!(spec.rows[2].min_height, Some(20.0), "缺省 atLeast");
+        // vAlign(TS-11):center/bottom 映射到引擎垂直锚定,不再降级;缺省顶对齐。
+        assert_eq!(spec.rows[0].cells[0].v_align, VAnchor::Middle);
+        assert_eq!(spec.rows[0].cells[1].v_align, VAnchor::Bottom);
+        assert_eq!(spec.rows[2].cells[0].v_align, VAnchor::Top, "缺省顶对齐");
         let kinds: Vec<&str> = warnings.iter().map(RenderWarning::kind).collect();
-        assert_eq!(
-            kinds
-                .iter()
-                .filter(|k| **k == "cell-valign-ignored")
-                .count(),
-            1,
-            "两个 vAlign 格只报一次"
+        assert!(
+            !kinds.contains(&"cell-valign-ignored"),
+            "vAlign 已真渲染,不再有降级告警"
         );
         assert_eq!(kinds.iter().filter(|k| **k == "row-too-tall").count(), 1);
     }

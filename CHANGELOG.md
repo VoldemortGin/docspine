@@ -15,6 +15,15 @@ change.
 
 ### Added
 
+- **Cell vertical alignment renders (C-7 wrap-up).** `w:vAlign` `center` / `bottom`
+  now map to the engine's `TableCell.v_align` (`VAnchor`, pdf-typeset TS-11), which
+  offsets cell content after the row height settles; the previous top-only
+  `CellVAlignIgnored` degradation is removed.
+- **Hyperlinks become PDF link annotations (§3j).** `w:hyperlink@r:id` resolves
+  through `word/_rels` into `TextRun.link_target` and renders as a `/Link` URI
+  annotation via the engine's `RunStyle.link` (TS-11; readable with pdfspine
+  `get_links`). Document-internal `w:hyperlink@w:anchor` bookmarks are stored as
+  `"#name"` but not drawn as links — one-time `InternalLinkNotRendered` warning.
 - **Anchored images are absolutely positioned (C-8 wrap-up).** A floating
   (`wp:anchor`) raster picture no longer degrades to an inline block: it is
   drawn as a page overlay at its `wp:positionH/V` `posOffset` (relative to the
@@ -43,6 +52,8 @@ change.
 - **`FloatingImageInlined` warning renamed to `FloatingNoWrap`** (kind
   `floating-no-wrap`) to reflect that anchored images are now absolutely
   positioned rather than inlined; only the text-wrap degradation remains.
+- **Bumped the `pdf-typeset` engine to rev `509a932`** (pdfspine TS-11: cell
+  `v_align` + run-level `link`), enabling the two items above.
 
 ## [0.3.0] — 2026-07-08
 

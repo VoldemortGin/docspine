@@ -110,7 +110,7 @@ pub(crate) struct MapCtx {
     picture_warned: bool,
     unsupported_format_warned: bool,
     floating_warned: bool,
-    valign_warned: bool,
+    internal_link_warned: bool,
     row_warned: bool,
     numbering_warned: bool,
     tab_warned: bool,
@@ -131,7 +131,7 @@ impl MapCtx {
             picture_warned: false,
             unsupported_format_warned: false,
             floating_warned: false,
-            valign_warned: false,
+            internal_link_warned: false,
             row_warned: false,
             numbering_warned: false,
             tab_warned: false,
@@ -208,11 +208,11 @@ impl MapCtx {
         }
     }
 
-    /// 单元格 vAlign(center/bottom)按顶对齐渲染的一次性降级(table.rs 调用)。
-    pub(crate) fn cell_valign(&mut self) {
-        if !self.valign_warned {
-            self.valign_warned = true;
-            self.list.push(RenderWarning::CellVAlignIgnored);
+    /// 文档内部书签跳转的超链接(`#anchor`)只存不画的一次性降级(map_paragraph 调用)。
+    fn internal_link(&mut self) {
+        if !self.internal_link_warned {
+            self.internal_link_warned = true;
+            self.list.push(RenderWarning::InternalLinkNotRendered);
         }
     }
 
@@ -393,6 +393,15 @@ fn map_paragraph(
         if eff_r.vanish {
             continue; // 隐藏文字:忠实于 Word 的不渲染。
         }
+        // 超链接:外链 URI 落 RunStyle.link(引擎发 /Link 注解);文档内部书签跳转
+        // (#anchor)v1 只存不画 → 一次性降级告警。
+        let link = match run.link_target.as_deref() {
+            Some(t) if t.starts_with('#') => {
+                ctx.internal_link();
+                None
+            }
+            other => other,
+        };
         let mut text = String::new();
         for seg in &run.segments {
             match seg {
@@ -401,13 +410,23 @@ fn map_paragraph(
                 RunSegment::Break(BreakKind::Line) => text.push('\n'),
                 // 单栏渲染:换栏等效换页(C-2 声明语义)。
                 RunSegment::Break(BreakKind::Page) | RunSegment::Break(BreakKind::Column) => {
-                    push_runs(parts.last_mut().expect("parts non-empty"), &text, &eff_r);
+                    push_runs(
+                        parts.last_mut().expect("parts non-empty"),
+                        &text,
+                        &eff_r,
+                        link,
+                    );
                     text.clear();
                     parts.push(Vec::new());
                 }
             }
         }
-        push_runs(parts.last_mut().expect("parts non-empty"), &text, &eff_r);
+        push_runs(
+            parts.last_mut().expect("parts non-empty"),
+            &text,
+            &eff_r,
+            link,
+        );
     }
 
     // 空段落片(含整段无 run)传空文本 run,携带段落标记样式占一行高。
@@ -663,7 +682,8 @@ fn para_props(eff: &EffectiveParaProps) -> ParaProps {
 }
 
 /// 把一段文本按有效 run 属性折成引擎 run(caps 大写、eastAsia 字体按字符类切分)。
-fn push_runs(runs: &mut Vec<Run>, text: &str, eff: &EffectiveRunProps) {
+/// `link` 是外链目标 URI(有值时落进每个子 run 的 `RunStyle.link`,引擎发 /Link 注解)。
+fn push_runs(runs: &mut Vec<Run>, text: &str, eff: &EffectiveRunProps, link: Option<&str>) {
     if text.is_empty() {
         return;
     }
@@ -673,8 +693,14 @@ fn push_runs(runs: &mut Vec<Run>, text: &str, eff: &EffectiveRunProps) {
     } else {
         text.to_string()
     };
+    // 选定 family → 引擎 run(附着链接目标)。
+    let styled = |text: String, family: &str| {
+        let mut s = run_style(eff, family);
+        s.link = link.map(String::from);
+        Run::new(text, s)
+    };
     let Some(ea) = eff.font_east_asia.as_deref() else {
-        runs.push(Run::new(text, run_style(eff, &eff.font_ascii)));
+        runs.push(styled(text, &eff.font_ascii));
         return;
     };
     // eastAsia 槽有值:CJK 字符段喂 ea 字体,其余喂 ascii 字体;空白等中性字符
@@ -692,7 +718,7 @@ fn push_runs(runs: &mut Vec<Run>, text: &str, eff: &EffectiveRunProps) {
         match (class, cur_cjk) {
             (Some(c), Some(prev)) if c != prev => {
                 let family = if prev { ea } else { &eff.font_ascii };
-                runs.push(Run::new(std::mem::take(&mut cur), run_style(eff, family)));
+                runs.push(styled(std::mem::take(&mut cur), family));
                 cur_cjk = Some(c);
             }
             (Some(c), None) => cur_cjk = Some(c),
@@ -706,7 +732,7 @@ fn push_runs(runs: &mut Vec<Run>, text: &str, eff: &EffectiveRunProps) {
         } else {
             &eff.font_ascii
         };
-        runs.push(Run::new(cur, run_style(eff, family)));
+        runs.push(styled(cur, family));
     }
 }
 
@@ -1082,6 +1108,32 @@ mod tests {
         assert_eq!(s.highlight, Some(Rgb::new(1.0, 1.0, 0.0)));
         assert_eq!(runs[1].text, "SHOUT");
         assert!((runs[2].style.size - 6.5).abs() < 1e-9, "上标 10pt × 0.65");
+    }
+
+    /// 超链接:外链目标落进 `RunStyle.link`(引擎发 /Link 注解);文档内部书签跳转
+    /// (`#anchor`)只存不画 + 一次性 internal-link-not-rendered 告警。
+    #[test]
+    fn hyperlink_target_maps_to_run_link_and_internal_warns() {
+        let mut ext = TextRun::from_text("external");
+        ext.link_target = Some("https://example.com/".into());
+        let mut internal = TextRun::from_text("internal");
+        internal.link_target = Some("#bookmark".into());
+        let doc = doc_with_body(vec![DocBlock::Paragraph(Paragraph {
+            runs: vec![ext, internal],
+            ..Paragraph::default()
+        })]);
+        let mapped = map_document(&doc);
+        let Block::Paragraph(_, runs) = &mapped.sections[0].blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(runs[0].text, "external");
+        assert_eq!(runs[0].style.link.as_deref(), Some("https://example.com/"));
+        assert_eq!(runs[1].text, "internal");
+        assert_eq!(runs[1].style.link, None, "内部锚点不发链接注解");
+        assert!(mapped
+            .warnings
+            .iter()
+            .any(|w| w.kind() == "internal-link-not-rendered"));
     }
 
     /// eastAsia 字体切分:CJK 字符段喂 ea 字体,拉丁段喂 ascii 字体;中性空白跟随。

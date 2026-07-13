@@ -36,7 +36,7 @@ ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f023
 # the family publishes uniformly via git, and CI's `maturin build` then
 # `cargo fetch`es pdfspine itself — no sibling checkout needed on the runner.
 # Bump the rev deliberately, never track a branch. ---
-pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "93214453167535c424079470aefb13773e79d717" }
+pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "509a932e92f6d804c2b5345040715d7fbf3d6326" }
 
 # --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
 thiserror = "2"
