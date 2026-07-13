@@ -13,6 +13,8 @@ change.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-13
+
 ### Added
 
 - **Cell vertical alignment renders (C-7 wrap-up).** `w:vAlign` `center` / `bottom`
