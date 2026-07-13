@@ -24,13 +24,13 @@ use std::collections::BTreeMap;
 
 use doc_core::geom::emu_to_points;
 use doc_core::model::{
-    Block as DocBlock, BreakKind, Document, Paragraph, Picture, Placement, RunSegment,
+    AnchorRef, Block as DocBlock, BreakKind, Document, Paragraph, Picture, Placement, RunSegment,
     Table as DocTable, TextRun,
 };
 use doc_core::numbering::ListCounters;
 use doc_core::style::{
     resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveLineSpacing,
-    EffectiveParaProps, EffectiveRunProps, Justification, VertAlign,
+    EffectiveParaProps, EffectiveRunProps, Justification, ParaBorders, VertAlign,
 };
 use pdf_typeset::{
     Align, Block, BorderEdge, CellBorders, ColumnWidth, ImageSpec, LineSpacing, ListLabel,
@@ -38,7 +38,7 @@ use pdf_typeset::{
 };
 
 use crate::section::page_geom;
-use crate::table::map_table;
+use crate::table::{is_visible, map_table, stroke};
 use crate::warn::RenderWarning;
 
 /// 上/下标的字号近似缩放(引擎无基线偏移,v1 只缩字号)。
@@ -57,10 +57,29 @@ const DEFAULT_LIST_GUTTER: f64 = 4.0;
 /// 标签左缘落点与 Word 的首行缩进位相近)。
 const LIST_GUTTER_RATIO: f64 = 0.35;
 
-/// 一节的渲染计划:页面几何 + 引擎块序列。
+/// 一节的渲染计划:页面几何 + 引擎块序列 + 锚定图片覆盖层(绝对定位,C-8)。
 pub(crate) struct SectionPlan {
     pub(crate) geom: PageGeom,
     pub(crate) blocks: Vec<Block>,
+    /// 本节的锚定浮动图片(页坐标,左上原点);渲染层在本节首页画成 `Op::Image`。
+    pub(crate) overlays: Vec<AnchoredImage>,
+}
+
+/// 一张锚定浮动图片解析成的绝对定位覆盖层(页坐标,左上原点,已由锚点偏移换算;
+/// C-8)。文字**不**环绕(v1 声明降级)。
+pub(crate) struct AnchoredImage {
+    /// 图片原始字节(引擎 `add_image` 时解码)。
+    pub(crate) bytes: Vec<u8>,
+    /// 左边缘 x(磅)。
+    pub(crate) x: f64,
+    /// 上边缘 y(磅)。
+    pub(crate) y: f64,
+    /// 显示宽(磅)。
+    pub(crate) w: f64,
+    /// 显示高(磅)。
+    pub(crate) h: f64,
+    /// 衬于正文下方(`wp:anchor@behindDoc`):画在流式内容之前(否则叠加在上层)。
+    pub(crate) behind: bool,
 }
 
 /// 整篇文档的映射结果。
@@ -80,6 +99,12 @@ pub(crate) struct MapCtx {
     body_w: f64,
     /// 当前节的正文区高(磅:页面高 − 上下边距)。
     body_h: f64,
+    /// 当前节的左边距(磅;锚定图 `relativeFrom="margin"` 的水平原点)。
+    frame_margin_left: f64,
+    /// 当前节的上边距(磅;锚定图 `relativeFrom="margin"` 的垂直原点)。
+    frame_margin_top: f64,
+    /// 本节收集到的锚定图片覆盖层(节界处被取走并入 [`SectionPlan`])。
+    overlays: Vec<AnchoredImage>,
     border_warned: bool,
     shading_warned: bool,
     picture_warned: bool,
@@ -98,6 +123,9 @@ impl MapCtx {
             counters: ListCounters::new(),
             body_w: 1.0,
             body_h: 1.0,
+            frame_margin_left: 0.0,
+            frame_margin_top: 0.0,
+            overlays: Vec::new(),
             border_warned: false,
             shading_warned: false,
             picture_warned: false,
@@ -116,6 +144,8 @@ impl MapCtx {
     fn set_frame(&mut self, geom: &PageGeom) {
         self.body_w = (geom.width - geom.margin_left - geom.margin_right).max(1.0);
         self.body_h = (geom.height - geom.margin_top - geom.margin_bottom).max(1.0);
+        self.frame_margin_left = geom.margin_left;
+        self.frame_margin_top = geom.margin_top;
     }
 
     /// 当前节的正文区宽(磅)。
@@ -156,10 +186,10 @@ impl MapCtx {
         }
     }
 
-    fn floating_image(&mut self) {
+    fn floating_no_wrap(&mut self) {
         if !self.floating_warned {
             self.floating_warned = true;
-            self.list.push(RenderWarning::FloatingImageInlined);
+            self.list.push(RenderWarning::FloatingNoWrap);
         }
     }
 
@@ -223,20 +253,27 @@ pub(crate) fn map_document_with_media(
         let end = sect.end_block.min(doc.body.len()).max(start);
         let geom = page_geom(sect);
         ctx.set_frame(&geom);
+        let blocks = map_blocks(doc, &doc.body[start..end], None, &mut ctx, media);
         sections.push(SectionPlan {
             geom,
-            blocks: map_blocks(doc, &doc.body[start..end], None, &mut ctx, media),
+            blocks,
+            overlays: std::mem::take(&mut ctx.overlays),
         });
         start = end;
     }
     // 防御:节序列缺失 / 未覆盖全部块(解析层保证不发生)也不丢内容。
     if start < doc.body.len() {
         let tail = map_blocks(doc, &doc.body[start..], None, &mut ctx, media);
+        let tail_overlays = std::mem::take(&mut ctx.overlays);
         match sections.last_mut() {
-            Some(last) => last.blocks.extend(tail),
+            Some(last) => {
+                last.blocks.extend(tail);
+                last.overlays.extend(tail_overlays);
+            }
             None => sections.push(SectionPlan {
                 geom: page_geom(&doc_core::model::Section::default()),
                 blocks: tail,
+                overlays: tail_overlays,
             }),
         }
     }
@@ -244,6 +281,7 @@ pub(crate) fn map_document_with_media(
         sections.push(SectionPlan {
             geom: page_geom(&doc_core::model::Section::default()),
             blocks: Vec::new(),
+            overlays: Vec::new(),
         });
     }
     MappedDoc {
@@ -285,12 +323,6 @@ fn map_paragraph(
         Some(t) => resolve_para_in_table(doc, t, para),
         None => resolve_para(doc, para),
     };
-    if eff.borders.any() {
-        ctx.para_border();
-    }
-    if eff.shading.is_some() {
-        ctx.para_shading();
-    }
     if !eff.tabs.is_empty() {
         // 自定义制表位(pos/leader/对齐)v1 不实现:`\t` 仍按缺省间隔等距推进。
         ctx.custom_tab_stops();
@@ -330,18 +362,19 @@ fn map_paragraph(
     let mut image_blocks: Vec<Block> = Vec::new();
     for run in &para.runs {
         for pic in &run.pictures {
-            let anchored = matches!(pic.placement, Placement::Anchored { .. });
-            match picture_block(pic, media) {
-                PicOutcome::Raster(block) => {
-                    if anchored {
-                        ctx.floating_image();
-                    }
-                    image_blocks.push(block);
+            // 锚定浮动图(可解码光栅):按 posOffset 绝对定位成覆盖层(不入流);
+            // 落点 = 参照系原点(page → 0 / 其余 → 页边距)+ posOffset(EMU→pt)。
+            if matches!(pic.placement, Placement::Anchored { .. }) {
+                if let Some(img) = anchored_overlay(pic, media, ctx) {
+                    ctx.floating_no_wrap();
+                    ctx.overlays.push(img);
+                    continue; // 已成覆盖层,不再作行内/占位块处理。
                 }
+                // 矢量/缺字节的锚定图:退回行内占位/跳过路径(下方统一处理)。
+            }
+            match picture_block(pic, media) {
+                PicOutcome::Raster(block) => image_blocks.push(block),
                 PicOutcome::Placeholder(block) => {
-                    if anchored {
-                        ctx.floating_image();
-                    }
                     ctx.unsupported_format();
                     image_blocks.push(block);
                 }
@@ -388,10 +421,11 @@ fn map_paragraph(
     // 图片独占段落(无可见文字)时跳过「空段落占一行」,只 emit 图片——避免图前
     // 多一条空行(真实 docx 里图片常独占一段)。有文字则文字先排、图片紧随其后。
     let has_text = parts.iter().any(|part| !part.is_empty());
+    let mut para_blocks: Vec<Block> = Vec::new();
     if has_text || image_blocks.is_empty() {
         for (i, part) in parts.into_iter().enumerate() {
             if i > 0 {
-                out.push(Block::PageBreak);
+                para_blocks.push(Block::PageBreak);
             }
             let runs = if part.is_empty() {
                 // 空段落 / 换页后的空尾片:仍占一行(Word:段落标记独占一行)。
@@ -403,12 +437,124 @@ fn map_paragraph(
             if i > 0 {
                 p.list = None; // 标签只画在首片(段内换页不重复编号)。
             }
-            out.push(Block::Paragraph(p, runs));
+            para_blocks.push(Block::Paragraph(p, runs));
         }
+    }
+
+    // 段落底纹/边框(C-4→真画):把单段落片包进单格表——底纹铺 cell fill、四边框
+    // 画成 cell 四边线(引擎表格原语,`get_drawings` 可见)。表宽取正文宽(Word 底纹
+    // 铺满正文列),段落缩进仍留在格内。仅在段落片正好一段(无段内换页)时包裹;
+    // 段内换页等复杂情形退回不画 + 一次性告警。`between`(相邻同框段间横线)单格
+    // 表无法表达 → 一次性 para-border-omitted 告警。
+    let has_side = has_side_border(&eff.borders);
+    let has_between = eff.borders.between.as_ref().is_some_and(is_visible);
+    let wrappable = matches!(para_blocks.as_slice(), [Block::Paragraph(..)]);
+    if (has_side || eff.shading.is_some()) && wrappable {
+        let para = para_blocks.pop().expect("single paragraph block");
+        out.push(wrap_paragraph_box(doc, &eff, para, ctx));
+        if has_between {
+            ctx.para_border(); // between 无法用单格表达。
+        }
+    } else {
+        if has_side || has_between {
+            ctx.para_border(); // 复杂情形(段内换页等)退回不画。
+        }
+        if eff.shading.is_some() {
+            ctx.para_shading();
+        }
+        out.append(&mut para_blocks);
     }
     for block in image_blocks {
         out.push(block);
     }
+}
+
+/// 段落是否有可见的四周边框(top/right/bottom/left 任一非 `none`)。
+fn has_side_border(b: &ParaBorders) -> bool {
+    [&b.top, &b.right, &b.bottom, &b.left]
+        .into_iter()
+        .any(|e| e.as_ref().is_some_and(is_visible))
+}
+
+/// 把一个段落块包进「单列单行单格」表:cell 填充 = 底纹、cell 四边线 = pBdr 四周边、
+/// padding = 边框到正文的最大留白;列宽 = 当前节正文宽(Word 底纹铺满正文列)。
+fn wrap_paragraph_box(
+    doc: &Document,
+    eff: &EffectiveParaProps,
+    para: Block,
+    ctx: &MapCtx,
+) -> Block {
+    let edge = |b: &Option<doc_core::style::Border>| b.as_ref().and_then(|b| stroke(doc, b));
+    let mut cell = TableCell::new(vec![para]);
+    cell.fill = eff.shading.map(rgb);
+    cell.borders = CellBorders {
+        top: edge(&eff.borders.top),
+        right: edge(&eff.borders.right),
+        bottom: edge(&eff.borders.bottom),
+        left: edge(&eff.borders.left),
+    };
+    // 边框留白(`@w:space`,磅):四周取最大值折成标量 padding。
+    cell.padding = [
+        &eff.borders.top,
+        &eff.borders.right,
+        &eff.borders.bottom,
+        &eff.borders.left,
+    ]
+    .into_iter()
+    .filter_map(|b| b.as_ref().map(|b| f64::from(b.space_pt)))
+    .fold(0.0, f64::max);
+    Block::Table(TableSpec::new(
+        vec![ColumnWidth::Fixed(ctx.body_width())],
+        vec![TableRow::new(vec![cell])],
+    ))
+}
+
+/// 锚定浮动图 → 绝对定位覆盖层。仅处理**可解码光栅图**:缺 media 名/字节/尺寸、
+/// 尺寸非法、或 EMF/WMF 矢量格式 → `None`(调用方退回行内占位/跳过路径)。
+/// 落点 = 参照系原点(`page` → 页原点 0 / 其余 → 当前节页边距)+ posOffset(EMU→pt)。
+fn anchored_overlay(
+    pic: &Picture,
+    media: &BTreeMap<String, Vec<u8>>,
+    ctx: &MapCtx,
+) -> Option<AnchoredImage> {
+    let Placement::Anchored {
+        x: x_emu,
+        y: y_emu,
+        rel_h,
+        rel_v,
+        behind,
+    } = pic.placement
+    else {
+        return None;
+    };
+    let name = pic.media_name.as_ref()?;
+    let bytes = media.get(name)?;
+    let (w_emu, h_emu) = pic.extent?;
+    let (w, h) = (emu_to_points(w_emu), emu_to_points(h_emu));
+    if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
+        return None;
+    }
+    if is_unsupported_vector(name, bytes) {
+        return None; // 矢量图退回行内占位框路径。
+    }
+    let origin_x = if rel_h == AnchorRef::Page {
+        0.0
+    } else {
+        ctx.frame_margin_left
+    };
+    let origin_y = if rel_v == AnchorRef::Page {
+        0.0
+    } else {
+        ctx.frame_margin_top
+    };
+    Some(AnchoredImage {
+        bytes: bytes.clone(),
+        x: origin_x + emu_to_points(x_emu),
+        y: origin_y + emu_to_points(y_emu),
+        w,
+        h,
+        behind,
+    })
 }
 
 /// 一张内嵌图片的映射去向。
@@ -689,32 +835,63 @@ mod tests {
             .any(|w| w.kind() == "picture-skipped"));
     }
 
-    /// 浮动/锚定图片:仍按块级渲染,并发一次 floating-image-inlined 告警。
+    /// C-8:锚定浮动光栅图**不入流**,成本节首页的绝对定位覆盖层——落点 = 参照系
+    /// 原点(margin → 页边距)+ posOffset(EMU→pt);并发一次 floating-no-wrap 告警。
     #[test]
-    fn floating_image_renders_inline_with_warning() {
+    fn anchored_image_becomes_overlay_with_warning() {
         let placement = Placement::Anchored {
-            x: 0,
-            y: 0,
-            rel_h: Default::default(),
-            rel_v: Default::default(),
+            x: 914_400, // 1in = 72pt 水平偏移
+            y: 457_200, // 0.5in = 36pt 垂直偏移
+            rel_h: AnchorRef::Margin,
+            rel_v: AnchorRef::Margin,
             behind: false,
         };
         let doc = doc_with_body(vec![DocBlock::Paragraph(para_with_picture(
             "f.png",
-            Some((914_400, 914_400)),
+            Some((914_400, 457_200)),
             placement,
         ))]);
         let mut media = BTreeMap::new();
         media.insert("f.png".to_string(), vec![9u8]);
         let mapped = map_document_with_media(&doc, &media);
-        assert!(mapped.sections[0]
+        // 不作为行内块出现(成了覆盖层)。
+        assert!(!mapped.sections[0]
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Image(_))));
+        let ov = &mapped.sections[0].overlays;
+        assert_eq!(ov.len(), 1);
+        assert!((ov[0].x - 144.0).abs() < 1e-6, "72(左边距) + 72(posOffset)");
+        assert!((ov[0].y - 108.0).abs() < 1e-6, "72(上边距) + 36(posOffset)");
+        assert!((ov[0].w - 72.0).abs() < 1e-6 && (ov[0].h - 36.0).abs() < 1e-6);
+        assert!(!ov[0].behind);
         assert!(mapped
             .warnings
             .iter()
-            .any(|w| w.kind() == "floating-image-inlined"));
+            .any(|w| w.kind() == "floating-no-wrap"));
+    }
+
+    /// `relativeFrom="page"`:水平/垂直原点是页原点(0),不叠页边距。
+    #[test]
+    fn anchored_overlay_page_relative_uses_page_origin() {
+        let placement = Placement::Anchored {
+            x: 0,
+            y: 0,
+            rel_h: AnchorRef::Page,
+            rel_v: AnchorRef::Page,
+            behind: true,
+        };
+        let doc = doc_with_body(vec![DocBlock::Paragraph(para_with_picture(
+            "p.png",
+            Some((914_400, 914_400)),
+            placement,
+        ))]);
+        let mut media = BTreeMap::new();
+        media.insert("p.png".to_string(), vec![7u8]);
+        let ov = &map_document_with_media(&doc, &media).sections[0].overlays;
+        assert_eq!(ov.len(), 1);
+        assert!((ov[0].x - 0.0).abs() < 1e-6 && (ov[0].y - 0.0).abs() < 1e-6);
+        assert!(ov[0].behind, "behindDoc 记录下来(衬于正文下方)");
     }
 
     /// C-8:EMF/WMF 矢量图无法解码 → 画等大的浅灰占位框(块级表格:浅灰填充 +
@@ -976,38 +1153,77 @@ mod tests {
         assert_eq!(props.spacing, LineSpacing::Multiple(1.5));
     }
 
-    /// 段落边框 / 底纹 / 图片:一次性降级告警(每种一次)。
+    /// 段落底纹 + 四周边框:包进「单列单行单格」表**真画**——cell 填充 = 底纹、
+    /// cell 四边线 = pBdr 周边、padding = 边框留白;列宽 = 正文宽;内容仍是段落
+    /// (读回顺序不变);不再发 para-border/para-shading 告警。
     #[test]
-    fn degradations_warn_once_per_kind() {
-        let mut bordered = para_with_text("b");
-        bordered.ppr.borders.top = Some(doc_core::style::Border {
+    fn bordered_shaded_paragraph_wraps_into_drawn_box() {
+        let edge = doc_core::style::Border {
+            val: "single".into(),
+            sz_eighth_pt: 8, // → 1.0pt 线宽
+            space_pt: 4,
+            color: None,
+        };
+        let mut p = para_with_text("boxed");
+        p.ppr.borders.top = Some(edge.clone());
+        p.ppr.borders.left = Some(edge);
+        p.ppr.shd_fill = Some(ColorRef::Rgb(Color::new([0xD9, 0xE2, 0xF3])));
+        let doc = doc_with_body(vec![DocBlock::Paragraph(p)]);
+        let mapped = map_document(&doc);
+        let blocks = &mapped.sections[0].blocks;
+        assert_eq!(blocks.len(), 1);
+        let Block::Table(spec) = &blocks[0] else {
+            panic!("带边框/底纹的段落应包成表格");
+        };
+        assert_eq!(
+            spec.columns,
+            vec![ColumnWidth::Fixed(468.0)],
+            "Letter 正文宽"
+        );
+        let cell = &spec.rows[0].cells[0];
+        assert_eq!(
+            cell.fill,
+            Some(Rgb::new(
+                0xD9 as f64 / 255.0,
+                0xE2 as f64 / 255.0,
+                0xF3 as f64 / 255.0
+            ))
+        );
+        assert_eq!(cell.borders.top.map(|e| e.width), Some(1.0));
+        assert_eq!(cell.borders.left.map(|e| e.width), Some(1.0));
+        assert!(cell.borders.right.is_none() && cell.borders.bottom.is_none());
+        assert!((cell.padding - 4.0).abs() < 1e-9, "边框留白折成 padding");
+        assert!(matches!(cell.blocks.as_slice(), [Block::Paragraph(..)]));
+        let kinds: Vec<&str> = mapped.warnings.iter().map(RenderWarning::kind).collect();
+        assert!(!kinds.contains(&"para-border-omitted"));
+        assert!(!kinds.contains(&"para-shading-omitted"));
+    }
+
+    /// `between`(相邻同框段间横线)单格表无法表达 → para-border-omitted 一次性告警;
+    /// 缺 media 字节的图片 → picture-skipped。
+    #[test]
+    fn between_border_and_missing_picture_degrade() {
+        let mut betw = para_with_text("b");
+        betw.ppr.borders.between = Some(doc_core::style::Border {
             val: "single".into(),
             sz_eighth_pt: 4,
             space_pt: 0,
             color: None,
         });
-        let mut bordered2 = bordered.clone();
-        bordered2.ppr.shd_fill = Some(ColorRef::Rgb(Color::new([1, 2, 3])));
         let mut with_pic = para_with_text("p");
         with_pic.runs[0]
             .pictures
             .push(doc_core::model::Picture::default());
         let doc = doc_with_body(vec![
-            DocBlock::Paragraph(bordered),
-            DocBlock::Paragraph(bordered2),
+            DocBlock::Paragraph(betw),
             DocBlock::Paragraph(with_pic),
         ]);
-        let warnings = map_document(&doc).warnings;
-        let kinds: Vec<&str> = warnings.iter().map(RenderWarning::kind).collect();
-        assert_eq!(
-            kinds
-                .iter()
-                .filter(|k| **k == "para-border-omitted")
-                .count(),
-            1,
-            "两段带边框只报一次"
-        );
-        assert!(kinds.contains(&"para-shading-omitted"));
+        let kinds: Vec<&str> = map_document(&doc)
+            .warnings
+            .iter()
+            .map(RenderWarning::kind)
+            .collect();
+        assert!(kinds.contains(&"para-border-omitted"), "between 无法表达");
         assert!(kinds.contains(&"picture-skipped"));
     }
 

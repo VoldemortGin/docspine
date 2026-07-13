@@ -277,13 +277,13 @@ fn weight(b: &Border) -> u32 {
 }
 
 /// 该线型是否可见(`none`/`nil` 之外都画;未知线型按单线近似,与解析容错一致)。
-fn is_visible(b: &Border) -> bool {
+pub(crate) fn is_visible(b: &Border) -> bool {
     !matches!(b.val.as_str(), "none" | "nil")
 }
 
 /// 把一条(可见的)边折成引擎线:宽 = `sz`/8 磅(保底 0.25 hairline);色经 theme
 /// 解引,`auto`/缺失按黑。不可见 → `None`。
-fn stroke(doc: &Document, b: &Border) -> Option<BorderEdge> {
+pub(crate) fn stroke(doc: &Document, b: &Border) -> Option<BorderEdge> {
     if !is_visible(b) {
         return None;
     }

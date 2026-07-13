@@ -25,7 +25,7 @@ use std::path::Path;
 
 use doc_core::model::Document;
 use doc_core::{DocError, Result};
-use pdf_typeset::Typesetter;
+use pdf_typeset::{FontResolver, ImageSpec, Op, Typesetter};
 
 pub use warn::RenderWarning;
 
@@ -62,7 +62,15 @@ pub fn render_pdf(
     media: &BTreeMap<String, Vec<u8>>,
     options: &RenderOptions,
 ) -> Result<RenderResult> {
-    render_with(Typesetter::with_system_fonts(), doc, media, options)
+    // `DOCSPINE_DETERMINISTIC_FONTS` 置位时**只用内置 Liberation/Noto 兜底字体**
+    // (不扫系统字体),使输出跨机器逐字节确定——供提交式 `.ssimref` 基线的 CI 门
+    // (C-10 第 4 层)与自证测试用;缺省仍走系统字体解析(同机同字体环境确定)。
+    let ts = if std::env::var_os("DOCSPINE_DETERMINISTIC_FONTS").is_some() {
+        Typesetter::new(FontResolver::without_system_fonts())
+    } else {
+        Typesetter::with_system_fonts()
+    };
+    render_with(ts, doc, media, options)
 }
 
 /// 在给定引擎实例上渲染(测试注入确定性字体解析器用;一实例一文档)。
@@ -96,7 +104,28 @@ fn render_with(
     for plan in &mapped.sections {
         // 每节一个分页回调(节内页页同几何);引擎每起一页调用一次,含首页。
         let mut provider = section::SectionPages::new(plan.geom);
-        pages.extend(ts.layout_flow(&plan.blocks, &mut provider));
+        let mut section_pages = ts.layout_flow(&plan.blocks, &mut provider);
+        // 锚定浮动图(C-8):画在本节**首页**的绝对位置。behindDoc 衬于正文下方
+        // (插到 ops 最前),否则叠加在上层(追加到末尾)。文字不环绕(声明降级)。
+        for img in &plan.overlays {
+            if let Some(id) = ts.add_image(&ImageSpec::new(img.bytes.clone(), img.w, img.h)) {
+                let op = Op::Image {
+                    id,
+                    x: img.x,
+                    y: img.y,
+                    w: img.w,
+                    h: img.h,
+                };
+                if let Some(page) = section_pages.first_mut() {
+                    if img.behind {
+                        page.ops.insert(0, op);
+                    } else {
+                        page.ops.push(op);
+                    }
+                }
+            }
+        }
+        pages.extend(section_pages);
     }
     let result = ts
         .emit(&pages)

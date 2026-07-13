@@ -28,9 +28,9 @@ pub enum RenderWarning {
     /// 内嵌图片无法渲染(缺 media 字节 / 缺 `wp:extent` 尺寸 / 尺寸非法):
     /// 该图跳过,其余内容照常(C-8:有字节且有尺寸的图已按块级渲染)。
     PictureSkipped,
-    /// 浮动/锚定图片(`wp:anchor`)按块级内联近似渲染(v1 不做绝对定位 /
-    /// 文字环绕;C-8 声明降级)。
-    FloatingImageInlined,
+    /// 浮动/锚定图片(`wp:anchor`)按 `positionH/V` 的 posOffset 绝对定位成覆盖层
+    /// 绘制,但**不做文字环绕**(周绕排除区 v1 不实现;C-8 声明降级)。
+    FloatingNoWrap,
     /// 不支持的矢量图格式(EMF/WMF):引擎无法解码,改画一个与显示尺寸等大的
     /// 浅灰占位框(C-8 声明降级;文本/表格照常)。
     UnsupportedImageFormat,
@@ -72,7 +72,7 @@ impl RenderWarning {
             RenderWarning::ParaBorderOmitted => "para-border-omitted",
             RenderWarning::ParaShadingOmitted => "para-shading-omitted",
             RenderWarning::PictureSkipped => "picture-skipped",
-            RenderWarning::FloatingImageInlined => "floating-image-inlined",
+            RenderWarning::FloatingNoWrap => "floating-no-wrap",
             RenderWarning::UnsupportedImageFormat => "unsupported-image-format",
             RenderWarning::NumberingIndirectionSkipped => "numbering-indirection-skipped",
             RenderWarning::CellVAlignIgnored => "cell-valign-ignored",
@@ -113,11 +113,11 @@ impl fmt::Display for RenderWarning {
                     "an embedded picture was skipped (missing media bytes or size)"
                 )
             }
-            RenderWarning::FloatingImageInlined => {
+            RenderWarning::FloatingNoWrap => {
                 write!(
                     f,
-                    "a floating (anchored) image is rendered inline; no absolute \
-                     positioning or text wrap in this version"
+                    "a floating (anchored) image is placed at its absolute anchor \
+                     offset; text does not wrap around it in this version"
                 )
             }
             RenderWarning::UnsupportedImageFormat => {

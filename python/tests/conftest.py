@@ -441,6 +441,74 @@ def make_docx_with_image():
     return _make
 
 
+# 一张锚定浮动图(``wp:anchor``,relativeFrom="margin"):水平偏移 914400 EMU=72pt、
+# 垂直偏移 457200 EMU=36pt;extent 914400×457200 EMU=72×36pt(rId10 → image1.png)。
+# C-8:导出后应作为绝对定位覆盖层落在(左边距+72, 上边距+36)= (144,108)pt。
+_ANCHORED_IMAGE_DOCUMENT = (
+    _DOC_HEADER
+    + """
+  <w:body>
+    <w:p><w:r><w:t>Body text above the floating image.</w:t></w:r></w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:anchor behindDoc="0" allowOverlap="1" relativeHeight="0">
+            <wp:simplePos x="0" y="0"/>
+            <wp:positionH relativeFrom="margin"><wp:posOffset>914400</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="margin"><wp:posOffset>457200</wp:posOffset></wp:positionV>
+            <wp:extent cx="914400" cy="457200"/>
+            <wp:wrapNone/>
+            <a:graphic>
+              <a:graphicData>
+                <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                  <pic:blipFill><a:blip r:embed="rId10"/></pic:blipFill>
+                </pic:pic>
+              </a:graphicData>
+            </a:graphic>
+          </wp:anchor>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>"""
+)
+
+
+@pytest.fixture(scope="session")
+def anchored_image_docx_bytes() -> bytes:
+    """含一张锚定浮动图(``wp:anchor`` + posOffset)的合成 ``.docx`` 字节(C-8:覆盖层)。"""
+    return build_docx(_ANCHORED_IMAGE_DOCUMENT, image=_png_1x1())
+
+
+# 一段带四周边框(``pBdr``)+ 底纹(``shd`` fill=D9E2F3)的段落:真画的填充矩形 +
+# 四边描边线(渲染层把该段包成单格表)。
+_PARA_BOX_DOCUMENT = (
+    _DOC_HEADER
+    + """
+  <w:body>
+    <w:p>
+      <w:pPr>
+        <w:pBdr>
+          <w:top w:val="single" w:sz="8" w:space="4" w:color="1F4E79"/>
+          <w:bottom w:val="single" w:sz="8" w:space="4" w:color="1F4E79"/>
+          <w:left w:val="single" w:sz="8" w:space="4" w:color="1F4E79"/>
+          <w:right w:val="single" w:sz="8" w:space="4" w:color="1F4E79"/>
+        </w:pBdr>
+        <w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/>
+      </w:pPr>
+      <w:r><w:t>Boxed and shaded paragraph, drawn as fill + four border lines.</w:t></w:r>
+    </w:p>
+  </w:body>
+</w:document>"""
+)
+
+
+@pytest.fixture(scope="session")
+def para_box_docx_bytes() -> bytes:
+    """含一段 ``pBdr`` + ``shd`` 段落的合成 ``.docx`` 字节(C-4 收口:底纹/边框真画)。"""
+    return build_docx(_PARA_BOX_DOCUMENT)
+
+
 # --- EMF 矢量图 fixture(C-8:不支持格式 → 占位框 + UnsupportedImageFormat) --------
 
 # 主文档关系:把 r:embed="rId10" 指向一张 EMF(而非 png)。

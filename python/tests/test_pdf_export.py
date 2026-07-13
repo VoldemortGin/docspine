@@ -558,3 +558,49 @@ def test_emf_image_draws_placeholder_and_warns_once(emf_docx_bytes):
     fmt = [w for w in ws if "EMF" in str(w.message)]
     assert len(fmt) == 1, [str(w.message) for w in ws]
     assert issubclass(fmt[0].category, UserWarning)
+
+
+def test_anchored_image_placed_at_pos_offset(anchored_image_docx_bytes):
+    """C-8 收口:锚定浮动图按 ``wp:anchor`` 的 posOffset 绝对定位成覆盖层——落点
+    (左边距+72, 上边距+36)=(144,108)pt、尺寸 72×36pt(±1pt);并发一条 FloatingNoWrap
+    (``UserWarning``,文字不环绕)。"""
+    doc = docspine.open_bytes(anchored_image_docx_bytes)
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = doc.to_pdf()
+    d = _open_pdf(pdf)
+    rects = d[0].get_image_rects()
+    assert len(rects) == 1, "锚定图应作为一张图片 XObject 落在首页"
+    r = rects[0]
+    assert abs(r.x0 - 144.0) < 1.0, f"x0={r.x0}"
+    assert abs(r.y0 - 108.0) < 1.0, f"y0={r.y0}"
+    assert abs(r.width - 72.0) < 1.0 and abs(r.height - 36.0) < 1.0
+    floating = [w for w in ws if "float" in str(w.message).lower()]
+    assert len(floating) == 1, [str(w.message) for w in ws]
+    assert issubclass(floating[0].category, UserWarning)
+
+
+def test_paragraph_border_and_shading_are_drawn():
+    """段落 ``pBdr`` + ``shd`` 真画:底纹铺填充矩形、四周边框画描边线
+    (``get_drawings`` 见 ``f`` 与 ``s``);正文照常读回;不发 para-border/shading 告警。"""
+    data = _body(
+        "<w:p><w:pPr>"
+        '<w:pBdr>'
+        '<w:top w:val="single" w:sz="8" w:space="4" w:color="000000"/>'
+        '<w:bottom w:val="single" w:sz="8" w:space="4" w:color="000000"/>'
+        '<w:left w:val="single" w:sz="8" w:space="4" w:color="000000"/>'
+        '<w:right w:val="single" w:sz="8" w:space="4" w:color="000000"/>'
+        '</w:pBdr>'
+        '<w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/>'
+        "</w:pPr><w:r><w:t>Boxed and shaded paragraph.</w:t></w:r></w:p>"
+    )
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = docspine.open_bytes(data).to_pdf()
+    d = _open_pdf(pdf)
+    kinds = [dr.get("type") for dr in d[0].get_drawings()]
+    assert "f" in kinds, f"段落底纹应画填充矩形: {kinds}"
+    assert "s" in kinds, f"段落边框应画描边线: {kinds}"
+    assert "Boxed and shaded paragraph." in d[0].get_text()
+    msgs = " ".join(str(w.message) for w in ws)
+    assert "border" not in msgs and "shading" not in msgs, msgs

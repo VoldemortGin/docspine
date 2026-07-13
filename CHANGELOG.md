@@ -13,6 +13,29 @@ change.
 
 ## [Unreleased]
 
+### Added
+
+- **Anchored images are absolutely positioned (C-8 wrap-up).** A floating
+  (`wp:anchor`) raster picture no longer degrades to an inline block: it is
+  drawn as a page overlay at its `wp:positionH/V` `posOffset` (relative to the
+  page or the section margins), on the section's first page. Text does **not**
+  wrap around it — that emits a `FloatingNoWrap` warning (per-line exclusion
+  rectangles remain out of v1). Vector-format or byte-missing anchored pictures
+  fall back to the existing inline-placeholder / skip paths.
+- **Paragraph borders & shading are drawn (C-4 wrap-up).** A paragraph carrying
+  `w:pBdr` (top/right/bottom/left) and/or `w:shd` is wrapped in a single-cell
+  table so the engine paints the shading fill and the four border edges (visible
+  in `get_drawings`); the border `@w:space` folds into cell padding. The
+  `w:between` edge (between consecutive same-bordered paragraphs) and complex
+  cases (an intra-paragraph page break) still degrade with a single
+  `ParaBorderOmitted` / `ParaShadingOmitted` warning.
+
+### Changed
+
+- **`FloatingImageInlined` warning renamed to `FloatingNoWrap`** (kind
+  `floating-no-wrap`) to reflect that anchored images are now absolutely
+  positioned rather than inlined; only the text-wrap degradation remains.
+
 ## [0.3.0] — 2026-07-08
 
 ### Added
