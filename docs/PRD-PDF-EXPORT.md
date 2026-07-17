@@ -1,6 +1,6 @@
 # PRD-PDF-EXPORT — Faithful .docx → PDF export (Phase C, flow layout + pagination)
 
-Status: design (code-verified 2026-07-02). Effort scale (family convention): **S** ≈ hours · **M** ≈ 1–2
+Status: done (completed in 0.4.0, 2026-07-13). Effort scale (family convention): **S** ≈ hours · **M** ≈ 1–2
 days · **L** ≈ multi-day. Every task lists **why · files · effort · Acceptance** (the green condition that
 means "done"). Family phase order: **Phase A** = pdfspine `crates/pdf-typeset` engine (pdfspine
 `docs/PRD-NEXT.md` §10, tasks TS-1..TS-7) → **Phase B** = pptspine → **Phase C** = docspine (**this PRD**,
