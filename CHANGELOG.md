@@ -13,6 +13,14 @@ change.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-30
+
+### Changed
+
+- **Python floor relaxed to 3.12.** `requires-python` is now `>=3.12` (no upper
+  bound), undoing 0.5.0's `>=3.14,<3.15` restriction; classifiers cover
+  3.12/3.13/3.14 and CI tests all three. The abi3 wheels are unchanged.
+
 ## [0.5.0] — 2026-07-30
 
 ### Changed
