@@ -11,7 +11,7 @@ dynamic = ["version"]
 description = "Pure-Rust Word (.docx / OOXML) structural parser with strong table support and local image OCR, via PyO3."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11"
+requires-python = ">=3.14,<3.15"
 authors = [{ name = "docspine contributors" }]
 keywords = ["docx", "word", "ooxml", "office", "table", "rust", "ocr"]
 classifiers = [
@@ -23,9 +23,7 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Office/Business :: Office Suites",

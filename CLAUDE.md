@@ -99,7 +99,7 @@ OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \
 
 ## 约定
 
-- Python **3.11+**;Rust **2021** 边缘;import 顺序 **stdlib > 三方 > 本地**;简体中文 docstring/注释,
+- Python **3.14**;Rust **2021** 边缘;import 顺序 **stdlib > 三方 > 本地**;简体中文 docstring/注释,
   匹配家族风格。
 - **TDD**——测试即规格(Rust:`crates/*/tests/*.rs` 用 `zip`/合成词框现造 fixture;Python:
   `python/tests/conftest.py` 用纯 `zipfile` 合成含**重型表格 + 内嵌图片**的最小 .docx,不落二进制 fixture)。

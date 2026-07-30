@@ -13,6 +13,15 @@ change.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-30
+
+### Changed
+
+- **BREAKING: Python 3.14 only.** `requires-python` is now `>=3.14,<3.15`
+  (was `>=3.11`); classifiers and CI/release workflows target CPython 3.14.
+  The wheel remains abi3, but the published metadata no longer allows
+  installation on 3.11–3.13.
+
 ## [0.4.0] — 2026-07-13
 
 ### Added
