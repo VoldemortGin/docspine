@@ -20,6 +20,10 @@ docspine is the document-engine sibling of [`pdfspine`](https://github.com/Volde
 (PDF) and [`pptspine`](https://github.com/VoldemortGin/pptspine) (PowerPoint),
 all sharing the same `ocrspine` OCR core.
 
+## Spine 家族 / Spine family
+
+本仓库是 Spine 家族的成员之一（角色：L2 文档引擎）。家族全部成员、分层、依赖方向、依赖形式与当前差距见 [`docs/spine-family.md`](docs/spine-family.md)；该文件在每个家族仓库中的副本内容相同，真源在家族根目录 `~/startup/spine/docs/spine-family.md`，用根目录 `make family-doc-sync` 同步。
+
 ## Capabilities
 
 | Area | Status |

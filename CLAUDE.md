@@ -1,5 +1,7 @@
 # CLAUDE.md — docspine(宪章)
 
+> 家族关系与依赖：先读 [`docs/spine-family.md`](docs/spine-family.md)（每仓副本相同，真源在家族根目录）。
+
 Spine 家族成员之一:**纯 Rust 的 Word(.docx / OOXML)结构化解析器 + 本地图片 OCR**,
 **表格解析是重点**。先读家族 `../README.md`,本文件是 docspine 的操作指南,风格对齐
 `../corespine/CLAUDE.md` / `../pptspine/CLAUDE.md`。
