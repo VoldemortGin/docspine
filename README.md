@@ -46,6 +46,17 @@ all sharing the same `ocrspine` OCR core.
 Parsing is tolerant: unknown elements are skipped, missing attributes become
 `None`, and malformed input yields a typed `DocError` rather than a panic.
 
+Hostile input is bounded. Reading the zip package enforces `doc_parse::ZipLimits`
+(defaults: 10,000 entries, 256 MiB per entry, 1 GiB total decompressed, a
+1000:1 declared compression ratio for entries over 1 MiB, 1024-byte entry
+names); declared sizes are never trusted for allocation, and absolute or `..`
+entry paths are rejected. Hitting a zip limit raises `DocZipError` in Python
+(the message names the limit, e.g. `limit exceeded: entry-bytes (...)`); Rust
+callers get `DocError::LimitExceeded` and can pass custom limits via
+`parse_bytes_with_limits` / `parse_path_with_limits`. Nested tables / content
+controls / inline run containers are capped at 64 levels; deeper subtrees are
+skipped silently (no stack overflow, no error).
+
 ### docx first; legacy `.doc` deferred
 
 Modern `.docx` (OOXML) is the **primary target**. The old binary `.doc` is a

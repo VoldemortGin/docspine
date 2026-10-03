@@ -1,13 +1,79 @@
 //! docx zip 容器读取。
 //!
 //! `.docx` = OOXML = 一个 zip 包。这里把整个包**一次性读进内存**(文档通常不大),
-//! 然后按名取用各 XML 部件与 media 字节。所有失败收敛成 [`DocError::Zip`]。
+//! 然后按名取用各 XML 部件与 media 字节。zip 层失败收敛成 [`DocError::Zip`];触达
+//! [`ZipLimits`] 的资源限额(zip 炸弹 / 超多条目 / 超长名)收敛成 [`DocError::LimitExceeded`]。
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 
-use doc_core::{DocError, Result};
+use doc_core::{DocError, LimitKind, Result};
 use zip::ZipArchive;
+
+const MIB: u64 = 1024 * 1024;
+
+/// 压缩比检查只对声明未压缩大小超过该阈值的条目生效(小条目高压缩比很正常)。
+const RATIO_MIN_BYTES: u64 = MIB;
+
+/// 读取 zip 包时的资源限额(防 zip 炸弹 / 恶意包拖垮进程)。
+///
+/// 用 [`ZipLimits::default`] 取缺省值,按需覆盖单个字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZipLimits {
+    /// 条目总数上限(含目录条目)。缺省 10 000。
+    pub max_entries: usize,
+    /// 单条目解压字节上限(声明值与实际读出值都检查)。缺省 256 MiB。
+    pub max_entry_bytes: u64,
+    /// 全包累计实际解压字节上限。缺省 1 GiB。
+    pub max_total_bytes: u64,
+    /// 单条目压缩比(未压缩 / 压缩)上限,声明值与实际读出值各查一次;仅当未压缩量 > 1 MiB
+    /// 时判定。缺省 1000。
+    pub max_compression_ratio: u32,
+    /// 条目名字节长度上限。缺省 1024。
+    pub max_name_len: usize,
+}
+
+impl Default for ZipLimits {
+    fn default() -> Self {
+        ZipLimits {
+            max_entries: 10_000,
+            max_entry_bytes: 256 * MIB,
+            max_total_bytes: 1024 * MIB,
+            max_compression_ratio: 1000,
+            max_name_len: 1024,
+        }
+    }
+}
+
+fn limit_err(kind: LimitKind, limit: u64, actual: u64) -> DocError {
+    DocError::LimitExceeded {
+        kind,
+        limit,
+        actual,
+    }
+}
+
+/// 压缩比检查:未压缩量 > 1 MiB 且 `未压缩 / 压缩 > max_compression_ratio` 即超限;
+/// 压缩大小为 0 时比值视为无穷(`actual = u64::MAX`)。
+fn check_ratio(uncompressed: u64, compressed: u64, limits: &ZipLimits) -> Result<()> {
+    let max_ratio = u64::from(limits.max_compression_ratio);
+    if uncompressed > RATIO_MIN_BYTES && uncompressed > compressed.saturating_mul(max_ratio) {
+        // 向上取整,保证 actual > limit。
+        let actual = match compressed {
+            0 => u64::MAX,
+            c => uncompressed.div_ceil(c),
+        };
+        return Err(limit_err(LimitKind::CompressionRatio, max_ratio, actual));
+    }
+    Ok(())
+}
+
+/// 条目名是否安全:拒绝绝对路径 / 盘符前缀 / 任何 `..` 组件(`/` 与 `\` 都按分隔符看)。
+fn is_safe_name(name: &str) -> bool {
+    !name.starts_with(['/', '\\'])
+        && name.as_bytes().get(1) != Some(&b':')
+        && !name.split(['/', '\\']).any(|c| c == "..")
+}
 
 /// 解包后的 docx 原始部件集合(尚未解析 XML)。
 pub struct Package {
@@ -16,25 +82,76 @@ pub struct Package {
 }
 
 impl Package {
-    /// 从内存字节打开一个 docx 包,读出全部条目。
-    pub fn open_bytes(bytes: &[u8]) -> Result<Package> {
+    /// 以 [`ZipLimits`] 限额从内存字节打开一个 docx 包,读出全部条目。
+    pub fn open_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Package> {
         let reader = Cursor::new(bytes);
         let mut archive =
             ZipArchive::new(reader).map_err(|e| DocError::Zip(format!("open archive: {e}")))?;
+        if archive.len() > limits.max_entries {
+            return Err(limit_err(
+                LimitKind::Entries,
+                limits.max_entries as u64,
+                archive.len() as u64,
+            ));
+        }
         let mut parts = BTreeMap::new();
+        let mut total: u64 = 0;
         for i in 0..archive.len() {
-            let mut file = archive
+            let file = archive
                 .by_index(i)
                 .map_err(|e| DocError::Zip(format!("entry {i}: {e}")))?;
+            // 用 zip 规范化的名字(始终是 `/` 分隔)。
+            let name = file.name().to_string();
+            if name.len() > limits.max_name_len {
+                return Err(limit_err(
+                    LimitKind::NameLength,
+                    limits.max_name_len as u64,
+                    name.len() as u64,
+                ));
+            }
+            if file.enclosed_name().is_none() || !is_safe_name(&name) {
+                return Err(DocError::Zip(format!("unsafe entry path: {name:?}")));
+            }
             // 跳过目录条目。
             if file.is_dir() {
                 continue;
             }
-            // 用 zip 规范化的名字(始终是 `/` 分隔)。
-            let name = file.name().to_string();
-            let mut buf = Vec::with_capacity(file.size() as usize);
-            file.read_to_end(&mut buf)
+            let declared = file.size();
+            if declared > limits.max_entry_bytes {
+                return Err(limit_err(
+                    LimitKind::EntryBytes,
+                    limits.max_entry_bytes,
+                    declared,
+                ));
+            }
+            let compressed = file.compressed_size();
+            check_ratio(declared, compressed, limits)?;
+            // 不信任声明大小做预分配;最多读到「本条目上限」与「剩余总额」中较小者 + 1 字节,
+            // 多读出的那 1 字节即证明超限(防声明造假)。
+            let remaining = limits.max_total_bytes.saturating_sub(total);
+            let cap = limits.max_entry_bytes.min(remaining);
+            let mut buf = Vec::new();
+            file.take(cap.saturating_add(1))
+                .read_to_end(&mut buf)
                 .map_err(|e| DocError::Zip(format!("read {name}: {e}")))?;
+            let got = buf.len() as u64;
+            if got > limits.max_entry_bytes {
+                return Err(limit_err(
+                    LimitKind::EntryBytes,
+                    limits.max_entry_bytes,
+                    got,
+                ));
+            }
+            // 实际读出量再查一次压缩比(声明可以造假)。
+            check_ratio(got, compressed, limits)?;
+            total += got;
+            if total > limits.max_total_bytes {
+                return Err(limit_err(
+                    LimitKind::TotalBytes,
+                    limits.max_total_bytes,
+                    total,
+                ));
+            }
             parts.insert(name, buf);
         }
         Ok(Package { parts })

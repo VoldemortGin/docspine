@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 import pytest
 
 import docspine
@@ -145,6 +148,43 @@ def test_legacy_doc_bytes_raise_unsupported():
     cfb = bytes([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) + b"\x00" * 64
     with pytest.raises(docspine.DocUnsupportedError):
         docspine.open_bytes(cfb)
+
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _docx(body: str, extra: int = 0) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(
+            "word/document.xml",
+            f'<w:document xmlns:w="{_W_NS}"><w:body>{body}</w:body></w:document>',
+        )
+        for i in range(extra):
+            z.writestr(f"junk/{i}.bin", b"")
+    return buf.getvalue()
+
+
+def test_zip_entry_limit_raises_zip_error():
+    # 超过缺省 10 000 条目 -> 资源限额,按 zip/损坏输入抛出,信息里带限额种类。
+    with pytest.raises(docspine.DocZipError, match="limit exceeded: entries"):
+        docspine.open_bytes(_docx("<w:p/>", extra=10_000))
+
+
+def test_deep_nesting_skipped_not_crash():
+    # 70 层嵌套表:超过 64 层的子树静默跳过,外层与后续正文照常解析。
+    levels = 70
+    body = (
+        "<w:tbl><w:tr><w:tc>" * levels
+        + "<w:p><w:r><w:t>core</w:t></w:r></w:p>"
+        + "</w:tc></w:tr></w:tbl>" * levels
+        + "<w:p><w:r><w:t>after</w:t></w:r></w:p>"
+    )
+    doc = docspine.open_bytes(_docx(body))
+    assert doc.block_count == 2
+    text = doc.text()
+    assert "after" in text
+    assert "core" not in text
 
 
 def test_probe_doc_on_non_cfb(minimal_docx_bytes):

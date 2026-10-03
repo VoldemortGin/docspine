@@ -11,7 +11,7 @@ pub mod model;
 pub mod numbering;
 pub mod style;
 
-pub use error::{DocError, Result};
+pub use error::{DocError, LimitKind, Result};
 pub use geom::{
     emu_to_points, twips_to_points, Emu, Twips, EMU_PER_INCH, EMU_PER_POINT, TWIPS_PER_INCH,
     TWIPS_PER_POINT,

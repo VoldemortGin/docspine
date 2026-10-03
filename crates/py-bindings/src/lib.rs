@@ -45,7 +45,8 @@ create_exception!(_core, DocRenderError, DocError_);
 fn map_err(e: DocError) -> PyErr {
     let msg = e.to_string();
     match e.kind() {
-        "zip" => DocZipError::new_err(msg),
+        // 资源限额(zip 炸弹 / 超多条目等)按 zip/损坏输入抛出;信息里带限额种类。
+        "zip" | "limit-exceeded" => DocZipError::new_err(msg),
         "xml" => DocXmlError::new_err(msg),
         "unsupported" => DocUnsupportedError::new_err(msg),
         "ocr" => DocOcrError::new_err(msg),

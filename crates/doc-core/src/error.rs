@@ -34,6 +34,50 @@ pub enum DocError {
     /// PDF 渲染/序列化失败(由 `doc-render` 把 pdf-typeset 引擎错误映射过来)。
     #[error("render error: {0}")]
     Render(String),
+
+    /// 输入触达了 zip 读取资源限额(zip 炸弹 / 超多条目 / 超长名等恶意或畸形输入的护栏)。
+    /// `actual` 是触发时观测到的值(流式读取被截断时为下界 `cap + 1`)。
+    #[error("limit exceeded: {kind} (limit {limit}, actual {actual})")]
+    LimitExceeded {
+        kind: LimitKind,
+        limit: u64,
+        actual: u64,
+    },
+}
+
+/// [`DocError::LimitExceeded`] 命中的是哪一种限额。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LimitKind {
+    /// zip 条目总数。
+    Entries,
+    /// 单个条目的(声明或实际)解压字节数。
+    EntryBytes,
+    /// 全包累计实际解压字节数。
+    TotalBytes,
+    /// 单个条目的压缩比(未压缩 / 压缩;声明值与实际读出值都检查)。
+    CompressionRatio,
+    /// 条目名字节长度。
+    NameLength,
+}
+
+impl LimitKind {
+    /// 稳定的字符串标签(出现在错误信息里)。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LimitKind::Entries => "entries",
+            LimitKind::EntryBytes => "entry-bytes",
+            LimitKind::TotalBytes => "total-bytes",
+            LimitKind::CompressionRatio => "compression-ratio",
+            LimitKind::NameLength => "name-length",
+        }
+    }
+}
+
+impl std::fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl DocError {
@@ -47,6 +91,7 @@ impl DocError {
             DocError::Io(_) => "io",
             DocError::Ocr(_) => "ocr",
             DocError::Render(_) => "render",
+            DocError::LimitExceeded { .. } => "limit-exceeded",
         }
     }
 }
