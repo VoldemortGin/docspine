@@ -8,6 +8,7 @@ import zipfile
 import pytest
 
 import docspine
+from conftest import _DOC_HEADER, build_docx
 
 
 def test_open_path_basic(minimal_docx_path):
@@ -325,6 +326,45 @@ def test_revision_ins_text_kept_del_text_dropped(revisions_docx_bytes):
     assert "DELETED" not in text  # 修订删除的文字不输出。
     assert "Start" in text and "end" in text  # 周围正常正文不受影响。
 
+
+
+# --- 静默丢正文:moveTo / smartTag / customXml / AlternateContent / 文本框 / 符号 ---
+
+
+def test_wrapped_and_alternate_content_recovered():
+    """修订移动目标、smartTag、customXml、AlternateContent 回退、符号字符不再整段丢失。"""
+    body = (
+        '<w:customXml w:element="root"><w:p>'
+        "<w:moveFrom><w:r><w:delText>OLD</w:delText></w:r></w:moveFrom>"
+        "<w:moveTo><w:r><w:t>moved </w:t></w:r></w:moveTo>"
+        "<w:smartTag><w:r><w:t>tagged </w:t></w:r></w:smartTag>"
+        '<w:r xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+        '<mc:AlternateContent><mc:Choice Requires="w16se"><w16se:symEx xmlns:w16se="urn:x"/></mc:Choice>'
+        "<mc:Fallback><w:t>fb</w:t></mc:Fallback></mc:AlternateContent>"
+        '<w:sym w:font="Symbol" w:char="03B1"/></w:r>'
+        "</w:p></w:customXml>"
+    )
+    doc = docspine.open_bytes(build_docx(_DOC_HEADER + f"<w:body>{body}</w:body></w:document>"))
+    assert doc.to_text() == "moved tagged fb\u03b1"
+
+
+def test_text_box_exposed_on_run_dict_and_in_exports():
+    """文本框内容挂在 run dict 的 ``text_boxes``(块 dict 同 body()),并紧随段落进导出。"""
+    body = (
+        '<w:p><w:r><w:t>Anchor</w:t></w:r><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">'
+        '<v:shape><v:textbox><w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p>'
+        "</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"
+    )
+    doc = docspine.open_bytes(build_docx(_DOC_HEADER + f"<w:body>{body}</w:body></w:document>"))
+    para = doc.paragraphs()[0]
+    assert para["text"] == "Anchor"
+    boxes = [tb for run in para["runs"] for tb in run["text_boxes"]]
+    assert len(boxes) == 1
+    assert boxes[0]["blocks"][0]["kind"] == "paragraph"
+    assert boxes[0]["blocks"][0]["text"] == "Boxed"
+    assert doc.to_text() == "Anchor\nBoxed"
+    assert doc.to_markdown() == "Anchor\n\nBoxed"
+    assert doc.to_html() == "<p>Anchor</p>\n<p>Boxed</p>"
 
 # --- 结构化导出:to_text / to_markdown / to_html ------------------------------
 

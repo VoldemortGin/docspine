@@ -117,6 +117,7 @@ Verdicts against `crates/doc-parse` as of 2026-07-02. "Model growth" = which doc
 | j | Headers/footers | **MISSING** | inside skipped sectPr (`document.rs:82-83`); parts never read | M–L — **OUT v1** | — |
 | + | **Bonus bug: `w:sdt` content dropped wholesale** — cover pages / TOC text LOST | **MISSING** | `document.rs:82-83` + `skip_element` (`document.rs:620-638`) | S — fix in C-3 | none (transparent container) |
 | + | **Bonus bug: `w:fldSimple` cached result dropped** | **MISSING** | falls into `document.rs:127` skip | S — fix in C-3 | none (transparent container) |
+| + | **Silent drops (2026-10): `w:moveTo`, `w:smartTag`, `w:customXml` (block + inline), `mc:AlternateContent`, text boxes (`w:txbxContent`), `w:sym`/`w:softHyphen`/`w:noBreakHyphen`/`w:ptab`; VML `w:pict` with a nested shape truncated the rest of the body** | **FIXED** — wrappers transparent (same `MAX_NEST_DEPTH` guard), `w:moveFrom` dropped like `w:del`; AlternateContent = first `mc:Choice` that parses to non-empty content, else `mc:Fallback`; VML walker depth-counted; text boxes extracted only (`TextRun.text_boxes`, emitted after the anchoring paragraph), PDF not drawn + `TextBoxNotRendered` warning; soft hyphen stripped at render time | `document.rs` `parse_alternate_content` / `parse_text_box` / `push_run_char` | done | `TextBox { blocks }` on `TextRun` |
 
 **Reading of the table:** structure (blocks, runs, tables-with-merges, images-with-bytes) is solid;
 everything *visual* beyond `b/i/u/sz/color/jc` is absent, and the three cross-part tables
@@ -199,7 +200,7 @@ passes through; PNG et al. decode via the engine's pdf-image path; EMF/WMF → g
 
 **Warning propagation.** pdf-typeset returns `ExportResult { bytes, warnings: Vec<ExportWarning> }` (engine
 kinds: FontSubstituted, MissingGlyph, …). doc-render appends its own kinds (FloatingNoWrap, RowTooTall,
-UnsupportedImageFormat, MultiColumnFlattened, GradientDegraded, CustomTabStopsIgnored, …) and returns the
+UnsupportedImageFormat, MultiColumnFlattened, GradientDegraded, CustomTabStopsIgnored, TextBoxNotRendered, …) and returns the
 merged vector; py-bindings dedupes by kind and surfaces each unique kind once.
 
 ---

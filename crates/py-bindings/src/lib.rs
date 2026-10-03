@@ -120,6 +120,18 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
         pics.append(picture_dict(py, p)?)?;
     }
     d.set_item("pictures", pics)?;
+    // 浮动文本框(若有):每个是 `{"blocks": [...]}`,块 dict 同 body()。
+    let boxes = PyList::empty(py);
+    for tb in &run.text_boxes {
+        let blocks = PyList::empty(py);
+        for b in &tb.blocks {
+            blocks.append(block_dict(py, b)?)?;
+        }
+        let bd = PyDict::new(py);
+        bd.set_item("blocks", blocks)?;
+        boxes.append(bd)?;
+    }
+    d.set_item("text_boxes", boxes)?;
     Ok(d)
 }
 
@@ -291,6 +303,9 @@ fn collect_rel_to_media(doc: &CoreDocument) -> BTreeMap<String, String> {
                                 map.entry(pic.rel_id.clone())
                                     .or_insert_with(|| name.clone());
                             }
+                        }
+                        for tb in &r.text_boxes {
+                            walk(&tb.blocks, map);
                         }
                     }
                 }

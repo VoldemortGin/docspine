@@ -130,6 +130,7 @@ pub(crate) struct MapCtx {
     row_warned: bool,
     numbering_warned: bool,
     tab_warned: bool,
+    text_box_warned: bool,
 }
 
 impl MapCtx {
@@ -150,6 +151,7 @@ impl MapCtx {
             row_warned: false,
             numbering_warned: false,
             tab_warned: false,
+            text_box_warned: false,
         };
         ctx.set_frame(&page_geom(&doc_core::model::Section::default()));
         ctx
@@ -213,6 +215,14 @@ impl MapCtx {
         if !self.tab_warned {
             self.tab_warned = true;
             self.list.push(RenderWarning::CustomTabStopsIgnored);
+        }
+    }
+
+    /// 浮动文本框只抽取不绘制的一次性降级(map_paragraph 调用)。
+    fn text_box(&mut self) {
+        if !self.text_box_warned {
+            self.text_box_warned = true;
+            self.list.push(RenderWarning::TextBoxNotRendered);
         }
     }
 
@@ -340,6 +350,10 @@ fn map_paragraph(
         out.push(Block::PageBreak);
     }
     let mut props = para_props(doc, &eff);
+    // 浮动文本框(C-8 外):只抽取不绘制 → 一次性降级告警。
+    if para.text_boxes().next().is_some() {
+        ctx.text_box();
+    }
 
     // 列表标签(C-6):按文档顺序推进计数;numId=0 / 层级无定义 / numFmt=none 不产
     // 标签(缩进仍经层级 pPr 级联生效);numStyleLink 间接 v1 不解 → 一次性告警。
@@ -413,7 +427,9 @@ fn map_paragraph(
         let mut text = String::new();
         for seg in &run.segments {
             match seg {
-                RunSegment::Text(s) => text.push_str(s),
+                // 软连字符(`w:softHyphen` → U+00AD)只是可选断字点:引擎不做断字,
+                // 行内一律不可见(Word 行为),渲染侧丢弃;抽取侧照常保留。
+                RunSegment::Text(s) => text.extend(s.chars().filter(|&c| c != '\u{00AD}')),
                 RunSegment::Tab => text.push('\t'),
                 RunSegment::Break(BreakKind::Line) => text.push('\n'),
                 // 单栏渲染:换栏等效换页(C-2 声明语义)。
@@ -1225,6 +1241,19 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.kind() == "internal-link-not-rendered"));
+    }
+
+    /// 软连字符(U+00AD)渲染侧不可见;不换行连字符(U+2011)照常输出。
+    #[test]
+    fn soft_hyphen_dropped_in_render_text() {
+        let doc = doc_with_body(vec![DocBlock::Paragraph(para_with_text(
+            "co\u{00AD}op e\u{2011}mail",
+        ))]);
+        let Block::Paragraph(_, runs) = &map_document(&doc).sections[0].blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text, "coop e\u{2011}mail");
     }
 
     /// eastAsia 字体切分:CJK 字符段喂 ea 字体,拉丁段喂 ascii 字体;中性空白跟随。

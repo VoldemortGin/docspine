@@ -146,8 +146,14 @@ pub struct Paragraph {
 
 impl Paragraph {
     /// 便利:把段内所有 run 的文字拼接成整段文本(分段按 [`TextRun::text`] 折叠)。
+    /// 浮动文本框内容不在其中(见 [`Paragraph::text_boxes`])。
     pub fn text(&self) -> String {
         self.runs.iter().map(|r| r.text()).collect()
+    }
+
+    /// 段内各 run 锚定的浮动文本框,按文档顺序。
+    pub fn text_boxes(&self) -> impl Iterator<Item = &TextBox> {
+        self.runs.iter().flat_map(|r| &r.text_boxes)
     }
 }
 
@@ -178,6 +184,16 @@ pub struct TextRun {
     /// 文档内部书签跳转(`w:hyperlink@w:anchor`)存成 `"#书签名"`(渲染侧只存不画 +
     /// 一次性降级告警)。`None` = 该 run 不在任何超链接内。
     pub link_target: Option<String>,
+    /// 该 run 锚定的浮动文本框(DrawingML `wps:txbx` / VML `v:textbox` 内的
+    /// `w:txbxContent`)。**只做抽取**:导出侧紧随所在段落之后输出其内容;
+    /// PDF 渲染不画(一次性降级告警)。
+    pub text_boxes: Vec<TextBox>,
+}
+
+/// 一个浮动文本框(`w:txbxContent`)的内容:段落与表格的块序列。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TextBox {
+    pub blocks: Vec<Block>,
 }
 
 impl TextRun {
@@ -370,22 +386,32 @@ impl CellVAlign {
 
 impl Cell {
     /// 便利:把单元格内**直接段落**的文字按行拼接(忽略嵌套表;嵌套表请遍历 `blocks`)。
+    /// 段落锚定的浮动文本框文字紧随该段之后成行。
     pub fn text(&self) -> String {
-        let lines: Vec<String> = self
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Paragraph(p) => Some(p.text()),
-                Block::Table(_) => None,
-            })
-            .collect();
-        lines.join("\n")
+        blocks_text(&self.blocks)
     }
 
     /// 该单元格是否是被纵向合并“吃掉”的延续格(`w:vMerge` 为 `continue`)。
     pub fn is_vmerge_continuation(&self) -> bool {
         matches!(self.v_merge, VMerge::Continue)
     }
+}
+
+/// 块序列的直接段落文字按行拼接(忽略表格);段落锚定的文本框文字紧随该段之后。
+fn blocks_text(blocks: &[Block]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for b in blocks {
+        if let Block::Paragraph(p) = b {
+            lines.push(p.text());
+            for tb in p.text_boxes() {
+                let t = blocks_text(&tb.blocks);
+                if !t.is_empty() {
+                    lines.push(t);
+                }
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 /// 纵向合并(`w:vMerge`)状态。

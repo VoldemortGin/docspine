@@ -144,7 +144,9 @@ fn render_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use doc_core::model::{Block as DocBlock, BreakKind, Paragraph, RunSegment, Section, TextRun};
+    use doc_core::model::{
+        Block as DocBlock, BreakKind, Paragraph, RunSegment, Section, TextBox, TextRun,
+    };
     use pdf_typeset::FontResolver;
 
     /// 确定性引擎(仅内置 Liberation/Noto 兜底字体,不扫系统字体)。
@@ -202,6 +204,41 @@ mod tests {
         .expect("render");
         assert!(res.pdf.starts_with(b"%PDF-"));
         assert_eq!(count_pages(&res.pdf), 1);
+    }
+
+    /// 浮动文本框只抽取不绘制:渲染不 panic、照常出页,`text-box-not-rendered` 只报一次。
+    #[test]
+    fn text_boxes_warn_once_and_are_not_drawn() {
+        let mut anchor = TextRun::from_text("anchor");
+        for _ in 0..2 {
+            anchor.text_boxes.push(TextBox {
+                blocks: vec![para("inside box")],
+            });
+        }
+        let doc = doc_of(vec![
+            DocBlock::Paragraph(Paragraph {
+                runs: vec![anchor.clone()],
+                ..Paragraph::default()
+            }),
+            DocBlock::Paragraph(Paragraph {
+                runs: vec![anchor],
+                ..Paragraph::default()
+            }),
+        ]);
+        let res = render_with(
+            deterministic(),
+            &doc,
+            &BTreeMap::new(),
+            &RenderOptions::default(),
+        )
+        .expect("render");
+        assert_eq!(count_pages(&res.pdf), 1);
+        let n = res
+            .warnings
+            .iter()
+            .filter(|w| w.kind() == "text-box-not-rendered")
+            .count();
+        assert_eq!(n, 1);
     }
 
     /// 节界起新页 + 段内 `w:br@page` 起新页:1 + 1 + 1 = 3 页。
