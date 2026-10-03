@@ -35,15 +35,46 @@ use super::{
     skip_element, Relationship,
 };
 
-/// 解析期的只读上下文:rel 映射(图片 r:id -> media 名) + media 长度索引。
+/// 递归容器(`w:tbl` / 块级与行内 `w:sdt` / `w:hyperlink`·`w:ins`·`w:fldSimple`)的嵌套深度
+/// 上限。恶意输入可以把表格套几千层,递归下降会栈溢出 abort;超限的子树整棵
+/// [`skip_element`](迭代、不递归)静默跳过,与“未知元素跳过”的容错策略一致。
+const MAX_NEST_DEPTH: u32 = 64;
+
+/// 解析期上下文:rel 映射(图片 r:id -> media 名) + media 长度索引 + 嵌套深度计数。
 struct Ctx<'a> {
     rels: &'a BTreeMap<String, Relationship>,
     media_index: &'a BTreeMap<String, usize>,
+    depth: std::cell::Cell<u32>,
+}
+
+/// 一层递归容器的深度占位;离开作用域时深度减一。
+struct DepthGuard<'c> {
+    depth: &'c std::cell::Cell<u32>,
+}
+
+impl Drop for DepthGuard<'_> {
+    fn drop(&mut self) {
+        self.depth.set(self.depth.get() - 1);
+    }
+}
+
+impl Ctx<'_> {
+    /// 进入一层递归容器。超过 [`MAX_NEST_DEPTH`] 时返回 `None`,调用方应
+    /// [`skip_element`] 整体跳过该子树。
+    fn enter(&self) -> Option<DepthGuard<'_>> {
+        let d = self.depth.get() + 1;
+        if d > MAX_NEST_DEPTH {
+            return None;
+        }
+        self.depth.set(d);
+        Some(DepthGuard { depth: &self.depth })
+    }
 }
 
 /// 解析 `word/document.xml`。`rels_xml` 是主文档 `.rels` 文本(把图片 `r:embed/r:id`
 /// 映射到 media 名);`media_index` 是 `裸文件名 -> 字节长度`,用于回填 `image_bytes_len`。
 /// 返回 `(正文块序列, 节序列)`;节序列保证非空(无任何 `w:sectPr` 时补 Word 默认节)。
+/// 递归容器嵌套超过 [`MAX_NEST_DEPTH`] 的子树被跳过。
 pub fn parse(
     xml: &str,
     rels_xml: Option<&str>,
@@ -53,6 +84,7 @@ pub fn parse(
     let ctx = Ctx {
         rels: &rels,
         media_index,
+        depth: std::cell::Cell::new(0),
     };
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -102,7 +134,7 @@ fn parse_body<R: std::io::BufRead>(
                             sections.push(s);
                         }
                     }
-                    b"tbl" => blocks.push(Block::Table(parse_table(reader, ctx))),
+                    b"tbl" => blocks.extend(parse_table(reader, ctx).map(Block::Table)),
                     // 结构化文档标签:内容在 w:sdtContent 里,透明展开(修复内容丢失)。
                     b"sdt" => blocks.extend(parse_sdt_blocks(reader, ctx)),
                     // body 末尾的 sectPr:最后一节的页面几何。
@@ -158,7 +190,7 @@ fn parse_block_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx)
                         let (para, _) = parse_paragraph(reader, ctx);
                         blocks.push(Block::Paragraph(para));
                     }
-                    b"tbl" => blocks.push(Block::Table(parse_table(reader, ctx))),
+                    b"tbl" => blocks.extend(parse_table(reader, ctx).map(Block::Table)),
                     b"sdt" => blocks.extend(parse_sdt_blocks(reader, ctx)),
                     // 其它直接子元素(tcPr 等)整体跳过。
                     _ => skip_element(reader),
@@ -405,6 +437,10 @@ fn hyperlink_target(e: &BytesStart, ctx: &Ctx) -> Option<String> {
 /// 解析一个可能含若干 `w:r` 的容器(如 `w:hyperlink` / `w:ins` / `w:fldSimple`)。已消费
 /// 容器起始标签。嵌套的同类容器与行内 `w:sdt` 递归展开其 run;其余(含 `w:del`)整体跳过。
 fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<TextRun> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return Vec::new();
+    };
     let mut runs = Vec::new();
     let mut buf = Vec::new();
     loop {
@@ -510,6 +546,10 @@ fn break_kind(e: &BytesStart) -> BreakKind {
 /// 外壳,把 `w:sdtContent` 里的块透明展开(嵌套 sdt 经 [`parse_block_container`] 递归)。
 /// 已消费 `<w:sdt>` 起始标签。
 fn parse_sdt_blocks<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Block> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return Vec::new();
+    };
     let mut blocks = Vec::new();
     let mut buf = Vec::new();
     loop {
@@ -536,6 +576,10 @@ fn parse_sdt_blocks<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> V
 /// `w:sdtContent` 里的 run 透明展开(嵌套容器经 [`parse_run_container`] 递归)。
 /// 已消费 `<w:sdt>` 起始标签。
 fn parse_sdt_runs<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<TextRun> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return Vec::new();
+    };
     let mut runs = Vec::new();
     let mut buf = Vec::new();
     loop {
@@ -587,8 +631,13 @@ fn named_font(font: &Option<FontRef>) -> Option<String> {
 
 // ============================================================ 表格 (w:tbl)
 
-/// 解析 `w:tbl`(表格)。已消费 `<w:tbl>` 起始标签。
-fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Table {
+/// 解析 `w:tbl`(表格)。已消费 `<w:tbl>` 起始标签。嵌套超过 [`MAX_NEST_DEPTH`] 时整表
+/// 跳过并返回 `None`。
+fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Table> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return None;
+    };
     let mut table = Table::default();
     let mut buf = Vec::new();
     loop {
@@ -610,7 +659,7 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Table 
         }
         buf.clear();
     }
-    table
+    Some(table)
 }
 
 /// 解析 `w:tblPr`(表格属性,C-7):`w:tblStyle`、`w:tblBorders`、`w:tblCellMar`、
@@ -794,7 +843,9 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> C
                         let (para, _) = parse_paragraph(reader, ctx);
                         cell.blocks.push(Block::Paragraph(para));
                     }
-                    b"tbl" => cell.blocks.push(Block::Table(parse_table(reader, ctx))),
+                    b"tbl" => cell
+                        .blocks
+                        .extend(parse_table(reader, ctx).map(Block::Table)),
                     b"sdt" => cell.blocks.extend(parse_sdt_blocks(reader, ctx)),
                     _ => skip_element(reader),
                 }

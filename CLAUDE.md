@@ -27,6 +27,12 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   的代码**不准进**。
 - **容错解析,绝不 panic。** 未知元素跳过、缺失属性 → `None`、畸形输入 → 类型化 `DocError`。
   解析层对脏输入必须健壮。
+- **不被恶意输入拖垮。** zip 读取走 `doc_parse::ZipLimits`(缺省:条目数 10 000、单条目 256 MiB、
+  累计解压 1 GiB、压缩比 10 000(仅对 > 1 MiB 的条目判定;deflate 上限 ~1032:1 永远触发不了,
+  只拦其他压缩方法的炸弹)、条目名 1024 字节),绝不按条目头声明大小预分配(`take(limit + 1)` 流式读,防声明造假);拒绝绝对路径 / `..` 条目名;
+  zip 限额触限一律 `DocError::LimitExceeded { kind: LimitKind, limit, actual }`(Python 侧为
+  `DocZipError`,信息带限额种类如 `entry-bytes`);自定义限额用 `parse_*_with_limits`(Rust)。
+  `w:tbl` / `w:sdt` / 行内 run 容器递归深度上限 `MAX_NEST_DEPTH = 64`,更深的子树静默跳过(不报错)。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现;core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。
@@ -58,7 +64,7 @@ crates/
     src/export.rs  Document → 纯文本 / Markdown / HTML(纯序列化;含合并单元格转 HTML `<table>`)
   doc-parse/   OOXML 读取:zip 解包 + quick-xml 遍历 -> Document。本轮核心。#![forbid(unsafe_code)]
     src/lib.rs     parse_path / parse_bytes -> ParsedDoc { document, media };CFB 早判降级
-    src/zip_pkg.rs zip 读 API:word/document.xml / word/_rels / word/media
+    src/zip_pkg.rs zip 读 API:word/document.xml / word/_rels / word/media + ZipLimits 解压限额
     src/xml/document.rs  quick-xml walker:w:body -> blocks;段落/run/样式 + **表格(合并/嵌套/填充)** + 图片
     src/xml/props.rs     共享 rPr/pPr 属性片段解析(document.xml 与 styles.xml 同构,只写一份)
     src/xml/styles.rs    styles.xml → StyleTable:docDefaults + 样式定义(id/basedOn/type/default)

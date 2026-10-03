@@ -18,7 +18,9 @@ use std::path::Path;
 use doc_core::model::Document;
 use doc_core::{DocError, Result};
 
+pub use doc_core::LimitKind;
 use zip_pkg::Package;
+pub use zip_pkg::ZipLimits;
 
 /// 解析输出:结构化文档 + media 字节(键为裸文件名,如 `image1.png`)。
 #[derive(Debug, Clone)]
@@ -27,17 +29,28 @@ pub struct ParsedDoc {
     pub media: BTreeMap<String, Vec<u8>>,
 }
 
-/// 从磁盘路径解析一个 `.docx`。
+/// 从磁盘路径解析一个 `.docx`(缺省 [`ZipLimits`])。
 pub fn parse_path(path: &Path) -> Result<ParsedDoc> {
+    parse_path_with_limits(path, &ZipLimits::default())
+}
+
+/// 以给定 [`ZipLimits`] 从磁盘路径解析一个 `.docx`。
+pub fn parse_path_with_limits(path: &Path, limits: &ZipLimits) -> Result<ParsedDoc> {
     let bytes = std::fs::read(path)?;
-    parse_bytes(&bytes)
+    parse_bytes_with_limits(&bytes, limits)
 }
 
 /// 从内存字节解析一个 `.docx`。
 ///
 /// 若字节看起来是旧二进制 `.doc`(OLE/CFB 复合文档,魔数 `D0 CF 11 E0`),返回一个带提示的
 /// [`DocError::Unsupported`](docx 优先,旧二进制 `.doc` 走 [`legacy`] 探测,正文重建后续)。
+/// 使用缺省 [`ZipLimits`];zip 炸弹 / 超多条目等触达限额时返回 [`DocError::LimitExceeded`]。
 pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedDoc> {
+    parse_bytes_with_limits(bytes, &ZipLimits::default())
+}
+
+/// 以给定 [`ZipLimits`] 从内存字节解析一个 `.docx`(语义同 [`parse_bytes`])。
+pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<ParsedDoc> {
     // 旧二进制 .doc 的早判:CFB 魔数。给出清晰的类型化降级,而不是含糊的 zip 错误。
     if bytes.len() >= 8 && bytes[..8] == legacy::CFB_MAGIC {
         return Err(DocError::Unsupported(
@@ -48,7 +61,7 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedDoc> {
         ));
     }
 
-    let pkg = Package::open_bytes(bytes)?;
+    let pkg = Package::open_bytes_with_limits(bytes, limits)?;
 
     // 1) media:一次性收集字节 + 建立长度索引(供 Picture.image_bytes_len 回填)。
     let media = pkg.collect_media();
