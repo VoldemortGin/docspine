@@ -29,8 +29,9 @@ change.
   `dashSmallGap` render as dashes; other non-solid styles still draw solid.
   Matching adjacent paragraphs share one box. `w:between` is still not drawn and
   emits one `para-border-omitted` warning. The `para-shading-omitted` warning was
-  removed because it no longer fires. `para_box` SSIM self-reference now scores
-  0.9739 (baseline unchanged, still above the 0.97 gate).
+  removed because it no longer fires. The `para_box` SSIM baseline
+  (`conformance/ssimref/para_box.pdf`) was regenerated on 2026-10-02 for the native
+  geometry (self-reference was 0.9739 against the old baseline, now 1.0000).
 - **PDF export: superscript/subscript render with a real baseline shift** via
   pdf-typeset `ResolvedScriptPlacement` (glyph ×0.65, +0.33em / −0.11em; nominal
   size kept as line strut) instead of size-only shrinking.
