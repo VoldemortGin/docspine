@@ -22,6 +22,26 @@ change.
   panic) and `pdf-typeset`/`pdf-fonts` to pdfspine v0.11.2 (`78a64d6`).
   Behavior-preserving; no new typesetting capability adopted. All 8 SSIM
   self-reference baselines are unchanged (1.0000).
+- **PDF export draws paragraph borders (`w:pBdr`) and shading (`w:shd`) with
+  pdf-typeset's native paragraph borders** (pdfspine v0.11.2) instead of a
+  one-cell table wrapper. Bordered or shaded paragraphs that split across pages,
+  including in-paragraph page breaks, are now drawn on every page. `dashed` and
+  `dashSmallGap` render as dashes; other non-solid styles still draw solid.
+  Matching adjacent paragraphs share one box. `w:between` is still not drawn and
+  emits one `para-border-omitted` warning. The `para-shading-omitted` warning was
+  removed because it no longer fires. `para_box` SSIM self-reference now scores
+  0.9739 (baseline unchanged, still above the 0.97 gate).
+- **PDF export: superscript/subscript render with a real baseline shift** via
+  pdf-typeset `ResolvedScriptPlacement` (glyph ×0.65, +0.33em / −0.11em; nominal
+  size kept as line strut) instead of size-only shrinking.
+
+### Added
+
+- **Parse + cascade rPr `w:spacing`** (character spacing, twips, signed) **and
+  `w:position`** (manual baseline shift, half-points); mapped to engine
+  `CharacterSpacing` (condensed via `resolved_signed`) and an additive baseline
+  shift. Over-condensed paragraphs fall back to zero spacing with a
+  `signed-spacing-fallback` warning. Default documents render byte-identical PDFs.
 
 ### Fixed
 
