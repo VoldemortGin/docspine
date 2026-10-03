@@ -4,6 +4,9 @@
 //! - `w:p`   —— 段落(内含带样式的 `w:r` run + 内嵌图片;`w:pPr > w:sectPr` 是节边界)
 //! - `w:tbl` —— 表格(**本轮重点**)
 //! - `w:sdt` —— 结构化文档标签,内容透明展开(封面/目录文字不丢)
+//! - `w:customXml` —— 自定义 XML 标记,内容透明展开(块级与行内同理)
+//! - `mc:AlternateContent` —— 取第一个产出非空内容的 `mc:Choice`,否则取 `mc:Fallback`
+//!   (块级 / run 容器级 / run 内三层同一策略,见 [`parse_alternate_content`])
 //! - `w:sectPr`(body 末尾)—— 最后一节的页面几何(尺寸/边距/纸向/分栏)
 //!
 //! **表格解析做扎实**:
@@ -24,7 +27,7 @@ use std::collections::BTreeMap;
 use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
     AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, HeightRule, Orientation, Paragraph,
-    Picture, Placement, Row, RunSegment, Section, Table, TableWidth, TextRun, VMerge,
+    Picture, Placement, Row, RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge,
 };
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
 use quick_xml::events::{BytesStart, Event};
@@ -35,7 +38,8 @@ use super::{
     skip_element, Relationship,
 };
 
-/// 递归容器(`w:tbl` / 块级与行内 `w:sdt` / `w:hyperlink`·`w:ins`·`w:fldSimple`)的嵌套深度
+/// 递归容器(`w:tbl` / 块级与行内 `w:sdt`·`w:customXml` / `w:hyperlink`·`w:ins`·`w:moveTo`·
+/// `w:fldSimple`·`w:smartTag` / `mc:AlternateContent` / 文本框 `w:txbxContent`)的嵌套深度
 /// 上限。恶意输入可以把表格套几千层,递归下降会栈溢出 abort;超限的子树整棵
 /// [`skip_element`](迭代、不递归)静默跳过,与“未知元素跳过”的容错策略一致。
 const MAX_NEST_DEPTH: u32 = 64;
@@ -137,6 +141,8 @@ fn parse_body<R: std::io::BufRead>(
                     b"tbl" => blocks.extend(parse_table(reader, ctx).map(Block::Table)),
                     // 结构化文档标签:内容在 w:sdtContent 里,透明展开(修复内容丢失)。
                     b"sdt" => blocks.extend(parse_sdt_blocks(reader, ctx)),
+                    b"customXml" => blocks.extend(parse_custom_xml_blocks(reader, ctx)),
+                    b"AlternateContent" => blocks.extend(parse_alt_content_blocks(reader, ctx)),
                     // body 末尾的 sectPr:最后一节的页面几何。
                     b"sectPr" => trailing = Some(parse_sectpr(reader)),
                     _ => skip_element(reader),
@@ -175,9 +181,10 @@ fn parse_body<R: std::io::BufRead>(
     (blocks, sections)
 }
 
-/// 解析一个块容器(`w:tc` / `w:sdtContent`)的直接子块,直到容器结束标签。
-/// 假定 reader 已经消费了容器的起始标签。在这里 `w:p` -> 段落、`w:tbl` -> 表格、
-/// `w:sdt` -> 透明展开。(段内 sectPr 在这些容器里不合法,忽略。)
+/// 解析一个块容器(`w:sdtContent` / 块级 `w:customXml` / `mc:Choice`·`mc:Fallback` /
+/// `w:txbxContent`)的直接子块,直到容器结束标签。假定 reader 已经消费了容器的起始标签。
+/// 在这里 `w:p` -> 段落、`w:tbl` -> 表格、`w:sdt`·`w:customXml`·`mc:AlternateContent`
+/// -> 透明展开。(段内 sectPr 在这些容器里不合法,忽略。)
 fn parse_block_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut buf = Vec::new();
@@ -192,7 +199,9 @@ fn parse_block_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx)
                     }
                     b"tbl" => blocks.extend(parse_table(reader, ctx).map(Block::Table)),
                     b"sdt" => blocks.extend(parse_sdt_blocks(reader, ctx)),
-                    // 其它直接子元素(tcPr 等)整体跳过。
+                    b"customXml" => blocks.extend(parse_custom_xml_blocks(reader, ctx)),
+                    b"AlternateContent" => blocks.extend(parse_alt_content_blocks(reader, ctx)),
+                    // 其它直接子元素(tcPr / customXmlPr 等)整体跳过。
                     _ => skip_element(reader),
                 }
             }
@@ -298,8 +307,8 @@ fn parse_paragraph<R: std::io::BufRead>(
                     b"pPr" => sect = parse_ppr(reader, &mut para).or(sect),
                     b"r" => {
                         let run = parse_run(reader, ctx);
-                        // 丢掉完全空白且无图片的 run,避免噪声;但保留带图片的空文字 run。
-                        if !run.segments.is_empty() || !run.pictures.is_empty() {
+                        // 丢掉完全空白且无图片/文本框的 run,避免噪声;但保留带图片的空文字 run。
+                        if has_content(&run) {
                             para.runs.push(run);
                         }
                     }
@@ -311,30 +320,36 @@ fn parse_paragraph<R: std::io::BufRead>(
                             if run.link_target.is_none() {
                                 run.link_target = link.clone();
                             }
-                            if !run.segments.is_empty() || !run.pictures.is_empty() {
+                            if has_content(&run) {
                                 para.runs.push(run);
                             }
                         }
                     }
-                    // 修订插入 `w:ins` / 字段 `w:fldSimple`(缓存的字段结果)也是 run
-                    // 容器:展开其中的 run。`w:ins`(修订插入)按“接受修订”语义保留正文。
-                    b"ins" | b"fldSimple" => {
-                        for run in parse_run_container(reader, ctx) {
-                            if !run.segments.is_empty() || !run.pictures.is_empty() {
-                                para.runs.push(run);
-                            }
-                        }
+                    // 修订插入 `w:ins` / 修订移动目标 `w:moveTo` / 字段 `w:fldSimple`(缓存的
+                    // 字段结果)/ 智能标记 `w:smartTag` / 行内 `w:customXml` 也是 run 容器:
+                    // 展开其中的 run。`w:ins`·`w:moveTo` 按“接受修订”语义保留正文。
+                    b"ins" | b"moveTo" | b"fldSimple" | b"smartTag" | b"customXml" => {
+                        para.runs.extend(
+                            parse_run_container(reader, ctx)
+                                .into_iter()
+                                .filter(has_content),
+                        );
                     }
                     // 行内结构化文档标签:内容在 w:sdtContent 里,透明展开(修复内容丢失)。
                     b"sdt" => {
-                        for run in parse_sdt_runs(reader, ctx) {
-                            if !run.segments.is_empty() || !run.pictures.is_empty() {
-                                para.runs.push(run);
-                            }
-                        }
+                        para.runs
+                            .extend(parse_sdt_runs(reader, ctx).into_iter().filter(has_content));
                     }
-                    // 其余元素跳过。其中修订删除 `w:del`(其内 run 用 `w:delText`)按
-                    // “接受修订”语义整段丢弃、不输出文字,正好走这里被 skip。
+                    b"AlternateContent" => {
+                        para.runs.extend(
+                            parse_alt_content_runs(reader, ctx)
+                                .into_iter()
+                                .filter(has_content),
+                        );
+                    }
+                    // 其余元素跳过。其中修订删除 `w:del` / 修订移动来源 `w:moveFrom`(其内
+                    // run 用 `w:delText`)按“接受修订”语义整段丢弃、不输出文字,正好走这里
+                    // 被 skip;`w:moveFromRangeStart` 等范围标记是空元素,本就无内容。
                     _ => skip_element(reader),
                 }
             }
@@ -434,8 +449,10 @@ fn hyperlink_target(e: &BytesStart, ctx: &Ctx) -> Option<String> {
     }
 }
 
-/// 解析一个可能含若干 `w:r` 的容器(如 `w:hyperlink` / `w:ins` / `w:fldSimple`)。已消费
-/// 容器起始标签。嵌套的同类容器与行内 `w:sdt` 递归展开其 run;其余(含 `w:del`)整体跳过。
+/// 解析一个可能含若干 `w:r` 的容器(如 `w:hyperlink` / `w:ins` / `w:moveTo` / `w:fldSimple` /
+/// `w:smartTag` / 行内 `w:customXml` / `mc:Choice`)。已消费容器起始标签。嵌套的同类容器、
+/// 行内 `w:sdt` 与 `mc:AlternateContent` 递归展开其 run;其余(含 `w:del`·`w:moveFrom`、
+/// `w:smartTagPr`·`w:customXmlPr` 属性外壳)整体跳过。
 fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<TextRun> {
     let Some(_guard) = ctx.enter() else {
         skip_element(reader);
@@ -458,8 +475,11 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
                             runs.push(run);
                         }
                     }
-                    b"ins" | b"fldSimple" => runs.extend(parse_run_container(reader, ctx)),
+                    b"ins" | b"moveTo" | b"fldSimple" | b"smartTag" | b"customXml" => {
+                        runs.extend(parse_run_container(reader, ctx));
+                    }
                     b"sdt" => runs.extend(parse_sdt_runs(reader, ctx)),
+                    b"AlternateContent" => runs.extend(parse_alt_content_runs(reader, ctx)),
                     _ => skip_element(reader),
                 }
             }
@@ -475,8 +495,10 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
 }
 
 /// 解析 `w:r`(文本 run):`w:rPr`(字体/字号/粗斜/下划线/颜色)+ 内容分段
-/// (`w:t` -> `Text`、`w:tab` -> `Tab`、`w:br`/`w:cr` -> `Break`,`w:br@w:type` 区分
-/// 换行/换页/换栏)+ `w:drawing`/`w:pict`(内嵌图片)。已消费 `<w:r>` 起始标签。
+/// (`w:t` -> `Text`、`w:tab`/`w:ptab` -> `Tab`、`w:br`/`w:cr` -> `Break`,`w:br@w:type`
+/// 区分换行/换页/换栏;`w:sym` / `w:softHyphen` / `w:noBreakHyphen` -> 对应字符)+
+/// `w:drawing`/`w:pict`(内嵌图片与浮动文本框)+ run 内 `mc:AlternateContent`。
+/// 已消费 `<w:r>` 起始标签。字段指令 `w:instrText` 走缺省 skip(只留缓存结果)。
 fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun {
     let mut run = TextRun::default();
     let mut buf = Vec::new();
@@ -487,39 +509,37 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
                 match name.as_slice() {
                     b"rPr" => apply_direct_rpr(&mut run, props::parse_rpr(reader)),
                     b"t" => run.push_text(&read_text(reader)),
-                    b"tab" => {
-                        run.segments.push(RunSegment::Tab);
-                        skip_element(reader);
-                    }
-                    b"br" => {
-                        run.segments.push(RunSegment::Break(break_kind(&e)));
-                        skip_element(reader);
-                    }
-                    b"cr" => {
-                        run.segments.push(RunSegment::Break(BreakKind::Line));
-                        skip_element(reader);
-                    }
                     b"drawing" => {
-                        if let Some(pic) = parse_drawing(reader, ctx) {
+                        if let Some(pic) = parse_drawing(reader, ctx, &mut run.text_boxes) {
                             run.pictures.push(pic);
                         }
                     }
                     b"pict" | b"object" => {
-                        if let Some(pic) = parse_vml_pict(reader, ctx) {
+                        if let Some(pic) = parse_vml_pict(reader, ctx, &mut run.text_boxes) {
                             run.pictures.push(pic);
                         }
                     }
-                    _ => skip_element(reader),
+                    // run 内的 AlternateContent(如 wps 形状 / VML 回退):选中分支的内容
+                    // 并入本 run(分段 / 图片 / 文本框)。
+                    b"AlternateContent" => {
+                        if let Some(alt) =
+                            parse_alternate_content(reader, ctx, parse_run, |r| !has_content(r))
+                        {
+                            run.segments.extend(alt.segments);
+                            run.pictures.extend(alt.pictures);
+                            run.text_boxes.extend(alt.text_boxes);
+                        }
+                    }
+                    _ => {
+                        // 自闭合惯用的内容元素(w:tab / w:br / w:sym …)偶见写成起止对。
+                        push_run_char(&mut run, &e, &name);
+                        skip_element(reader);
+                    }
                 }
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"tab" => run.segments.push(RunSegment::Tab),
-                    b"br" => run.segments.push(RunSegment::Break(break_kind(&e))),
-                    b"cr" => run.segments.push(RunSegment::Break(BreakKind::Line)),
-                    _ => {}
-                }
+                push_run_char(&mut run, &e, &name);
             }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
@@ -529,6 +549,34 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
         buf.clear();
     }
     run
+}
+
+/// 自闭合 run 内容元素 -> 分段:`w:tab`/`w:ptab` -> 制表、`w:br`/`w:cr` -> 断,
+/// `w:sym` -> `@w:char` 十六进制码点(Symbol/Wingdings 等的 `U+F0xx` 私有区码点原样
+/// 保留,不做字体映射)、`w:softHyphen` -> U+00AD、`w:noBreakHyphen` -> U+2011。
+/// 其余元素忽略。
+fn push_run_char(run: &mut TextRun, e: &BytesStart, name: &[u8]) {
+    match name {
+        b"tab" | b"ptab" => run.segments.push(RunSegment::Tab),
+        b"br" => run.segments.push(RunSegment::Break(break_kind(e))),
+        b"cr" => run.segments.push(RunSegment::Break(BreakKind::Line)),
+        b"sym" => {
+            if let Some(c) = attr_of(e, b"char")
+                .and_then(|h| u32::from_str_radix(h.trim(), 16).ok())
+                .and_then(char::from_u32)
+            {
+                run.push_text(c.encode_utf8(&mut [0; 4]));
+            }
+        }
+        b"softHyphen" => run.push_text("\u{00AD}"),
+        b"noBreakHyphen" => run.push_text("\u{2011}"),
+        _ => {}
+    }
+}
+
+/// run 是否值得保留:有内容分段、图片或浮动文本框。
+fn has_content(run: &TextRun) -> bool {
+    !run.segments.is_empty() || !run.pictures.is_empty() || !run.text_boxes.is_empty()
 }
 
 /// 读 `w:br@w:type` 的断种类:`page` 换页、`column` 换栏、其余(含缺省 `textWrapping`)换行。
@@ -600,6 +648,84 @@ fn parse_sdt_runs<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec
         buf.clear();
     }
     runs
+}
+
+/// 解析**块级** `w:customXml`(自定义 XML 标记):跳过 `w:customXmlPr` 外壳,子块透明
+/// 展开(可嵌套)。已消费 `<w:customXml>` 起始标签。
+fn parse_custom_xml_blocks<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Block> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return Vec::new();
+    };
+    parse_block_container(reader, ctx)
+}
+
+// ============================================================ 多选内容 (mc:AlternateContent)
+
+/// 解析 `mc:AlternateContent`(Markup Compatibility,ECMA-376 Part 3)。已消费起始标签。
+///
+/// **选择策略(试解析)**:不按 `mc:Choice@Requires` 的命名空间前缀(`wps` / `w14` /
+/// `w16se` …)查白名单,而是按文档顺序把每个 `mc:Choice` 的子内容交给 `parse`
+/// 试解析,第一个 `is_empty` 判否(即本解析器认得其中元素、产出了内容)的分支即被
+/// 选中;全部为空则取 `mc:Fallback` 的解析结果。流式 reader 无法回退,故各分支都
+/// 顺序解析一遍、选中后其余丢弃——同一内容的 Choice/Fallback 两份绝不重复输出。
+/// 三层调用方共用本策略:块级([`parse_block_container`])、run 容器级
+/// ([`parse_run_container`])、run 内([`parse_run`])。
+fn parse_alternate_content<R, T>(
+    reader: &mut Reader<R>,
+    ctx: &Ctx,
+    parse: fn(&mut Reader<R>, &Ctx) -> T,
+    is_empty: impl Fn(&T) -> bool,
+) -> Option<T>
+where
+    R: std::io::BufRead,
+{
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return None;
+    };
+    let mut chosen: Option<T> = None;
+    let mut fallback: Option<T> = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"Choice" if chosen.is_none() => {
+                    let v = parse(reader, ctx);
+                    if !is_empty(&v) {
+                        chosen = Some(v);
+                    }
+                }
+                b"Fallback" if chosen.is_none() && fallback.is_none() => {
+                    fallback = Some(parse(reader, ctx));
+                }
+                _ => skip_element(reader),
+            },
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    chosen.or(fallback)
+}
+
+/// 块级 `mc:AlternateContent` -> 选中分支的块序列(策略见 [`parse_alternate_content`])。
+fn parse_alt_content_blocks<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Block> {
+    parse_alternate_content(reader, ctx, parse_block_container, |b: &Vec<Block>| {
+        b.is_empty()
+    })
+    .unwrap_or_default()
+}
+
+/// 段落内 `mc:AlternateContent`(包着 `w:r` 等)-> 选中分支的 run 序列。
+fn parse_alt_content_runs<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<TextRun> {
+    parse_alternate_content(reader, ctx, parse_run_container, |runs: &Vec<TextRun>| {
+        !runs.iter().any(has_content)
+    })
+    .unwrap_or_default()
 }
 
 /// 把直接格式化的 rPr 片段(经共享的 [`props::parse_rpr`])装上 run:原始片段存进
@@ -847,6 +973,10 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> C
                         .blocks
                         .extend(parse_table(reader, ctx).map(Block::Table)),
                     b"sdt" => cell.blocks.extend(parse_sdt_blocks(reader, ctx)),
+                    b"customXml" => cell.blocks.extend(parse_custom_xml_blocks(reader, ctx)),
+                    b"AlternateContent" => {
+                        cell.blocks.extend(parse_alt_content_blocks(reader, ctx));
+                    }
                     _ => skip_element(reader),
                 }
             }
@@ -948,7 +1078,12 @@ fn apply_tcpr_prop(e: &BytesStart, cell: &mut Cell) {
 /// `a:blip@r:embed`,并区分 `wp:inline` / `wp:anchor`(C-8:锚定的取
 /// `wp:positionH/V@relativeFrom` + `wp:posOffset` 偏移与 `@behindDoc`)。
 /// 已消费 `<w:drawing>` 起始标签,深度计数消费到其结束标签。无 blip 引用则返回 `None`。
-fn parse_drawing<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Picture> {
+/// 形状里的文本框(`wps:txbx > w:txbxContent`,含组合形状内的)抽取进 `text_boxes`。
+fn parse_drawing<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    ctx: &Ctx,
+    text_boxes: &mut Vec<TextBox>,
+) -> Option<Picture> {
     let mut rel_id = String::new();
     let mut extent: Option<(Emu, Emu)> = None;
     let mut anchored = false;
@@ -965,7 +1100,10 @@ fn parse_drawing<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Opti
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"posOffset" {
+                if name.as_slice() == b"txbxContent" {
+                    // 子 walker 消费整个文本框内容,深度不变。
+                    text_boxes.extend(parse_text_box(reader, ctx));
+                } else if name.as_slice() == b"posOffset" {
                     // 子 walker 消费整个 posOffset(文本 + 结束标签),深度不变。
                     if let (Some(h), Ok(v)) = (axis, read_text(reader).trim().parse::<Emu>()) {
                         if h {
@@ -1072,14 +1210,28 @@ fn apply_drawing_elem(
 
 /// 解析旧式 VML `w:pict`(以及 `w:object` 内的 VML):取 `v:imagedata@r:id`;
 /// 形状 `style` 属性里的 `width:`/`height:`(pt/px/in/cm/mm/pc)折算成 EMU 尺寸
-/// (C-8;VML 无 wp:extent)。已消费起始标签。无引用则返回 `None`。
-fn parse_vml_pict<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Picture> {
+/// (C-8;VML 无 wp:extent)。`v:textbox > w:txbxContent` 抽取进 `text_boxes`。
+/// 已消费起始标签,深度计数消费到其结束标签。无引用则返回 `None`。
+fn parse_vml_pict<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    ctx: &Ctx,
+    text_boxes: &mut Vec<TextBox>,
+) -> Option<Picture> {
     let mut rel_id = String::new();
     let mut extent: Option<(Emu, Emu)> = None;
+    let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
+        let event = reader.read_event_into(&mut buf);
+        match event {
+            Ok(Event::Start(ref e)) if local_name(e.name().as_ref()) == b"txbxContent" => {
+                // 子 walker 消费整个文本框内容,深度不变。
+                text_boxes.extend(parse_text_box(reader, ctx));
+            }
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                if matches!(event, Ok(Event::Start(_))) {
+                    depth += 1;
+                }
                 if local_name(e.name().as_ref()) == b"imagedata" {
                     for attr in e.attributes().flatten() {
                         if local_name(attr.key.as_ref()) == b"id" {
@@ -1088,12 +1240,17 @@ fn parse_vml_pict<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Opt
                     }
                 } else if extent.is_none() {
                     // v:shape / v:rect 等形状元素:style="width:36pt;height:24pt;…"。
-                    if let Some(style) = attr_of(&e, b"style") {
+                    if let Some(style) = attr_of(e, b"style") {
                         extent = vml_style_extent(&style);
                     }
                 }
             }
-            Ok(Event::End(_)) => break,
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    break; // w:pict / w:object 自身结束。
+                }
+                depth -= 1;
+            }
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
@@ -1101,6 +1258,18 @@ fn parse_vml_pict<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Opt
         buf.clear();
     }
     resolve_picture(ctx, rel_id, extent)
+}
+
+/// 解析一个文本框内容 `w:txbxContent`(段落 / 表格块序列)。已消费起始标签。
+/// 嵌套超过 [`MAX_NEST_DEPTH`] 时整体跳过并返回 `None`。
+fn parse_text_box<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<TextBox> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return None;
+    };
+    Some(TextBox {
+        blocks: parse_block_container(reader, ctx),
+    })
 }
 
 /// 从 VML `style` 属性解析 `(width, height)` → EMU。两者都在才算(单边尺寸交

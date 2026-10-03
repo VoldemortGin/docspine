@@ -879,3 +879,27 @@ def test_char_spacing_changes_word_width_and_keeps_text_order(twips, sign):
     expected = (len("Gamma") - 1) * twips / 20.0
     assert sign * delta > 0, f"间距方向不对: {delta=}"
     assert abs(delta - expected) <= 2.0, f"{delta=} {expected=}"
+
+
+# ============================================================ 浮动文本框:只抽取不绘制
+
+_VML_TEXTBOX_BODY = (
+    '<w:p><w:r><w:t>Anchor</w:t></w:r><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml">'
+    '<v:shape style="width:72pt;height:36pt"><v:textbox><w:txbxContent>'
+    "<w:p><w:r><w:t>Boxed</w:t></w:r></w:p>"
+    "</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"
+    "<w:p><w:r><w:t>Next</w:t></w:r></w:p>"
+)
+
+
+def test_text_box_extracted_but_pdf_warns_and_skips():
+    """文本框文字进 to_text;to_pdf 不 panic、不画文本框,恰好一条 text-box UserWarning。"""
+    doc = docspine.open_bytes(_body(_VML_TEXTBOX_BODY))
+    assert doc.to_text() == "Anchor\nBoxed\nNext"
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = doc.to_pdf()
+    box_warnings = [w for w in ws if "text box" in str(w.message)]
+    assert len(box_warnings) == 1, [str(w.message) for w in ws]
+    assert issubclass(box_warnings[0].category, UserWarning)
+    assert _open_pdf(pdf)[0].get_text().split() == ["Anchor", "Next"]

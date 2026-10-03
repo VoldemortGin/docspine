@@ -8,6 +8,8 @@
 //! - [`to_html`]:段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带 `rowspan`/`colspan`),
 //!   文本经 HTML 转义。
 //!
+//! 浮动文本框([`crate::model::TextBox`])的内容紧随其锚定段落之后,按同样规则输出。
+//!
 //! 容错:空段落跳过、空表跳过、未知样式当普通段落,绝不 panic。
 
 use crate::model::{Block, Cell, Document, Table, VMerge};
@@ -17,9 +19,19 @@ use crate::model::{Block, Cell, Document, Table, VMerge};
 /// 全文按块拼成纯文本:段落各占一行,表格每行的单元格用 `\t` 连接,块/行之间用 `\n`。
 pub fn to_text(doc: &Document) -> String {
     let mut out: Vec<String> = Vec::new();
-    for b in &doc.body {
+    text_blocks(&doc.body, &mut out);
+    out.join("\n")
+}
+
+fn text_blocks(blocks: &[Block], out: &mut Vec<String>) {
+    for b in blocks {
         match b {
-            Block::Paragraph(p) => out.push(p.text()),
+            Block::Paragraph(p) => {
+                out.push(p.text());
+                for tb in p.text_boxes() {
+                    text_blocks(&tb.blocks, out);
+                }
+            }
             Block::Table(t) => {
                 for row in &t.rows {
                     let cells: Vec<String> = row.cells.iter().map(|c| c.text()).collect();
@@ -28,7 +40,6 @@ pub fn to_text(doc: &Document) -> String {
             }
         }
     }
-    out.join("\n")
 }
 
 // ============================================================ Markdown
@@ -37,16 +48,23 @@ pub fn to_text(doc: &Document) -> String {
 /// 含合并(或嵌套表)时退回 HTML `<table>` 以保真 `rowspan`/`colspan`。
 pub fn to_markdown(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for b in &doc.body {
+    markdown_blocks(&doc.body, &mut parts);
+    parts.join("\n\n")
+}
+
+fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>) {
+    for b in blocks {
         match b {
             Block::Paragraph(p) => {
                 let t = p.text();
-                if t.is_empty() {
-                    continue;
+                if !t.is_empty() {
+                    match heading_level(p.style.as_deref()) {
+                        Some(level) => parts.push(format!("{} {t}", "#".repeat(level as usize))),
+                        None => parts.push(t),
+                    }
                 }
-                match heading_level(p.style.as_deref()) {
-                    Some(level) => parts.push(format!("{} {t}", "#".repeat(level as usize))),
-                    None => parts.push(t),
+                for tb in p.text_boxes() {
+                    markdown_blocks(&tb.blocks, parts);
                 }
             }
             Block::Table(t) => {
@@ -57,7 +75,6 @@ pub fn to_markdown(doc: &Document) -> String {
             }
         }
     }
-    parts.join("\n\n")
 }
 
 /// 一张表 -> Markdown。无合并/无嵌套表时用 GFM 管道表(首行作表头);否则退回 HTML 表。
@@ -107,27 +124,33 @@ fn table_needs_html(table: &Table) -> bool {
 /// 全文导出为 HTML 片段:段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带合并)。文本经转义。
 pub fn to_html(doc: &Document) -> String {
     let mut out = String::new();
-    for b in &doc.body {
+    html_blocks(&doc.body, &mut out);
+    out.trim_end().to_string()
+}
+
+fn html_blocks(blocks: &[Block], out: &mut String) {
+    for b in blocks {
         match b {
             Block::Paragraph(p) => {
                 let t = p.text();
-                if t.is_empty() {
-                    continue;
-                }
-                match heading_level(p.style.as_deref()) {
-                    Some(level) => {
-                        out.push_str(&format!("<h{level}>{}</h{level}>\n", escape_html(&t)))
+                if !t.is_empty() {
+                    match heading_level(p.style.as_deref()) {
+                        Some(level) => {
+                            out.push_str(&format!("<h{level}>{}</h{level}>\n", escape_html(&t)))
+                        }
+                        None => out.push_str(&format!("<p>{}</p>\n", escape_html(&t))),
                     }
-                    None => out.push_str(&format!("<p>{}</p>\n", escape_html(&t))),
+                }
+                for tb in p.text_boxes() {
+                    html_blocks(&tb.blocks, out);
                 }
             }
             Block::Table(t) => {
-                push_html_table(t, &mut out);
+                push_html_table(t, out);
                 out.push('\n');
             }
         }
     }
-    out.trim_end().to_string()
 }
 
 /// 把一张表渲染成 HTML `<table>`,正确还原 `colspan`(`gridSpan`)与 `rowspan`(`vMerge`)。
@@ -161,7 +184,7 @@ fn push_html_table(table: &Table, out: &mut String) {
                 out.push_str(&format!(" rowspan=\"{rowspan}\""));
             }
             out.push('>');
-            out.push_str(&html_cell_content(cell));
+            out.push_str(&html_cell_content(&cell.blocks));
             out.push_str("</");
             out.push_str(tag);
             out.push_str(">\n");
@@ -212,15 +235,22 @@ fn vmerge_rowspan(table: &Table, starts: &[Vec<usize>], start_row: usize, g: usi
     span
 }
 
-/// 单元格内容 -> HTML:段落文字转义后以 `<br>` 连接,嵌套表递归成内层 `<table>`。
-fn html_cell_content(cell: &Cell) -> String {
+/// 单元格内容 -> HTML:段落文字转义后以 `<br>` 连接,嵌套表递归成内层 `<table>`;
+/// 段落锚定的文本框内容紧随该段之后。
+fn html_cell_content(blocks: &[Block]) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for b in &cell.blocks {
+    for b in blocks {
         match b {
             Block::Paragraph(p) => {
                 let t = p.text();
                 if !t.is_empty() {
                     parts.push(escape_html(&t));
+                }
+                for tb in p.text_boxes() {
+                    let inner = html_cell_content(&tb.blocks);
+                    if !inner.is_empty() {
+                        parts.push(inner);
+                    }
                 }
             }
             Block::Table(t) => {

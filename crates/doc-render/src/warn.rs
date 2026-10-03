@@ -47,6 +47,9 @@ pub enum RenderWarning {
     /// 缺省制表位间隔(`defaultTabStop`)等距推进 `\t`,自定义停位/前导符/对齐被
     /// 忽略(C-9 声明降级;正文照常)。
     CustomTabStopsIgnored,
+    /// 浮动文本框(`wps:txbx` / VML `v:textbox` 的 `w:txbxContent`)只做抽取(进
+    /// `to_text` / `to_markdown` / `to_html`),PDF **不绘制**(v1 声明降级;正文照常)。
+    TextBoxNotRendered,
 }
 
 impl RenderWarning {
@@ -78,6 +81,7 @@ impl RenderWarning {
             RenderWarning::InternalLinkNotRendered => "internal-link-not-rendered",
             RenderWarning::RowTooTall => "row-too-tall",
             RenderWarning::CustomTabStopsIgnored => "custom-tab-stops-ignored",
+            RenderWarning::TextBoxNotRendered => "text-box-not-rendered",
         }
     }
 }
@@ -151,6 +155,13 @@ impl fmt::Display for RenderWarning {
                     f,
                     "custom tab stops (w:tabs) are ignored; tabs advance by the \
                      default interval in this version"
+                )
+            }
+            RenderWarning::TextBoxNotRendered => {
+                write!(
+                    f,
+                    "floating text boxes are extracted to text/markdown/html but not \
+                     drawn in the PDF in this version"
                 )
             }
         }

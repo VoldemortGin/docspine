@@ -38,6 +38,11 @@ all sharing the same `ocrspine` OCR core.
 | Cell shading/fill, cell width (dxa), table grid columns | parsed |
 | Row height, header rows | parsed |
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent | parsed |
+| Transparent wrappers: `w:sdt`, `w:customXml` (block + inline), `w:smartTag`, `w:hyperlink`, `w:fldSimple` (cached result); complex fields keep the cached result, `w:instrText` never leaks | parsed |
+| Revisions (accept-all semantics): `w:ins` / `w:moveTo` kept, `w:del` / `w:moveFrom` dropped | parsed |
+| `mc:AlternateContent`: first `mc:Choice` that yields content, else `mc:Fallback` (never both) | parsed |
+| Floating text boxes (`wps:txbx` / VML `v:textbox` → `w:txbxContent`): extracted as `run["text_boxes"]`, emitted right after the anchoring paragraph in `to_text` / `to_markdown` / `to_html`; **not drawn** in PDF (`text-box-not-rendered` warning) | extracted |
+| Special run content: `w:sym` (code point kept as-is, incl. `U+F0xx` symbol-font PUA), `w:softHyphen` → U+00AD (invisible in PDF), `w:noBreakHyphen` → U+2011, `w:ptab` → tab | parsed |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table reconstruction from OCR boxes → grid | working (`reconstruct_image_table`) |
 | PDF export: `to_pdf()` / `save_pdf()` — flowed layout + pagination; per-section page geometry (`sectPr`), styles.xml + theme effective styles, numbering engine, table fidelity (borders/merges/margins, cross-page; cell vAlign top/center/bottom), paragraph borders/shading (native engine paragraph borders, drawn on every page fragment; `w:between` not drawn), inline images + absolutely-positioned anchored images (no text wrap), hyperlinks as PDF link annotations, `defaultTabStop` tab advance, superscript/subscript with a real baseline shift + `w:position`, character spacing `w:spacing` (expanded and condensed) | working |

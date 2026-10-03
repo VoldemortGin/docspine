@@ -32,7 +32,14 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   只拦其他压缩方法的炸弹)、条目名 1024 字节),绝不按条目头声明大小预分配(`take(limit + 1)` 流式读,防声明造假);拒绝绝对路径 / `..` 条目名;
   zip 限额触限一律 `DocError::LimitExceeded { kind: LimitKind, limit, actual }`(Python 侧为
   `DocZipError`,信息带限额种类如 `entry-bytes`);自定义限额用 `parse_*_with_limits`(Rust)。
-  `w:tbl` / `w:sdt` / 行内 run 容器递归深度上限 `MAX_NEST_DEPTH = 64`,更深的子树静默跳过(不报错)。
+  `w:tbl` / `w:sdt` / `w:customXml` / 行内 run 容器(`w:hyperlink`·`w:ins`·`w:moveTo`·`w:fldSimple`·
+  `w:smartTag`)/ `mc:AlternateContent` / 文本框 `w:txbxContent` 递归深度上限 `MAX_NEST_DEPTH = 64`,
+  更深的子树静默跳过(不报错)。
+- **正文不静默丢失。** 透明容器(`w:sdt` / `w:customXml` / `w:smartTag` / `w:hyperlink` / `w:fldSimple`)
+  展开;修订按“接受全部”:`w:ins`·`w:moveTo` 保留、`w:del`·`w:moveFrom` 丢弃;复杂字段只留缓存结果
+  (`w:instrText` 不进正文);`mc:AlternateContent` 取第一个产出非空内容的 `mc:Choice`,否则 `mc:Fallback`
+  (绝不两份都出);浮动文本框只抽取(`TextRun.text_boxes`,导出紧随锚定段落),PDF 不画 + 告警。
+  仍未覆盖:页眉页脚 / 脚注尾注 / 批注部件、行级·单元格级 `w:sdt`/`w:customXml`、`m:oMath`。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现;core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。
