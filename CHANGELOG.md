@@ -13,6 +13,27 @@ change.
 
 ## [Unreleased]
 
+### Changed
+
+- **PDF export dependencies aligned to pdfspine v0.8.0** (`249a3f7`): `pdf-typeset`
+  and dev `pdf-fonts` now share one workspace git rev; README and a migration
+  validation report updated.
+- **Git dependencies aligned**: `ocrspine` to `041958a` (fixes a reading-order sort
+  panic) and `pdf-typeset`/`pdf-fonts` to pdfspine v0.11.2 (`78a64d6`).
+  Behavior-preserving; no new typesetting capability adopted. All 8 SSIM
+  self-reference baselines are unchanged (1.0000).
+
+### Fixed
+
+- **`doc-ocr` panic isolation at the engine boundary** (engine call, image decode,
+  engine construction): panics now surface as `DocOcrError` instead of escaping to
+  Python as `PanicException`. Image-table comparators use `f64::total_cmp`, and
+  words with NaN/Inf bbox or confidence are dropped.
+- **CI Python matrix** never got past `maturin develop` ("Couldn't find a
+  virtualenv"), so pytest and the `.ssimref` SSIM gate had not run in CI before.
+  It now builds via `pip install -e ".[test]"` with `pytest -ra`; the `test` extra
+  declares `pdfspine>=0.8,<0.12`.
+
 ## [0.5.1] — 2026-07-30
 
 ### Changed

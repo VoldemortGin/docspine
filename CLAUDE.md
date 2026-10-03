@@ -41,7 +41,7 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   工作区布局 / image_table 几何 / release.yml 的 git dep 写法),但**绝不**写入或修改它们的
   **任何**文件。
 - **依赖 `../ocrspine`(git dep,**不是** path)。** 在 `[workspace.dependencies]` 里一次性声明
-  `ocrspine = { git = "...", rev = "732975f..." }`(同 pptspine 现在的写法),`doc-ocr` 用
+  `ocrspine = { git = "...", rev = "041958a…" }`(同 pptspine 现在的写法),`doc-ocr` 用
   `ocrspine.workspace = true`。家族发布统一走 git dep —— CI 的 `maturin build` 会自己
   `cargo fetch` ocrspine,runner 上不需要 sibling checkout。
 
