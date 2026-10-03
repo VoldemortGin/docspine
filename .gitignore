@@ -24,3 +24,9 @@ wheelhouse/
 
 # LibreOffice oracle advisory 中间产物(local-only,scripts/lo_oracle_ssim.py)
 .lo-oracle/
+
+# cargo-fuzz:语料由 `make_seeds` 现场生成(不落二进制 fixture);构建/崩溃产物不提交
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/target/
+fuzz/coverage/

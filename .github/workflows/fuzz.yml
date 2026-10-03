@@ -1,0 +1,54 @@
+# Nightly cargo-fuzz smoke: proves "the parse layer never panics" on fresh mutations.
+# Deliberately NOT part of ci.yml (nightly-only, time-boxed, non-deterministic).
+# On a crash the artifacts are uploaded and the job fails. Reproduce locally with
+#   cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>
+
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "max_total_time per target (seconds)"
+        default: "300"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse_docx, parse_document_xml, render_pdf]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Generate seed corpus
+        # Seeds are synthesized in code (no binary fixtures committed).
+        run: cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds
+      - name: Fuzz ${{ matrix.target }}
+        run: >
+          cargo fuzz run ${{ matrix.target }} --
+          -max_total_time=${{ github.event.inputs.seconds || '300' }}
+          -rss_limit_mb=2048
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
