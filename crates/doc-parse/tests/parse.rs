@@ -641,6 +641,46 @@ fn direct_rpr_rstyle_szcs_underline_kind_highlight_vert_align() {
     assert!(!p.runs[1].underline);
 }
 
+/// rPr 的 `w:spacing@w:val`(字符间距,twip,可负)与 `w:position@w:val`(半磅,可负)
+/// 落进 `run.rpr`;非整数值容错为未设置;段落 pPr 的同名 `w:spacing`(段前段后)
+/// 与 pPr 内嵌段落标记 rPr 都不串进 run。
+#[test]
+fn direct_rpr_char_spacing_and_position() {
+    let parsed = parse_body_xml(
+        r#"<w:p>
+             <w:pPr>
+               <w:spacing w:before="120" w:after="240"/>
+               <w:rPr><w:spacing w:val="99"/><w:position w:val="9"/></w:rPr>
+             </w:pPr>
+             <w:r>
+               <w:rPr><w:spacing w:val="40"/><w:position w:val="6"/></w:rPr>
+               <w:t>wide</w:t>
+             </w:r>
+             <w:r>
+               <w:rPr><w:spacing w:val="-20"/><w:position w:val="-4"/></w:rPr>
+               <w:t>tight</w:t>
+             </w:r>
+             <w:r>
+               <w:rPr><w:spacing w:val="abc"/><w:position w:val="1.5"/></w:rPr>
+               <w:t>bad</w:t>
+             </w:r>
+             <w:r><w:t>plain</w:t></w:r>
+           </w:p>"#,
+    );
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(p.runs[0].rpr.spacing, Some(40));
+    assert_eq!(p.runs[0].rpr.position, Some(6));
+    assert_eq!(p.runs[1].rpr.spacing, Some(-20), "负间距(紧缩)保真");
+    assert_eq!(p.runs[1].rpr.position, Some(-4), "负 position(降低)保真");
+    assert_eq!(p.runs[2].rpr.spacing, None, "非法值容错为未设置");
+    assert_eq!(p.runs[2].rpr.position, None);
+    assert_eq!(p.runs[3].rpr.spacing, None);
+    assert_eq!(p.runs[3].rpr.position, None);
+    assert_eq!(p.ppr.space_before, Some(120), "段落 spacing 照常解析");
+}
+
 // ============================================================ C-6:numbering 部件接线
 
 /// 把 document.xml 与若干额外部件压成最小合法 docx(numbering / styles 部件测试用)。

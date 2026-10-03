@@ -752,3 +752,80 @@ def test_paragraph_border_dash_mapping_and_solid_fallback():
     assert len(small) == 1 and "3" in next(iter(small)) and "1" in next(iter(small))
     assert dashes("double") == solid and dashes("dotted") == solid
     assert solid != dashed and solid != small
+
+
+# ============================================================ 上下标基线偏移 / position / 字符间距
+
+
+def _run(text: str, rpr: str = "", sz: int = 48) -> str:
+    return (
+        f'<w:r><w:rPr><w:sz w:val="{sz}"/>{rpr}</w:rPr>'
+        f'<w:t xml:space="preserve">{text}</w:t></w:r>'
+    )
+
+
+def _span_origins(pdf: bytes) -> dict[str, tuple[float, float, float]]:
+    """回读每个 span 的(基线 x, 基线 y, 字号)——按文本索引。"""
+    d = _open_pdf(pdf)
+    out: dict[str, tuple[float, float, float]] = {}
+    for b in d[0].get_text("dict")["blocks"]:
+        for line in b.get("lines", []):
+            for s in line["spans"]:
+                out[s["text"].strip()] = (s["origin"][0], s["origin"][1], s["size"])
+    return out
+
+
+def test_superscript_subscript_and_position_shift_baseline():
+    """24pt 正文:上标基线上抬 0.33em(7.92pt)、下标下沉 0.11em(2.64pt)、字形 ×0.65;
+    ``w:position=12``(半磅)上抬 6pt、``-8`` 降低 4pt。偏移与设计值相差 ≤1pt。"""
+    body = (
+        "<w:p>"
+        + _run("Base")
+        + _run("2", '<w:vertAlign w:val="superscript"/>')
+        + _run("Mid")
+        + _run("3", '<w:vertAlign w:val="subscript"/>')
+        + _run("Up", '<w:position w:val="12"/>')
+        + _run("Down", '<w:position w:val="-8"/>')
+        + "</w:p>"
+    )
+    spans = _span_origins(_render(_body(body)))
+    base_y = spans["Base"][1]
+    assert abs(spans["Mid"][1] - base_y) < 0.01, "正文同基线"
+    sup_x, sup_y, sup_size = spans["2"]
+    assert sup_y < base_y, "上标高于基线(PDF 回读 y 向下)"
+    assert abs((base_y - sup_y) - 0.33 * 24) <= 1.0
+    assert abs(sup_size - 0.65 * 24) <= 0.5
+    sub_y, sub_size = spans["3"][1], spans["3"][2]
+    assert sub_y > base_y, "下标低于基线"
+    assert abs((sub_y - base_y) - 0.11 * 24) <= 1.0
+    assert abs(sub_size - 0.65 * 24) <= 0.5
+    assert abs((base_y - spans["Up"][1]) - 6.0) <= 1.0
+    assert abs((spans["Down"][1] - base_y) - 4.0) <= 1.0
+    assert sup_x > spans["Base"][0], "上标排在 Base 之后"
+
+
+def _word_width(pdf: bytes, word: str) -> float:
+    w = next(w for w in _open_pdf(pdf)[0].get_text_words() if w[4] == word)
+    return w[2] - w[0]
+
+
+@pytest.mark.parametrize(
+    ("twips", "sign"),
+    [(20, 1), (-20, -1)],
+    ids=["expanded-1pt", "condensed-1pt"],
+)
+def test_char_spacing_changes_word_width_and_keeps_text_order(twips, sign):
+    """``w:spacing``:+20twip(1pt)加宽、-20twip(-1pt)紧缩;读回文本顺序正确,
+    词宽按 (字数-1)×间距 变化(2pt 内)。(12pt 下 ≥2pt 的加宽会让回读器按字间隙
+    把词拆成单字——回读启发式所致,非排版错误,故取 1pt。)"""
+    words = "Alpha Beta Gamma"
+    plain = _render(_body("<w:p>" + _run(words, sz=24) + "</w:p>"))
+    spaced_xml = "<w:p>" + _run(words, f'<w:spacing w:val="{twips}"/>', sz=24) + "</w:p>"
+    data = _body(spaced_xml)
+    spaced = _render(data)
+    assert _open_pdf(spaced)[0].get_text().split() == words.split()
+    assert docspine.open_bytes(data).to_text().split() == words.split()
+    delta = _word_width(spaced, "Gamma") - _word_width(plain, "Gamma")
+    expected = (len("Gamma") - 1) * twips / 20.0
+    assert sign * delta > 0, f"间距方向不对: {delta=}"
+    assert abs(delta - expected) <= 2.0, f"{delta=} {expected=}"

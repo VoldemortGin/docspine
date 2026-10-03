@@ -533,6 +533,10 @@ pub struct RunProps {
     pub highlight: Option<Highlight>,
     /// 纵向对齐(`w:vertAlign`:上标/下标/基线)。值属性。
     pub vert_align: Option<VertAlign>,
+    /// 字符间距(`w:spacing@w:val`,twip;正 = 加宽,负 = 紧缩)。值属性。
+    pub spacing: Option<Twips>,
+    /// 手动基线偏移(`w:position@w:val`,**半磅**;正 = 上抬,负 = 降低)。值属性。
+    pub position: Option<i64>,
     /// 字符样式引用(`w:rStyle@w:val`;仅直接格式化侧有意义)。其 basedOn 链插在
     /// 段落样式链之后、直接格式化之前参与级联与 toggle 计数(C-4)。
     pub r_style: Option<String>,
@@ -570,6 +574,12 @@ impl RunProps {
         }
         if other.vert_align.is_some() {
             self.vert_align = other.vert_align;
+        }
+        if other.spacing.is_some() {
+            self.spacing = other.spacing;
+        }
+        if other.position.is_some() {
+            self.position = other.position;
         }
     }
 }
@@ -825,6 +835,10 @@ pub struct EffectiveRunProps {
     pub highlight: Option<Color>,
     /// 纵向对齐(上标/下标/基线,缺省基线)。
     pub vert_align: VertAlign,
+    /// 字符间距(磅;twip 已换算,缺省 0;负 = 紧缩)。
+    pub char_spacing_pt: f32,
+    /// 手动基线偏移(磅;半磅已除 2,缺省 0;正 = 上抬)。
+    pub position_pt: f32,
 }
 
 /// 有效行距(twip 已换算成磅)。
@@ -1100,6 +1114,8 @@ fn resolve_run_props(
             Some(Highlight::Off) | None => None,
         },
         vert_align: merged.vert_align.unwrap_or_default(),
+        char_spacing_pt: merged.spacing.map_or(0.0, |tw| twips_to_points(tw) as f32),
+        position_pt: merged.position.map_or(0.0, |hp| hp as f32 / 2.0),
     }
 }
 
@@ -1846,6 +1862,57 @@ mod tests {
 
         // 未知高亮名容错为未设置。
         assert_eq!(Highlight::from_attr("wat"), None);
+    }
+
+    /// 字符间距(`w:spacing`,twip)/ 基线偏移(`w:position`,半磅):值属性级联——
+    /// 默认 0;样式继承(basedOn);直接格式化覆盖;负值保真;换算成磅。
+    #[test]
+    fn char_spacing_and_position_cascade() {
+        // 默认:无任何设置 → 0。
+        let doc = doc_with_styles(vec![]);
+        let eff = resolve_run(&doc, &styled_para(None), &TextRun::default());
+        assert_eq!(eff.char_spacing_pt, 0.0);
+        assert_eq!(eff.position_pt, 0.0);
+
+        // Base 设 spacing=40twip(2pt)+ position=6 半磅(3pt);Child basedOn Base 只改 position。
+        let doc = doc_with_styles(vec![
+            (
+                "Base",
+                para_style(
+                    None,
+                    RunProps {
+                        spacing: Some(40),
+                        position: Some(6),
+                        ..RunProps::default()
+                    },
+                    ParaProps::default(),
+                ),
+            ),
+            (
+                "Child",
+                para_style(
+                    Some("Base"),
+                    RunProps {
+                        position: Some(-4),
+                        ..RunProps::default()
+                    },
+                    ParaProps::default(),
+                ),
+            ),
+        ]);
+        let eff = resolve_run(&doc, &styled_para(Some("Base")), &TextRun::default());
+        assert_eq!(eff.char_spacing_pt, 2.0);
+        assert_eq!(eff.position_pt, 3.0);
+        let eff = resolve_run(&doc, &styled_para(Some("Child")), &TextRun::default());
+        assert_eq!(eff.char_spacing_pt, 2.0, "spacing 从 basedOn 继承");
+        assert_eq!(eff.position_pt, -2.0, "派生样式覆盖 position(负值降低)");
+
+        // 直接格式化覆盖样式链:负间距(紧缩)。
+        let mut run = TextRun::default();
+        run.rpr.spacing = Some(-30);
+        let eff = resolve_run(&doc, &styled_para(Some("Child")), &run);
+        assert_eq!(eff.char_spacing_pt, -1.5);
+        assert_eq!(eff.position_pt, -2.0);
     }
 
     /// 段落 spacing / ind:每个子属性独立级联;hanging 优先并给出**负**首行缩进。

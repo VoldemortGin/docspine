@@ -100,6 +100,18 @@ fn apply_rpr_prop(e: &BytesStart, p: &mut RunProps) {
                 p.vert_align = Some(v);
             }
         }
+        b"spacing" => {
+            // 字符间距(twip,可负);非整数值容错为未设置。
+            if let Some(v) = attr_of(e, b"val").and_then(|s| s.parse().ok()) {
+                p.spacing = Some(v);
+            }
+        }
+        b"position" => {
+            // 手动基线偏移(半磅,可负);非整数值容错为未设置。
+            if let Some(v) = attr_of(e, b"val").and_then(|s| s.parse().ok()) {
+                p.position = Some(v);
+            }
+        }
         b"rStyle" => {
             p.r_style = attr_of(e, b"val").or(p.r_style.take());
         }
