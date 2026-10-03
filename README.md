@@ -160,6 +160,25 @@ crates/
   py-bindings PyO3 _core extension (the FFI chokepoint); `ocr` feature gates OCR.
 ```
 
+## Fuzzing
+
+`fuzz/` is a standalone cargo-fuzz package (excluded from the workspace; needs nightly and
+`cargo install cargo-fuzz`). Only panics / aborts / OOM count as failures — any `Err` is fine.
+A daily CI job (`.github/workflows/fuzz.yml`) runs every target; it is not part of `ci.yml`.
+
+```bash
+cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds   # synthesize seeds into fuzz/corpus/ (git-ignored)
+cargo +nightly fuzz run parse_document_xml -- -max_total_time=120 -rss_limit_mb=2048
+cargo +nightly fuzz run parse_docx         -- -max_total_time=120 -rss_limit_mb=2048
+cargo +nightly fuzz run render_pdf         -- -max_total_time=120 -rss_limit_mb=2048
+```
+
+Reproduce a crash with `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>` and
+shrink it with `cargo +nightly fuzz tmin <target> <crash-file>`. To add a target: create
+`fuzz/fuzz_targets/<name>.rs`, register a `[[bin]]` in `fuzz/Cargo.toml`, add it to the matrix in
+`fuzz.yml`, and add seeds in `fuzz/seed.rs`. Fixed crashes get a regression test built in code
+(see `crates/doc-parse/tests/fuzz_regressions.rs`), never a committed binary.
+
 ## Deferred / follow-up
 
 - Full legacy binary `.doc` (OLE/CFB / `[MS-DOC]`) body reconstruction (FIB,

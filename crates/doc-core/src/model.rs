@@ -519,12 +519,37 @@ impl Color {
     /// 把 `"RRGGBB"` 十六进制串解析成颜色;`"auto"` / 非法输入返回 `None`。
     pub fn from_hex(hex: &str) -> Option<Self> {
         let h = hex.trim();
-        if h.eq_ignore_ascii_case("auto") || h.len() != 6 {
+        // 非 ASCII 的 6 字节串(如多字节字符)按字节切片会落在非字符边界上 panic(fuzz 发现),
+        // 十六进制色值必为 ASCII,先挡掉。
+        if h.eq_ignore_ascii_case("auto") || h.len() != 6 || !h.is_ascii() {
             return None;
         }
         let r = u8::from_str_radix(&h[0..2], 16).ok()?;
         let g = u8::from_str_radix(&h[2..4], 16).ok()?;
         let b = u8::from_str_radix(&h[4..6], 16).ok()?;
         Some(Color { rgb: [r, g, b] })
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::Color;
+
+    #[test]
+    fn from_hex_basic() {
+        assert_eq!(Color::from_hex("FF8000"), Some(Color::new([255, 128, 0])));
+        assert_eq!(Color::from_hex(" 00ff00 "), Some(Color::new([0, 255, 0])));
+        assert_eq!(Color::from_hex("auto"), None);
+        assert_eq!(Color::from_hex("GG0000"), None);
+        assert_eq!(Color::from_hex("FFF"), None);
+    }
+
+    /// 回归(cargo-fuzz):6 字节的非 ASCII 串曾在非字符边界切片处 panic。
+    #[test]
+    fn from_hex_non_ascii_does_not_panic() {
+        assert_eq!(Color::from_hex("DD\u{FFFD}\u{FFFD}"), None); // 2 + 3 + 3 = 8 bytes
+        assert_eq!(Color::from_hex("D\u{FFFD}D"), None); // 1 + 3 + 1 = 5 bytes
+        assert_eq!(Color::from_hex("DD\u{FFFD}D"), None); // 2 + 3 + 1 = 6 bytes: 切点 4 在字符内
+        assert_eq!(Color::from_hex("\u{4e2d}\u{6587}"), None); // 6 bytes,切点 2 在字符内
     }
 }
