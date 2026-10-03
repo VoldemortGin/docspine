@@ -78,11 +78,12 @@ VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/maturin develop --release --locked --uv
 ```
 
 Cargo fetches `pdf-typeset` and its test font dependency from the same official
-pdfspine v0.8.0 commit, `f1f6ab4208876b0ba867edd76cc4e5da7ad8add2`;
+pdfspine v0.11.2 commit, `78a64d6e252ab739fcbad66c0d7f5328a080d667`, and
+`ocrspine` from commit `041958aa6f8d70d3957e8f9e27896cf0cbc42511`;
 no sibling pdfspine checkout is needed. Dependency installation may use the
 network; document parsing, PDF export and OCR run locally. The installed
 `ocrspine-models` package supplies OCR weights. See the
-[migration validation](docs/pdfspine-v080-validation.md) for wheel/export checks
+[migration validation](docs/pdfspine-v0112-validation.md) for wheel/export checks
 and their coverage limits.
 
 ## Use from Python

@@ -872,7 +872,7 @@ dependencies = [
 [[package]]
 name = "ocrspine"
 version = "0.0.1"
-source = "git+https://github.com/VoldemortGin/ocrspine?rev=732975f0233cd6500edfbbb82bc06c2332369871#732975f0233cd6500edfbbb82bc06c2332369871"
+source = "git+https://github.com/VoldemortGin/ocrspine?rev=041958aa6f8d70d3957e8f9e27896cf0cbc42511#041958aa6f8d70d3957e8f9e27896cf0cbc42511"
 dependencies = [
  "image",
  "rayon",
@@ -917,8 +917,8 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pdf-core"
-version = "0.8.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=f1f6ab4208876b0ba867edd76cc4e5da7ad8add2#f1f6ab4208876b0ba867edd76cc4e5da7ad8add2"
+version = "0.11.2"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=78a64d6e252ab739fcbad66c0d7f5328a080d667#78a64d6e252ab739fcbad66c0d7f5328a080d667"
 dependencies = [
  "bytes",
  "flate2",
@@ -928,8 +928,8 @@ dependencies = [
 
 [[package]]
 name = "pdf-edit"
-version = "0.8.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=f1f6ab4208876b0ba867edd76cc4e5da7ad8add2#f1f6ab4208876b0ba867edd76cc4e5da7ad8add2"
+version = "0.11.2"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=78a64d6e252ab739fcbad66c0d7f5328a080d667#78a64d6e252ab739fcbad66c0d7f5328a080d667"
 dependencies = [
  "pdf-core",
  "pdf-fonts",
@@ -939,8 +939,8 @@ dependencies = [
 
 [[package]]
 name = "pdf-fonts"
-version = "0.8.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=f1f6ab4208876b0ba867edd76cc4e5da7ad8add2#f1f6ab4208876b0ba867edd76cc4e5da7ad8add2"
+version = "0.11.2"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=78a64d6e252ab739fcbad66c0d7f5328a080d667#78a64d6e252ab739fcbad66c0d7f5328a080d667"
 dependencies = [
  "pdf-core",
  "smol_str",
@@ -950,8 +950,8 @@ dependencies = [
 
 [[package]]
 name = "pdf-image"
-version = "0.8.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=f1f6ab4208876b0ba867edd76cc4e5da7ad8add2#f1f6ab4208876b0ba867edd76cc4e5da7ad8add2"
+version = "0.11.2"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=78a64d6e252ab739fcbad66c0d7f5328a080d667#78a64d6e252ab739fcbad66c0d7f5328a080d667"
 dependencies = [
  "fax",
  "flate2",
@@ -968,19 +968,20 @@ dependencies = [
 
 [[package]]
 name = "pdf-text"
-version = "0.8.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=f1f6ab4208876b0ba867edd76cc4e5da7ad8add2#f1f6ab4208876b0ba867edd76cc4e5da7ad8add2"
+version = "0.11.2"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=78a64d6e252ab739fcbad66c0d7f5328a080d667#78a64d6e252ab739fcbad66c0d7f5328a080d667"
 dependencies = [
  "pdf-core",
  "pdf-fonts",
+ "sha2",
  "smol_str",
  "unicode-normalization",
 ]
 
 [[package]]
 name = "pdf-typeset"
-version = "0.8.0"
-source = "git+https://github.com/VoldemortGin/pdfspine?rev=f1f6ab4208876b0ba867edd76cc4e5da7ad8add2#f1f6ab4208876b0ba867edd76cc4e5da7ad8add2"
+version = "0.11.2"
+source = "git+https://github.com/VoldemortGin/pdfspine?rev=78a64d6e252ab739fcbad66c0d7f5328a080d667#78a64d6e252ab739fcbad66c0d7f5328a080d667"
 dependencies = [
  "fontdb",
  "pdf-core",
