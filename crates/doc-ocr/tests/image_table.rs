@@ -85,3 +85,32 @@ fn min_confidence_filters_words() {
     // 被过滤掉那一格不应出现。
     assert!(t.cells.iter().all(|c| c.text != "R0C2"));
 }
+
+#[test]
+fn non_finite_words_do_not_panic_and_finite_result_unchanged() {
+    let baseline = reconstruct_from_words(&grid_words(), &ImageTableOptions::default());
+
+    let mut words = grid_words();
+    words.push(word("nan", f64::NAN, 10.0, 60.0, 30.0));
+    words.push(word("inf", 10.0, f64::NEG_INFINITY, f64::INFINITY, 30.0));
+    words.push(word("nan2", 1.0, 2.0, f64::NAN, f64::NAN));
+    let mut bad_conf = word("badconf", 10.0, 10.0, 60.0, 30.0);
+    bad_conf.confidence = f32::INFINITY;
+    words.push(bad_conf);
+
+    let got = reconstruct_from_words(&words, &ImageTableOptions::default());
+    assert_eq!(got, baseline);
+}
+
+#[test]
+fn all_non_finite_words_yield_empty() {
+    let words = vec![
+        word("a", f64::NAN, f64::NAN, f64::NAN, f64::NAN),
+        word("b", f64::INFINITY, 0.0, 1.0, 1.0),
+    ];
+    assert!(
+        reconstruct_from_words(&words, &ImageTableOptions::default())
+            .tables
+            .is_empty()
+    );
+}
