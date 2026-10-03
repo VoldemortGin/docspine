@@ -28,7 +28,7 @@ doc-render = { path = "crates/doc-render", version = "0.0.1" }
 # Git dep (NOT path): the family publishes uniformly via git, and CI's
 # `maturin build` then `cargo fetch`es ocrspine itself — no sibling checkout
 # needed on the runner. ---
-ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f0233cd6500edfbbb82bc06c2332369871" }
+ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "041958aa6f8d70d3957e8f9e27896cf0cbc42511" }
 
 # --- sibling family crate: the shared typesetting engine behind faithful
 # docx → PDF export (pdfspine Phase A; doc-render uses
@@ -36,8 +36,8 @@ ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f023
 # the family publishes uniformly via git, and CI's `maturin build` then
 # `cargo fetch`es pdfspine itself — no sibling checkout needed on the runner.
 # Bump the rev deliberately, never track a branch. ---
-pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "f1f6ab4208876b0ba867edd76cc4e5da7ad8add2" }
-pdf-fonts = { git = "https://github.com/VoldemortGin/pdfspine", rev = "f1f6ab4208876b0ba867edd76cc4e5da7ad8add2" }
+pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "78a64d6e252ab739fcbad66c0d7f5328a080d667" }
+pdf-fonts = { git = "https://github.com/VoldemortGin/pdfspine", rev = "78a64d6e252ab739fcbad66c0d7f5328a080d667" }
 
 # --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
 thiserror = "2"
