@@ -95,12 +95,23 @@ pub fn reconstruct_table_from_image(
     Ok(reconstruct_from_words(&words, opts))
 }
 
+/// bbox 四个坐标与置信度都是有限数。NaN/Inf 会污染聚类、网格线与槽位计算,边界处直接丢弃。
+pub(crate) fn is_finite_word(w: &OcrWord) -> bool {
+    w.bbox.x0.is_finite()
+        && w.bbox.y0.is_finite()
+        && w.bbox.x1.is_finite()
+        && w.bbox.y1.is_finite()
+        && w.confidence.is_finite()
+}
+
 /// 纯几何内核:从已 OCR 出的词重建表格(无 IO,便于单测)。
 pub fn reconstruct_from_words(words: &[OcrWord], opts: &ImageTableOptions) -> ImageTableResult {
     // 只留非空、足够置信的词。
     let words: Vec<&OcrWord> = words
         .iter()
-        .filter(|w| w.confidence >= opts.min_confidence && !w.text.trim().is_empty())
+        .filter(|w| {
+            is_finite_word(w) && w.confidence >= opts.min_confidence && !w.text.trim().is_empty()
+        })
         .collect();
     if words.len() < 2 {
         return ImageTableResult::default();
@@ -143,14 +154,9 @@ pub fn reconstruct_from_words(words: &[OcrWord], opts: &ImageTableOptions) -> Im
             ordered.sort_by(|&a, &b| {
                 let (_, ya) = center(words[a]);
                 let (_, yb) = center(words[b]);
-                ya.partial_cmp(&yb)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(
-                        bbox(words[a])
-                            .0
-                            .partial_cmp(&bbox(words[b]).0)
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                    )
+                // total_cmp 是严格全序(NaN 也有确定位置),sort 不会因违反全序而 panic。
+                ya.total_cmp(&yb)
+                    .then(bbox(words[a]).0.total_cmp(&bbox(words[b]).0))
             });
 
             let text = ordered
@@ -230,12 +236,7 @@ fn cluster_rows(words: &[&OcrWord], gap_ratio: f64) -> Vec<Band> {
     let threshold = (gap_ratio * median_h).max(1.0);
 
     let mut idx: Vec<usize> = (0..words.len()).collect();
-    idx.sort_by(|&a, &b| {
-        center(words[a])
-            .1
-            .partial_cmp(&center(words[b]).1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    idx.sort_by(|&a, &b| center(words[a]).1.total_cmp(&center(words[b]).1));
 
     let mut bands: Vec<Band> = Vec::new();
     let mut run_mean = 0.0_f64;
@@ -270,12 +271,7 @@ fn cluster_cols(words: &[&OcrWord], gap_ratio: f64) -> Vec<Band> {
     let threshold = (gap_ratio * median_w).max(1.0);
 
     let mut idx: Vec<usize> = (0..words.len()).collect();
-    idx.sort_by(|&a, &b| {
-        center(words[a])
-            .0
-            .partial_cmp(&center(words[b]).0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    idx.sort_by(|&a, &b| center(words[a]).0.total_cmp(&center(words[b]).0));
 
     let mut bands: Vec<Band> = Vec::new();
     let mut prev_cx: Option<f64> = None;
@@ -411,7 +407,7 @@ fn median(vals: impl IntoIterator<Item = f64>) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(f64::total_cmp);
     let n = v.len();
     if n % 2 == 1 {
         v[n / 2]
