@@ -13,7 +13,8 @@
 //!   eastAsia 字体、其余喂 ascii 字体(引擎的 `RunStyle` 只有单一 family 槽;
 //!   ea 缺省时整段用 ascii 字体,CJK 字符由引擎的逐字回退链兜底)。
 //! - caps/smallCaps → 文本大写(smallCaps 不缩小,v1 近似);vanish → 跳过(隐藏);
-//!   上/下标 → 字号 ×0.65 近似(引擎无基线偏移)。
+//!   上/下标 → 引擎 `ResolvedScriptPlacement`(字形 ×0.65 + 真基线偏移,名义字号不变);
+//!   `w:position` → 手动基线偏移(与上下标叠加);`w:spacing` → `CharacterSpacing`。
 //! - `pageBreakBefore` → 段前插 `Block::PageBreak`(节首块除外——本就新起一页)。
 //! - **列表(C-6)**:带 `numPr` 的段落按文档顺序推进 [`ListCounters`],最终标签串
 //!   喂引擎的 [`ListLabel`](标签右对齐到正文起点前 `gutter` 处);悬挂缩进折成
@@ -33,16 +34,26 @@ use doc_core::style::{
     EffectiveParaProps, EffectiveRunProps, Justification, ParaBorders, VertAlign,
 };
 use pdf_typeset::{
-    Align, Block, BorderEdge, CellBorders, ColumnWidth, ImageSpec, LineSpacing, ListLabel,
-    PageGeom, ParaProps, Rgb, Run, RunStyle, TableCell, TableRow, TableSpec,
+    Align, Block, BorderEdge, CellBorders, CharacterSpacing, ColumnWidth, ImageSpec, LineSpacing,
+    ListLabel, PageGeom, ParaProps, ResolvedScriptPlacement, Rgb, Run, RunStyle, TableCell,
+    TableRow, TableSpec,
 };
 
 use crate::section::page_geom;
 use crate::table::{is_visible, map_table, stroke};
 use crate::warn::RenderWarning;
 
-/// 上/下标的字号近似缩放(引擎无基线偏移,v1 只缩字号)。
+/// 上/下标的字形缩放(沿用 v1 的 0.65:介于 LibreOffice 实测 58% 与常见 Word 观感 ≈2/3
+/// 之间;引擎不给 OOXML 缺省,由调用方定)。名义字号不变,仍作行高支柱。
 const VERT_ALIGN_SCALE: f64 = 0.65;
+
+/// 上标基线上抬量(名义字号的倍数):0.33em,对齐 LibreOffice 的缺省上标 33%
+/// (本机 LO 对 docx `vertAlign` 实测 ≈0.375em,随字体略变)。
+const SUPERSCRIPT_SHIFT_EM: f64 = 0.33;
+
+/// 下标基线下沉量(名义字号的倍数):0.11em(本机 LO 对 docx `vertAlign=subscript`
+/// 实测 Liberation Serif 24pt 下沉 2.6pt ≈ 0.108em)。
+const SUBSCRIPT_SHIFT_EM: f64 = 0.11;
 
 /// 不支持矢量图(EMF/WMF)占位框的浅灰填充与描边(观感对齐 pptspine 的图表灰框)。
 const PLACEHOLDER_FILL: Rgb = Rgb::new(0.90, 0.90, 0.90);
@@ -738,11 +749,10 @@ fn push_runs(runs: &mut Vec<Run>, text: &str, eff: &EffectiveRunProps, link: Opt
 
 /// 有效 run 属性 + 选定 family → 引擎 run 样式。
 pub(crate) fn run_style(eff: &EffectiveRunProps, family: &str) -> RunStyle {
-    let scale = match eff.vert_align {
-        VertAlign::Baseline => 1.0,
-        VertAlign::Superscript | VertAlign::Subscript => VERT_ALIGN_SCALE,
-    };
-    let mut s = RunStyle::new(family, f64::from(eff.size_pt) * scale);
+    let size = f64::from(eff.size_pt);
+    let mut s = RunStyle::new(family, size);
+    s.script_placement = script_placement(eff, size);
+    s.character_spacing = character_spacing(eff.char_spacing_pt);
     s.bold = eff.bold;
     s.italic = eff.italic;
     s.underline = eff.underline;
@@ -750,6 +760,34 @@ pub(crate) fn run_style(eff: &EffectiveRunProps, family: &str) -> RunStyle {
     s.color = eff.color.map(rgb).unwrap_or(Rgb::BLACK);
     s.highlight = eff.highlight.map(rgb);
     s
+}
+
+/// 上下标 + `w:position` → 引擎基线偏移(正 = 上抬,磅)。两者皆缺省时 `None`
+/// (保持原排版路径,字节不变);引擎拒收的非法值(非有限)降级为不偏移,不 panic。
+fn script_placement(eff: &EffectiveRunProps, size: f64) -> Option<ResolvedScriptPlacement> {
+    let (scale, script_shift) = match eff.vert_align {
+        VertAlign::Baseline => (1.0, 0.0),
+        VertAlign::Superscript => (VERT_ALIGN_SCALE, SUPERSCRIPT_SHIFT_EM * size),
+        VertAlign::Subscript => (VERT_ALIGN_SCALE, -SUBSCRIPT_SHIFT_EM * size),
+    };
+    let shift = script_shift + f64::from(eff.position_pt);
+    if scale == 1.0 && shift == 0.0 {
+        return None;
+    }
+    ResolvedScriptPlacement::new(scale, shift).ok()
+}
+
+/// `w:spacing`(磅)→ 引擎字符间距:非负走 `new`,负值(紧缩)走 `resolved_signed`。
+/// 负间距由引擎的无错布局路径预检:可前进的段落照常紧缩,不可前进的段落只把负间距
+/// 归零并发 `SignedSpacingFallback` 告警(文本不丢)。非有限值降级为 0。
+fn character_spacing(points: f32) -> CharacterSpacing {
+    let points = f64::from(points);
+    let spacing = if points < 0.0 {
+        CharacterSpacing::resolved_signed(points)
+    } else {
+        CharacterSpacing::new(points)
+    };
+    spacing.unwrap_or_default()
 }
 
 /// doc-core 颜色 → 引擎 RGB(0..=1 浮点)。
@@ -1107,7 +1145,85 @@ mod tests {
         assert_eq!(s.color, Rgb::new(1.0, 0.0, 0.0));
         assert_eq!(s.highlight, Some(Rgb::new(1.0, 1.0, 0.0)));
         assert_eq!(runs[1].text, "SHOUT");
-        assert!((runs[2].style.size - 6.5).abs() < 1e-9, "上标 10pt × 0.65");
+        assert_eq!(runs[2].style.size, 10.0, "上标保留名义字号(行高支柱)");
+        let p = runs[2].style.script_placement.expect("上标走引擎基线偏移");
+        assert!((p.glyph_scale() - 0.65).abs() < 1e-9, "字形 ×0.65");
+        assert!(
+            (p.baseline_shift() - 3.3).abs() < 1e-9,
+            "上抬 0.33em = 3.3pt"
+        );
+        assert_eq!(s.script_placement, None, "非上下标不设置");
+        assert_eq!(s.character_spacing, CharacterSpacing::default());
+    }
+
+    /// 下标下沉、`w:position` 手动基线偏移(半磅 → 磅,可与上下标叠加)、
+    /// `w:spacing` 字符间距(twip → 磅,正用 `new`、负用 `resolved_signed`)。
+    #[test]
+    fn script_position_and_char_spacing_map_to_engine() {
+        let run_with = |text: &str, f: &dyn Fn(&mut TextRun)| {
+            let mut r = TextRun::from_text(text);
+            r.rpr.sz = Some(12.0);
+            f(&mut r);
+            r
+        };
+        let runs_in = vec![
+            run_with("sub", &|r| r.rpr.vert_align = Some(VertAlign::Subscript)),
+            run_with("up", &|r| r.rpr.position = Some(6)),
+            run_with("down", &|r| r.rpr.position = Some(-4)),
+            run_with("both", &|r| {
+                r.rpr.vert_align = Some(VertAlign::Superscript);
+                r.rpr.position = Some(2);
+            }),
+            run_with("wide", &|r| r.rpr.spacing = Some(40)),
+            run_with("tight", &|r| r.rpr.spacing = Some(-20)),
+            run_with("base", &|r| r.rpr.vert_align = Some(VertAlign::Baseline)),
+        ];
+        let doc = doc_with_body(vec![DocBlock::Paragraph(Paragraph {
+            runs: runs_in,
+            ..Paragraph::default()
+        })]);
+        let blocks = &map_document(&doc).sections[0].blocks;
+        let Block::Paragraph(_, runs) = &blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        let placement = |i: usize| runs[i].style.script_placement.expect("有基线偏移");
+        assert!(runs.iter().all(|r| r.style.size == 12.0), "名义字号不变");
+
+        let sub = placement(0);
+        assert!((sub.glyph_scale() - 0.65).abs() < 1e-9);
+        assert!(
+            (sub.baseline_shift() + 0.11 * 12.0).abs() < 1e-9,
+            "下标下沉 0.11em"
+        );
+
+        let up = placement(1);
+        assert_eq!(up.glyph_scale(), 1.0, "position 不缩字形");
+        assert!(
+            (up.baseline_shift() - 3.0).abs() < 1e-9,
+            "6 半磅 = 上抬 3pt"
+        );
+        assert!(
+            (placement(2).baseline_shift() + 2.0).abs() < 1e-9,
+            "-4 半磅 = 降低 2pt"
+        );
+
+        let both = placement(3);
+        assert!((both.glyph_scale() - 0.65).abs() < 1e-9);
+        assert!(
+            (both.baseline_shift() - (0.33 * 12.0 + 1.0)).abs() < 1e-9,
+            "上标偏移 + position 叠加"
+        );
+
+        assert_eq!(
+            runs[4].style.character_spacing.points(),
+            2.0,
+            "40twip = 2pt"
+        );
+        assert_eq!(runs[5].style.character_spacing.points(), -1.0, "负间距保真");
+        assert_eq!(runs[4].style.script_placement, None);
+
+        assert_eq!(runs[6].style.script_placement, None, "显式 baseline 不设置");
+        assert_eq!(runs[6].style.character_spacing.points(), 0.0);
     }
 
     /// 超链接:外链目标落进 `RunStyle.link`(引擎发 /Link 注解);文档内部书签跳转

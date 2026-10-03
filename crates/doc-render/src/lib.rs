@@ -349,4 +349,41 @@ mod tests {
             .iter()
             .any(|w| w.kind() == "style-based-on-cycle"));
     }
+
+    /// 负字符间距:可前进的紧缩照常排、无回退告警;紧缩过度(簇不前进)时引擎只把
+    /// 该段负间距归零 + `signed-spacing-fallback` 告警,文本照常渲染、不 panic。
+    #[test]
+    fn negative_char_spacing_condenses_or_falls_back_with_warning() {
+        let render = |twips: i64| {
+            let mut run = TextRun::from_text("Condensed text");
+            run.rpr.spacing = Some(twips);
+            let doc = doc_of(vec![DocBlock::Paragraph(Paragraph {
+                runs: vec![run],
+                ..Paragraph::default()
+            })]);
+            render_with(
+                deterministic(),
+                &doc,
+                &BTreeMap::new(),
+                &RenderOptions::default(),
+            )
+            .expect("render")
+        };
+        let mild = render(-20); // -1pt
+        assert!(mild.pdf.starts_with(b"%PDF"));
+        assert!(
+            !mild
+                .warnings
+                .iter()
+                .any(|w| w.kind() == "signed-spacing-fallback"),
+            "-1pt 可前进,不应回退: {:?}",
+            mild.warnings
+        );
+        let extreme = render(-2000); // -100pt:簇前进量为负
+        assert!(extreme.pdf.starts_with(b"%PDF"));
+        assert!(extreme
+            .warnings
+            .iter()
+            .any(|w| w.kind() == "signed-spacing-fallback"));
+    }
 }

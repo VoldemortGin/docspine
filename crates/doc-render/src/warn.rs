@@ -61,6 +61,7 @@ impl RenderWarning {
                 ExportWarning::GradientDegraded { .. } => "gradient-degraded",
                 ExportWarning::BoxOverflowClipped { .. } => "box-overflow-clipped",
                 ExportWarning::ImageDropped { .. } => "image-dropped",
+                ExportWarning::SignedSpacingFallback { .. } => "signed-spacing-fallback",
                 // 引擎枚举 #[non_exhaustive]:后续 TS 阶段的新变体先归到统称。
                 _ => "engine",
             },

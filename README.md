@@ -40,7 +40,7 @@ all sharing the same `ocrspine` OCR core.
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent | parsed |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table reconstruction from OCR boxes → grid | working (`reconstruct_image_table`) |
-| PDF export: `to_pdf()` / `save_pdf()` — flowed layout + pagination; per-section page geometry (`sectPr`), styles.xml + theme effective styles, numbering engine, table fidelity (borders/merges/margins, cross-page; cell vAlign top/center/bottom), paragraph borders/shading, inline images + absolutely-positioned anchored images (no text wrap), hyperlinks as PDF link annotations, `defaultTabStop` tab advance | working |
+| PDF export: `to_pdf()` / `save_pdf()` — flowed layout + pagination; per-section page geometry (`sectPr`), styles.xml + theme effective styles, numbering engine, table fidelity (borders/merges/margins, cross-page; cell vAlign top/center/bottom), paragraph borders/shading, inline images + absolutely-positioned anchored images (no text wrap), hyperlinks as PDF link annotations, `defaultTabStop` tab advance, superscript/subscript with a real baseline shift + `w:position`, character spacing `w:spacing` (expanded and condensed) | working |
 | Legacy binary `.doc` (OLE/CFB) | probe + typed downgrade (full body deferred) |
 
 Parsing is tolerant: unknown elements are skipped, missing attributes become
