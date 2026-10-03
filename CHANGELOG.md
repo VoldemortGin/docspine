@@ -57,6 +57,10 @@ change.
   hardcodes macOS Hiragino: it picks a preinstalled non-fallback CJK font per OS
   (Hiragino Sans GB / SimSun / Noto Sans CJK SC) and skips when none is installed.
 
+### Security
+
+- `.docx` zip reads are now bounded by `doc_parse::ZipLimits` (defaults: 10,000 entries, 256 MiB per entry, 1 GiB total decompressed, 10,000:1 compression ratio for entries > 1 MiB — unreachable by deflate's ~1032:1 ceiling, so it only catches bombs using other compression methods — and 1024-byte names). Declared sizes are no longer trusted for allocation (forged headers are caught while streaming), and absolute / drive / `..` entry paths are rejected. Violations raise `DocError::LimitExceeded` (Python: `DocZipError`, message names the limit). New Rust entry points `parse_bytes_with_limits` / `parse_path_with_limits`. Nested tables / content controls / inline run containers deeper than 64 levels are now skipped instead of overflowing the stack.
+
 ## [0.5.1] — 2026-07-30
 
 ### Changed
