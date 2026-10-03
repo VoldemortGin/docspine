@@ -28,8 +28,8 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
 - **容错解析,绝不 panic。** 未知元素跳过、缺失属性 → `None`、畸形输入 → 类型化 `DocError`。
   解析层对脏输入必须健壮。
 - **不被恶意输入拖垮。** zip 读取走 `doc_parse::ZipLimits`(缺省:条目数 10 000、单条目 256 MiB、
-  累计解压 1 GiB、声明压缩比 1000(仅对声明 > 1 MiB 的条目判定)、条目名 1024 字节),绝不按
-  条目头声明大小预分配(`take(limit + 1)` 流式读,防声明造假);拒绝绝对路径 / `..` 条目名;
+  累计解压 1 GiB、压缩比 10 000(仅对 > 1 MiB 的条目判定;deflate 上限 ~1032:1 永远触发不了,
+  只拦其他压缩方法的炸弹)、条目名 1024 字节),绝不按条目头声明大小预分配(`take(limit + 1)` 流式读,防声明造假);拒绝绝对路径 / `..` 条目名;
   zip 限额触限一律 `DocError::LimitExceeded { kind: LimitKind, limit, actual }`(Python 侧为
   `DocZipError`,信息带限额种类如 `entry-bytes`);自定义限额用 `parse_*_with_limits`(Rust)。
   `w:tbl` / `w:sdt` / 行内 run 容器递归深度上限 `MAX_NEST_DEPTH = 64`,更深的子树静默跳过(不报错)。

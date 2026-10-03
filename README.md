@@ -48,7 +48,8 @@ Parsing is tolerant: unknown elements are skipped, missing attributes become
 
 Hostile input is bounded. Reading the zip package enforces `doc_parse::ZipLimits`
 (defaults: 10,000 entries, 256 MiB per entry, 1 GiB total decompressed, a
-1000:1 declared compression ratio for entries over 1 MiB, 1024-byte entry
+10,000:1 compression ratio for entries over 1 MiB — unreachable by deflate's
+~1032:1 ceiling, so it only catches bombs using other methods — 1024-byte entry
 names); declared sizes are never trusted for allocation, and absolute or `..`
 entry paths are rejected. Hitting a zip limit raises `DocZipError` in Python
 (the message names the limit, e.g. `limit exceeded: entry-bytes (...)`); Rust

@@ -27,7 +27,9 @@ pub struct ZipLimits {
     /// 全包累计实际解压字节上限。缺省 1 GiB。
     pub max_total_bytes: u64,
     /// 单条目压缩比(未压缩 / 压缩)上限,声明值与实际读出值各查一次;仅当未压缩量 > 1 MiB
-    /// 时判定。缺省 1000。
+    /// 时判定。缺省 10 000:deflate 的理论上限约 1032:1,永远触发不了它(大块零的纯色位图
+    /// 等合法 media 不误伤);内存风险已由单条目 / 总量上限兜住,这里只拦 bzip2 / zstd /
+    /// lzma 等其他压缩方法的极端比值炸弹。
     pub max_compression_ratio: u32,
     /// 条目名字节长度上限。缺省 1024。
     pub max_name_len: usize,
@@ -39,7 +41,7 @@ impl Default for ZipLimits {
             max_entries: 10_000,
             max_entry_bytes: 256 * MIB,
             max_total_bytes: 1024 * MIB,
-            max_compression_ratio: 1000,
+            max_compression_ratio: 10_000,
             max_name_len: 1024,
         }
     }

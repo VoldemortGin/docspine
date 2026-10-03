@@ -92,7 +92,7 @@ fn default_limits_values() {
     assert_eq!(l.max_entries, 10_000);
     assert_eq!(l.max_entry_bytes, 256 * 1024 * 1024);
     assert_eq!(l.max_total_bytes, 1024 * 1024 * 1024);
-    assert_eq!(l.max_compression_ratio, 1000);
+    assert_eq!(l.max_compression_ratio, 10_000);
     assert_eq!(l.max_name_len, 1024);
 }
 
@@ -206,43 +206,60 @@ fn compression_ratio_bomb_declared() {
         docx_with(&[("word/media/bomb.bin", &zeros, CompressionMethod::Deflated)]),
         200 * 1024 * 1024,
     );
-    let (limit, _) = expect_limit(parse_bytes(&bytes), LimitKind::CompressionRatio);
-    assert_eq!(limit, 1000);
+    let (limit, actual) = expect_limit(parse_bytes(&bytes), LimitKind::CompressionRatio);
+    assert_eq!(limit, 10_000);
+    assert!(actual > 10_000);
 }
 
 #[test]
 fn compression_ratio_real_zeros() {
-    // 真实的大块零:4 MiB 零经 deflate 压到 ~4 KiB,比值 ~1028:1,缺省限额(1000)即拦。
+    // 真实的大块零:4 MiB 零经 deflate 压到 ~4 KiB,比值 ~1028:1(deflate 理论上限 ~1032)。
+    // 缺省限额(10 000)下合法,不误伤纯色位图之类的 media。
     let zeros = vec![0u8; 4 * 1024 * 1024];
     let bytes = docx_with(&[("word/media/zeros.bin", &zeros, CompressionMethod::Deflated)]);
-    let (limit, actual) = expect_limit(parse_bytes(&bytes), LimitKind::CompressionRatio);
-    assert_eq!(limit, 1000);
-    assert!(actual > 1000);
-    // 放宽比值后同一个包合法(4 MiB 远低于单条目上限)。
-    let relaxed = ZipLimits {
-        max_compression_ratio: 2000,
+    parse_bytes(&bytes).unwrap();
+    // 收紧到 1000 后同一个包被拦。
+    let strict = ZipLimits {
+        max_compression_ratio: 1000,
         ..ZipLimits::default()
     };
-    parse_bytes_with_limits(&bytes, &relaxed).unwrap();
+    let (limit, actual) = expect_limit(
+        parse_bytes_with_limits(&bytes, &strict),
+        LimitKind::CompressionRatio,
+    );
+    assert_eq!(limit, 1000);
+    assert!(actual > 1000);
 }
 
 #[test]
 fn small_compressible_file_not_flagged_by_ratio() {
-    // 512 KiB 零的比值也 > 1000,但未压缩量 ≤ 1 MiB,不判定压缩比。
+    // 512 KiB 零的比值也 > 1000,但未压缩量 ≤ 1 MiB,即便限额收紧到 1 也不判定压缩比。
     let zeros = vec![0u8; 512 * 1024];
     let bytes = docx_with(&[("word/media/zeros.bin", &zeros, CompressionMethod::Deflated)]);
-    parse_bytes(&bytes).unwrap();
+    let strict = ZipLimits {
+        max_compression_ratio: 1,
+        ..ZipLimits::default()
+    };
+    parse_bytes_with_limits(&bytes, &strict).unwrap();
 }
 
 #[test]
 fn ratio_rechecked_on_actual_bytes() {
-    // 声明 16 字节(过得了声明期比值检查),实际解压出 2 MiB 零:读完后的复查拦下。
+    // 声明 16 字节(过得了声明期比值检查),实际解压出 2 MiB 零(~1028:1):读完后的复查
+    // 按收紧的 1000 拦下。
     let zeros = vec![0u8; 2 * 1024 * 1024];
     let bytes = patch_declared_size(
         docx_with(&[("word/media/zeros.bin", &zeros, CompressionMethod::Deflated)]),
         16,
     );
-    let (limit, actual) = expect_limit(parse_bytes(&bytes), LimitKind::CompressionRatio);
+    let strict = ZipLimits {
+        max_compression_ratio: 1000,
+        ..ZipLimits::default()
+    };
+    let (limit, actual) = expect_limit(
+        parse_bytes_with_limits(&bytes, &strict),
+        LimitKind::CompressionRatio,
+    );
     assert_eq!(limit, 1000);
     assert!(actual > 1000);
 }
