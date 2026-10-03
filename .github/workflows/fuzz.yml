@@ -42,7 +42,7 @@ jobs:
         run: cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds
       - name: Fuzz ${{ matrix.target }}
         run: >
-          cargo fuzz run ${{ matrix.target }} --
+          cargo +nightly fuzz run ${{ matrix.target }} --
           -max_total_time=${{ github.event.inputs.seconds || '300' }}
           -rss_limit_mb=2048
       - name: Upload crash artifacts
