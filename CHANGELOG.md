@@ -46,6 +46,15 @@ change.
 
 ### Fixed
 
+- **Parsing no longer silently drops content**: `w:moveTo` (kept; `w:moveFrom`
+  dropped), `w:smartTag`, `w:customXml` (block + inline), `mc:AlternateContent`
+  (first `mc:Choice` that yields content, else `mc:Fallback`), and floating text
+  boxes (`wps:txbx` / VML `v:textbox`; extracted into `run["text_boxes"]` and
+  emitted after the anchoring paragraph in `to_text` / `to_markdown` / `to_html`,
+  not drawn in PDF — new `text-box-not-rendered` warning). `w:sym`,
+  `w:softHyphen`, `w:noBreakHyphen` and `w:ptab` now produce characters. A VML
+  `w:pict` containing a nested shape no longer truncates the rest of the document
+  (previously a résumé with a nested VML image extracted 9 tokens instead of 1446).
 - **`doc-ocr` panic isolation at the engine boundary** (engine call, image decode,
   engine construction): panics now surface as `DocOcrError` instead of escaping to
   Python as `PanicException`. Image-table comparators use `f64::total_cmp`, and
