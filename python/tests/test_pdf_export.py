@@ -3,13 +3,17 @@
 回读器用姊妹包 ``pdfspine``(fitz 兼容面):文本回读 / 词坐标 / 画op / 光栅。
 未安装 pdfspine 时整文件跳过(CI 的 C-10 阶段再把它钉进测试矩阵)。
 几何断言只涉及我们自己控制的量(页面盒、边距、缩进),容差 2pt;
-字体名断言依赖本机字体环境(macOS Hiragino),按 PRD 属地化为本地自证门。
+字体名断言依赖本机字体环境:按平台挑一款系统预装的非缺省回退 CJK 字体,
+找不到(如无 CJK 字体的 Linux runner)或开了确定性字体时 skip。
 """
 
 from __future__ import annotations
 
+import os
+import sys
 import warnings
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -251,10 +255,56 @@ def test_highlight_and_strike_paint_ops():
     assert "s" in kinds, f"删除线应画描边线: {kinds}"
 
 
+# (family, 字体文件名 glob):每平台优先挑**不是**引擎缺省 CJK 回退的字体
+# (macOS 回退 PingFang、Windows 回退 Microsoft YaHei),断言才区分"走了 eastAsia 槽"与"逐字回退"。
+_EAST_ASIA_CANDIDATES: dict[str, list[tuple[str, str]]] = {
+    "darwin": [("Hiragino Sans GB", "Hiragino Sans GB*")],
+    "win32": [("SimSun", "simsun.tt*"), ("Microsoft YaHei", "msyh.tt*")],
+    "linux": [
+        ("Noto Sans CJK SC", "NotoSansCJK*"),
+        ("WenQuanYi Zen Hei", "wqy-zenhei*"),
+    ],
+}
+
+
+def _font_dirs() -> list[Path]:
+    home = Path.home()
+    if sys.platform == "darwin":
+        return [
+            Path("/System/Library/Fonts"),
+            Path("/Library/Fonts"),
+            home / "Library/Fonts",
+        ]
+    if sys.platform == "win32":
+        dirs = [Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"]
+        if local := os.environ.get("LOCALAPPDATA"):
+            dirs.append(Path(local) / "Microsoft/Windows/Fonts")
+        return dirs
+    return [
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+        home / ".fonts",
+        home / ".local/share/fonts",
+    ]
+
+
+def _installed_east_asia_font() -> str | None:
+    for family, pattern in _EAST_ASIA_CANDIDATES.get(sys.platform, []):
+        for d in _font_dirs():
+            if d.is_dir() and next(d.rglob(pattern), None) is not None:
+                return family
+    return None
+
+
 def test_cjk_run_uses_east_asia_font_slot():
-    """CJK 字符落 eastAsia 字体槽(span 字体名断言;本机装有 Hiragino Sans GB)。"""
+    """CJK 字符落 eastAsia 字体槽(span 字体名断言;字体按平台挑系统预装款)。"""
+    if os.environ.get("DOCSPINE_DETERMINISTIC_FONTS"):
+        pytest.skip("确定性字体模式不扫系统字体,无 CJK 字体可选")
+    family = _installed_east_asia_font()
+    if family is None:
+        pytest.skip(f"{sys.platform} 上未找到候选 CJK 系统字体")
     data = _body(
-        '<w:p><w:r><w:rPr><w:rFonts w:ascii="Helvetica" w:eastAsia="Hiragino Sans GB"/></w:rPr>'
+        f'<w:p><w:r><w:rPr><w:rFonts w:ascii="Helvetica" w:eastAsia="{family}"/></w:rPr>'
         "<w:t>AB中文CD</w:t></w:r></w:p>"
     )
     d = _open_pdf(_render(data))
@@ -268,7 +318,7 @@ def test_cjk_run_uses_east_asia_font_slot():
     latin = [f for t, f in spans if "AB" in t]
     assert cjk and latin, spans
     assert cjk[0] != latin[0], "CJK 段与拉丁段应是不同字体"
-    assert "Hiragino" in cjk[0].replace(" ", ""), spans
+    assert family.replace(" ", "").lower() in cjk[0].replace(" ", "").lower(), spans
 
 
 def test_empty_paragraph_occupies_one_line():

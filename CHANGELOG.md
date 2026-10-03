@@ -53,7 +53,9 @@ change.
 - **CI Python matrix** never got past `maturin develop` ("Couldn't find a
   virtualenv"), so pytest and the `.ssimref` SSIM gate had not run in CI before.
   It now builds via `pip install -e ".[test]"` with `pytest -ra`; the `test` extra
-  declares `pdfspine>=0.8,<0.12`.
+  declares `pdfspine>=0.8,<0.12`. The eastAsia font-slot read-back test no longer
+  hardcodes macOS Hiragino: it picks a preinstalled non-fallback CJK font per OS
+  (Hiragino Sans GB / SimSun / Noto Sans CJK SC) and skips when none is installed.
 
 ## [0.5.1] — 2026-07-30
 
