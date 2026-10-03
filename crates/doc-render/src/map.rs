@@ -18,7 +18,8 @@
 //! - **列表(C-6)**:带 `numPr` 的段落按文档顺序推进 [`ListCounters`],最终标签串
 //!   喂引擎的 [`ListLabel`](标签右对齐到正文起点前 `gutter` 处);悬挂缩进折成
 //!   gutter(文本对齐 left 缩进,与 Word 的列表版式一致)。
-//! - 段落边框 / 底纹 / 图片:解析保真,渲染降级 + 一次性告警(C-8 落地图片)。
+//! - 段落边框 / 底纹:落进引擎原生 `ParaProps.borders` / `.shading`(跨页每片段都画);
+//!   `w:between` 无引擎槽位 → 一次性告警。图片见 C-8。
 
 use std::collections::BTreeMap;
 
@@ -34,7 +35,8 @@ use doc_core::style::{
 };
 use pdf_typeset::{
     Align, Block, BorderEdge, CellBorders, ColumnWidth, ImageSpec, LineSpacing, ListLabel,
-    PageGeom, ParaProps, Rgb, Run, RunStyle, TableCell, TableRow, TableSpec,
+    PageGeom, ParaProps, ParagraphBorder, ParagraphBorders, Rgb, Run, RunStyle, TableCell,
+    TableRow, TableSpec,
 };
 
 use crate::section::page_geom;
@@ -56,6 +58,11 @@ const DEFAULT_LIST_GUTTER: f64 = 4.0;
 /// 取 0.35×hanging 并夹在 2..=10pt——Word 缺省 360twip=18pt 悬挂 → 6.3pt 空隙,
 /// 标签左缘落点与 Word 的首行缩进位相近)。
 const LIST_GUTTER_RATIO: f64 = 0.35;
+
+/// 段落边框 `dashed` / `dashSmallGap` 的虚线 on/off 长度(磅,与线宽无关):取上游
+/// pdfspine `typeset-paragraph-borders.md` 记录的 LibreOffice 26.8 实测值。
+const PARA_DASHED: [f64; 2] = [8.0, 2.5];
+const PARA_DASH_SMALL_GAP: [f64; 2] = [3.0, 1.0];
 
 /// 一节的渲染计划:页面几何 + 引擎块序列 + 锚定图片覆盖层(绝对定位,C-8)。
 pub(crate) struct SectionPlan {
@@ -106,7 +113,6 @@ pub(crate) struct MapCtx {
     /// 本节收集到的锚定图片覆盖层(节界处被取走并入 [`SectionPlan`])。
     overlays: Vec<AnchoredImage>,
     border_warned: bool,
-    shading_warned: bool,
     picture_warned: bool,
     unsupported_format_warned: bool,
     floating_warned: bool,
@@ -127,7 +133,6 @@ impl MapCtx {
             frame_margin_top: 0.0,
             overlays: Vec::new(),
             border_warned: false,
-            shading_warned: false,
             picture_warned: false,
             unsupported_format_warned: false,
             floating_warned: false,
@@ -162,13 +167,6 @@ impl MapCtx {
         if !self.border_warned {
             self.border_warned = true;
             self.list.push(RenderWarning::ParaBorderOmitted);
-        }
-    }
-
-    fn para_shading(&mut self) {
-        if !self.shading_warned {
-            self.shading_warned = true;
-            self.list.push(RenderWarning::ParaShadingOmitted);
         }
     }
 
@@ -331,7 +329,7 @@ fn map_paragraph(
     if eff.page_break_before && !out.is_empty() {
         out.push(Block::PageBreak);
     }
-    let mut props = para_props(&eff);
+    let mut props = para_props(doc, &eff);
 
     // 列表标签(C-6):按文档顺序推进计数;numId=0 / 层级无定义 / numFmt=none 不产
     // 标签(缩进仍经层级 pPr 级联生效);numStyleLink 间接 v1 不解 → 一次性告警。
@@ -460,72 +458,48 @@ fn map_paragraph(
         }
     }
 
-    // 段落底纹/边框(C-4→真画):把单段落片包进单格表——底纹铺 cell fill、四边框
-    // 画成 cell 四边线(引擎表格原语,`get_drawings` 可见)。表宽取正文宽(Word 底纹
-    // 铺满正文列),段落缩进仍留在格内。仅在段落片正好一段(无段内换页)时包裹;
-    // 段内换页等复杂情形退回不画 + 一次性告警。`between`(相邻同框段间横线)单格
-    // 表无法表达 → 一次性 para-border-omitted 告警。
-    let has_side = has_side_border(&eff.borders);
-    let has_between = eff.borders.between.as_ref().is_some_and(is_visible);
-    let wrappable = matches!(para_blocks.as_slice(), [Block::Paragraph(..)]);
-    if (has_side || eff.shading.is_some()) && wrappable {
-        let para = para_blocks.pop().expect("single paragraph block");
-        out.push(wrap_paragraph_box(doc, &eff, para, ctx));
-        if has_between {
-            ctx.para_border(); // between 无法用单格表达。
-        }
-    } else {
-        if has_side || has_between {
-            ctx.para_border(); // 复杂情形(段内换页等)退回不画。
-        }
-        if eff.shading.is_some() {
-            ctx.para_shading();
-        }
-        out.append(&mut para_blocks);
+    // 段落底纹/边框已由 `para_props` 落进引擎原生 `ParaProps.borders/shading`(每个
+    // 段落片、每个跨页片段都画)。`between`(相邻同框段间横线)引擎无槽位,且上游
+    // 明令不得近似成两个矩形边 → 一次性 para-border-omitted 告警。
+    if eff.borders.between.as_ref().is_some_and(is_visible) {
+        ctx.para_border();
     }
+    out.append(&mut para_blocks);
     for block in image_blocks {
         out.push(block);
     }
 }
 
-/// 段落是否有可见的四周边框(top/right/bottom/left 任一非 `none`)。
-fn has_side_border(b: &ParaBorders) -> bool {
-    [&b.top, &b.right, &b.bottom, &b.left]
-        .into_iter()
-        .any(|e| e.as_ref().is_some_and(is_visible))
+/// pBdr 四周边 → 引擎原生段落边框;无一可映射的可见边 → `None`(`between` 不在此)。
+fn para_borders(doc: &Document, b: &ParaBorders) -> Option<Box<ParagraphBorders>> {
+    let edge = |e: &Option<doc_core::style::Border>| e.as_ref().and_then(|e| para_edge(doc, e));
+    let out = ParagraphBorders {
+        top: edge(&b.top),
+        right: edge(&b.right),
+        bottom: edge(&b.bottom),
+        left: edge(&b.left),
+    };
+    [out.top, out.right, out.bottom, out.left]
+        .iter()
+        .any(Option::is_some)
+        .then(|| Box::new(out))
 }
 
-/// 把一个段落块包进「单列单行单格」表:cell 填充 = 底纹、cell 四边线 = pBdr 四周边、
-/// padding = 边框到正文的最大留白;列宽 = 当前节正文宽(Word 底纹铺满正文列)。
-fn wrap_paragraph_box(
-    doc: &Document,
-    eff: &EffectiveParaProps,
-    para: Block,
-    ctx: &MapCtx,
-) -> Block {
-    let edge = |b: &Option<doc_core::style::Border>| b.as_ref().and_then(|b| stroke(doc, b));
-    let mut cell = TableCell::new(vec![para]);
-    cell.fill = eff.shading.map(rgb);
-    cell.borders = CellBorders {
-        top: edge(&eff.borders.top),
-        right: edge(&eff.borders.right),
-        bottom: edge(&eff.borders.bottom),
-        left: edge(&eff.borders.left),
+/// 一条 pBdr 边 → 引擎边:线宽/颜色与表格边框同一折算([`stroke`]),`@w:space` 原样
+/// (磅)。`dashed` / `dashSmallGap` 用上游 LO 实测的虚线长度;其余可见线型(double /
+/// dotted / wave …)沿用表格边框的既有降级——按实线画。引擎校验不过:虚线退实线,
+/// 线宽/留白非法则该边不画(不 panic)。
+fn para_edge(doc: &Document, b: &doc_core::style::Border) -> Option<ParagraphBorder> {
+    let edge = ParagraphBorder::new(stroke(doc, b)?, f64::from(b.space_pt)).ok()?;
+    let dash = match b.val.as_str() {
+        "dashed" => Some(PARA_DASHED),
+        "dashSmallGap" => Some(PARA_DASH_SMALL_GAP),
+        _ => None,
     };
-    // 边框留白(`@w:space`,磅):四周取最大值折成标量 padding。
-    cell.padding = [
-        &eff.borders.top,
-        &eff.borders.right,
-        &eff.borders.bottom,
-        &eff.borders.left,
-    ]
-    .into_iter()
-    .filter_map(|b| b.as_ref().map(|b| f64::from(b.space_pt)))
-    .fold(0.0, f64::max);
-    Block::Table(TableSpec::new(
-        vec![ColumnWidth::Fixed(ctx.body_width())],
-        vec![TableRow::new(vec![cell])],
-    ))
+    Some(match dash {
+        Some([on, off]) => edge.with_dash(on, off).unwrap_or(edge),
+        None => edge,
+    })
 }
 
 /// 锚定浮动图 → 绝对定位覆盖层。仅处理**可解码光栅图**:缺 media 名/字节/尺寸、
@@ -657,9 +631,11 @@ fn placeholder_box(width: f64, height: f64) -> Block {
     Block::Table(TableSpec::new(vec![ColumnWidth::Fixed(width)], vec![row]))
 }
 
-/// 有效段落属性 → 引擎段落属性。
-fn para_props(eff: &EffectiveParaProps) -> ParaProps {
+/// 有效段落属性 → 引擎段落属性(含原生段落边框 / 底纹;边框色经 theme 解引)。
+fn para_props(doc: &Document, eff: &EffectiveParaProps) -> ParaProps {
     let mut p = ParaProps::new();
+    p.borders = para_borders(doc, &eff.borders);
+    p.shading = eff.shading.map(rgb);
     p.align = match eff.align {
         Justification::Left => Align::Left,
         Justification::Center => Align::Center,
@@ -1205,11 +1181,11 @@ mod tests {
         assert_eq!(props.spacing, LineSpacing::Multiple(1.5));
     }
 
-    /// 段落底纹 + 四周边框:包进「单列单行单格」表**真画**——cell 填充 = 底纹、
-    /// cell 四边线 = pBdr 周边、padding = 边框留白;列宽 = 正文宽;内容仍是段落
-    /// (读回顺序不变);不再发 para-border/para-shading 告警。
+    /// 段落底纹 + 四周边框:落进引擎原生 `ParaProps.borders` / `.shading`(不再包
+    /// 单格表)——线宽 = sz/8、`@w:space` 原样、缺色按黑;无声明的边为 `None`;不发
+    /// para-border 告警。
     #[test]
-    fn bordered_shaded_paragraph_wraps_into_drawn_box() {
+    fn bordered_shaded_paragraph_maps_to_native_props() {
         let edge = doc_core::style::Border {
             val: "single".into(),
             sz_eighth_pt: 8, // → 1.0pt 线宽
@@ -1224,34 +1200,103 @@ mod tests {
         let mapped = map_document(&doc);
         let blocks = &mapped.sections[0].blocks;
         assert_eq!(blocks.len(), 1);
-        let Block::Table(spec) = &blocks[0] else {
-            panic!("带边框/底纹的段落应包成表格");
+        let Block::Paragraph(props, _) = &blocks[0] else {
+            panic!("带边框/底纹的段落应仍是段落块(原生属性)");
         };
         assert_eq!(
-            spec.columns,
-            vec![ColumnWidth::Fixed(468.0)],
-            "Letter 正文宽"
-        );
-        let cell = &spec.rows[0].cells[0];
-        assert_eq!(
-            cell.fill,
+            props.shading,
             Some(Rgb::new(
                 0xD9 as f64 / 255.0,
                 0xE2 as f64 / 255.0,
                 0xF3 as f64 / 255.0
             ))
         );
-        assert_eq!(cell.borders.top.map(|e| e.width), Some(1.0));
-        assert_eq!(cell.borders.left.map(|e| e.width), Some(1.0));
-        assert!(cell.borders.right.is_none() && cell.borders.bottom.is_none());
-        assert!((cell.padding - 4.0).abs() < 1e-9, "边框留白折成 padding");
-        assert!(matches!(cell.blocks.as_slice(), [Block::Paragraph(..)]));
+        let b = props.borders.as_deref().expect("原生段落边框");
+        let top = b.top.expect("top");
+        assert_eq!(top.stroke().width, 1.0);
+        assert_eq!(top.stroke().color, Rgb::BLACK);
+        assert_eq!(top.space(), 4.0);
+        assert_eq!(top.dash(), None);
+        assert_eq!(b.left.map(|e| e.space()), Some(4.0));
+        assert!(b.right.is_none() && b.bottom.is_none());
         let kinds: Vec<&str> = mapped.warnings.iter().map(RenderWarning::kind).collect();
         assert!(!kinds.contains(&"para-border-omitted"));
-        assert!(!kinds.contains(&"para-shading-omitted"));
     }
 
-    /// `between`(相邻同框段间横线)单格表无法表达 → para-border-omitted 一次性告警;
+    /// 段内换页切出的每个段落片都带同一份原生边框/底纹(以前退回不画 + 告警);
+    /// 全 `none` 的边框不产 `borders`。
+    #[test]
+    fn page_break_fragments_keep_native_borders() {
+        let mut p = para_with_text("a");
+        p.runs[0].segments.push(RunSegment::Break(BreakKind::Page));
+        p.runs[0].segments.push(RunSegment::Text("b".into()));
+        p.ppr.borders.bottom = Some(doc_core::style::Border {
+            val: "single".into(),
+            sz_eighth_pt: 4,
+            space_pt: 1,
+            color: None,
+        });
+        p.ppr.shd_fill = Some(ColorRef::Rgb(Color::new([0xFF, 0xFF, 0x00])));
+        let mut none = para_with_text("n");
+        none.ppr.borders.top = Some(doc_core::style::Border {
+            val: "none".into(),
+            sz_eighth_pt: 4,
+            space_pt: 0,
+            color: None,
+        });
+        let doc = doc_with_body(vec![DocBlock::Paragraph(p), DocBlock::Paragraph(none)]);
+        let mapped = map_document(&doc);
+        let paras: Vec<&ParaProps> = mapped.sections[0]
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph(props, _) => Some(props),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paras.len(), 3);
+        for props in &paras[..2] {
+            assert!(props.borders.as_deref().is_some_and(|b| b.bottom.is_some()));
+            assert!(props.shading.is_some());
+        }
+        assert!(paras[2].borders.is_none(), "none 线型不产原生边框");
+        assert!(mapped.warnings.is_empty(), "{:?}", mapped.warnings);
+    }
+
+    /// 线型映射:dashed → [8, 2.5]、dashSmallGap → [3, 1];double 等其余可见线型按实线
+    /// (与表格边框同一既有降级);theme 色经主题解引。
+    #[test]
+    fn para_border_style_and_theme_color_mapping() {
+        let mut doc = doc_with_body(Vec::new());
+        doc.theme.colors.accent1 = Some(Color::new([0x44, 0x72, 0xC4]));
+        let edge = |val: &str, color: Option<ColorRef>| doc_core::style::Border {
+            val: val.into(),
+            sz_eighth_pt: 12,
+            space_pt: 2,
+            color,
+        };
+        let map = |b: doc_core::style::Border| para_edge(&doc, &b).expect("visible edge");
+        assert_eq!(map(edge("dashed", None)).dash(), Some([8.0, 2.5]));
+        assert_eq!(map(edge("dashSmallGap", None)).dash(), Some([3.0, 1.0]));
+        assert_eq!(map(edge("double", None)).dash(), None);
+        assert_eq!(map(edge("dotted", None)).dash(), None);
+        let themed = map(edge(
+            "single",
+            Some(ColorRef::Theme(doc_core::style::ThemeColor::Accent1)),
+        ));
+        assert_eq!(themed.stroke().width, 1.5);
+        assert_eq!(
+            themed.stroke().color,
+            Rgb::new(
+                0x44 as f64 / 255.0,
+                0x72 as f64 / 255.0,
+                0xC4 as f64 / 255.0
+            )
+        );
+        assert!(para_edge(&doc, &edge("nil", None)).is_none());
+    }
+
+    /// `between`(相邻同框段间横线)引擎无槽位、不得近似 → para-border-omitted 一次性告警;
     /// 缺 media 字节的图片 → picture-skipped。
     #[test]
     fn between_border_and_missing_picture_degrade() {
