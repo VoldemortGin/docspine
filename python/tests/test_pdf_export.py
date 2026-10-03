@@ -641,3 +641,114 @@ def test_paragraph_border_and_shading_are_drawn():
     assert "Boxed and shaded paragraph." in d[0].get_text()
     msgs = " ".join(str(w.message) for w in ws)
     assert "border" not in msgs and "shading" not in msgs, msgs
+
+
+def _para_box_xml(text_runs: str, extra_bdr: str = "", style: str = "single") -> str:
+    """一段四周 ``style`` 线型边框(sz8 → 1pt,space 4)+ 底纹 D9E2F3 的段落 XML。"""
+    edges = "".join(
+        f'<w:{e} w:val="{style}" w:sz="8" w:space="4" w:color="1F4E79"/>'
+        for e in ("top", "left", "bottom", "right")
+    )
+    return (
+        f"<w:p><w:pPr><w:pBdr>{edges}{extra_bdr}</w:pBdr>"
+        '<w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/>'
+        f"</w:pPr>{text_runs}</w:p>"
+    )
+
+
+_SHADE_RGB = (0xD9 / 255, 0xE2 / 255, 0xF3 / 255)
+
+
+def _shade_fills(page) -> list:
+    """页上颜色为段落底纹色(D9E2F3)的填充绘制。"""
+    return [
+        dr
+        for dr in page.get_drawings()
+        if dr.get("type") == "f"
+        and dr.get("fill") is not None
+        and all(abs(a - b) < 0.01 for a, b in zip(dr["fill"], _SHADE_RGB))
+    ]
+
+
+def _render_with_warnings(data: bytes) -> tuple[bytes, str]:
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = docspine.open_bytes(data).to_pdf()
+    return pdf, " ".join(str(w.message) for w in ws)
+
+
+def test_paragraph_box_split_across_pages_draws_on_every_page():
+    """跨页的长段落(引擎原生 ``ParaProps.borders/shading``):每页片段各画 1 块底纹 +
+    四条边(片段各自闭合上下边);文字不丢;不发 para-border/shading 省略告警。"""
+    sentence = "Boxed paragraph that keeps flowing across the page boundary. "
+    data = _body(_para_box_xml(f"<w:r><w:t>{sentence * 160}</w:t></w:r>"))
+    pdf, msgs = _render_with_warnings(data)
+    d = _open_pdf(pdf)
+    assert d.page_count >= 2
+    for page in d:
+        assert len(_shade_fills(page)) == 1, f"page {page.number} 底纹"
+        assert len(_stroke_segments(page)) == 4, f"page {page.number} 四边"
+    words = " ".join(p.get_text() for p in d).split()
+    assert words == (sentence * 160).split()
+    assert "border" not in msgs and "shading" not in msgs, msgs
+
+
+def test_paragraph_box_with_page_break_draws_both_fragments():
+    """段内 ``w:br type=page`` 把段落切成两片:两片都画框与底纹(以前退回不画 + 告警)。"""
+    runs = '<w:r><w:t>Before</w:t><w:br w:type="page"/><w:t>After</w:t></w:r>'
+    pdf, msgs = _render_with_warnings(_body(_para_box_xml(runs)))
+    d = _open_pdf(pdf)
+    assert d.page_count == 2
+    for page in d:
+        assert len(_shade_fills(page)) == 1
+        assert len(_stroke_segments(page)) == 4
+    assert "border" not in msgs and "shading" not in msgs, msgs
+
+
+def test_paragraph_between_border_still_warns_once():
+    """``w:between`` 不近似成两个矩形边:四周边照常原生画,between 发且只发一次
+    para-border-omitted。两段同框 → 引擎合成一个框(共享外上/下边,无段间线)。"""
+    between = '<w:between w:val="single" w:sz="8" w:space="4" w:color="FF0000"/>'
+    body = "".join(
+        _para_box_xml(f"<w:r><w:t>{t}</w:t></w:r>", extra_bdr=between)
+        for t in ("First", "Second")
+    )
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = docspine.open_bytes(_body(body)).to_pdf()
+    border_ws = [w for w in ws if "border" in str(w.message)]
+    assert len(border_ws) == 1, [str(w.message) for w in ws]
+    page = _open_pdf(pdf)[0]
+    segs = _stroke_segments(page)
+    horizontal = [s for s in segs if abs(s[1].y - s[2].y) < 0.01]
+    # 两段一框:外上/外下各一条横线(无段间 between 横线),左右边逐段各画(2×2)。
+    assert len(horizontal) == 2 and len(segs) == 6, segs
+    reds = [
+        dr
+        for dr in page.get_drawings()
+        if dr.get("color") is not None and dr["color"][0] > 0.9 and dr["color"][1] < 0.1
+    ]
+    assert not reds, "between 的红线不应被画出"
+
+
+def test_paragraph_border_dash_mapping_and_solid_fallback():
+    """线型策略:``dashed`` → 引擎虚线 [8, 2.5]、``dashSmallGap`` → [3, 1](上游 LO 实测
+    值);其余非实线(``double`` / ``dotted`` …)沿用表格边框的既有降级——按实线画、
+    不另发告警。"""
+
+    def dashes(style: str) -> set:
+        data = _body(_para_box_xml("<w:r><w:t>Styled</w:t></w:r>", style=style))
+        pdf, msgs = _render_with_warnings(data)
+        assert "border" not in msgs, msgs
+        page = _open_pdf(pdf)[0]
+        strokes = [dr for dr in page.get_drawings() if dr.get("type") == "s"]
+        assert sum(1 for dr in strokes for it in dr["items"] if it[0] == "l") == 4
+        return {str(dr.get("dashes")) for dr in strokes}
+
+    dashed = dashes("dashed")
+    small = dashes("dashSmallGap")
+    solid = dashes("single")
+    assert len(dashed) == 1 and "8" in next(iter(dashed)) and "2.5" in next(iter(dashed))
+    assert len(small) == 1 and "3" in next(iter(small)) and "1" in next(iter(small))
+    assert dashes("double") == solid and dashes("dotted") == solid
+    assert solid != dashed and solid != small

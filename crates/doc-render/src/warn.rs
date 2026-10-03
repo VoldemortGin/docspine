@@ -1,7 +1,7 @@
 //! [`RenderWarning`] —— docspine 侧的导出降级告警,与引擎告警合流。
 //!
 //! pdf-typeset 的 [`ExportWarning`] 覆盖引擎内的降级(字体替换、字形回退、图片解码
-//! 失败等);docspine 自己的降级(多栏压平、段落边框/底纹本批不画、图片待 C-8)在
+//! 失败等);docspine 自己的降级(多栏压平、段落 `between` 边框不画、图片降级等)在
 //! 这里枚举。py-bindings 按 [`RenderWarning::kind`] 去重,每种只 `warnings.warn` 一次。
 
 use std::fmt;
@@ -21,10 +21,10 @@ pub enum RenderWarning {
         /// 声明的栏数。
         cols: u32,
     },
-    /// 段落边框(`w:pBdr`)已解析但本批不绘制(引擎段落属性暂无边框槽位)。
+    /// 段落边框的段间横线(`w:pBdr > w:between`)已解析但不绘制:引擎原生段落边框
+    /// (`ParaProps.borders`)无 between 槽位,且不得近似成两个矩形边。四周边与底纹
+    /// 照常原生绘制(含跨页片段)。
     ParaBorderOmitted,
-    /// 段落底纹(`w:pPr > w:shd`)已解析但本批不绘制。
-    ParaShadingOmitted,
     /// 内嵌图片无法渲染(缺 media 字节 / 缺 `wp:extent` 尺寸 / 尺寸非法):
     /// 该图跳过,其余内容照常(C-8:有字节且有尺寸的图已按块级渲染)。
     PictureSkipped,
@@ -70,7 +70,6 @@ impl RenderWarning {
             },
             RenderWarning::MultiColumnFlattened { .. } => "multi-column-flattened",
             RenderWarning::ParaBorderOmitted => "para-border-omitted",
-            RenderWarning::ParaShadingOmitted => "para-shading-omitted",
             RenderWarning::PictureSkipped => "picture-skipped",
             RenderWarning::FloatingNoWrap => "floating-no-wrap",
             RenderWarning::UnsupportedImageFormat => "unsupported-image-format",
@@ -102,10 +101,10 @@ impl fmt::Display for RenderWarning {
                 write!(f, "{cols}-column section flattened to a single column")
             }
             RenderWarning::ParaBorderOmitted => {
-                write!(f, "paragraph borders are not drawn in this version")
-            }
-            RenderWarning::ParaShadingOmitted => {
-                write!(f, "paragraph shading is not drawn in this version")
+                write!(
+                    f,
+                    "paragraph 'between' borders (w:between) are not drawn in this version"
+                )
             }
             RenderWarning::PictureSkipped => {
                 write!(

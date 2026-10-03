@@ -331,6 +331,15 @@ first** (C-1..C-4); C-2..C-4 are parse-side and can proceed in parallel with pdf
   margin+firstLine ± 2 pt, wrapped-line x0 = margin+left ± 2 pt (`get_text_words`); spacing fixture
   deterministically moves a page break (page count 2 vs 1 assert); highlight/strike visible as ≥ N painted
   ops via `get_drawings`; CJK run renders with eastAsia font slot (span font name assert).
+  **Status: done.** Paragraph `pBdr` / `shd` render through pdf-typeset's native `ParaProps.borders` /
+  `ParaProps.shading` (pdfspine v0.11.2) instead of the former one-cell-table wrapper, so a bordered/shaded
+  paragraph that splits across pages (long text or an in-paragraph page break) is drawn on every page
+  fragment. Mapping: width = `sz`/8 pt (0.25 pt floor), color via theme (`auto` → black), `@w:space` pt as
+  the engine edge space; `dashed` → dash `[8, 2.5]`, `dashSmallGap` → `[3, 1]` (upstream LO-observed
+  lengths); other visible styles (double/dotted/…) draw solid, the same existing degradation as table
+  borders. Matching adjacent paragraphs share one box (engine grouping). `w:between` has no engine slot and
+  is not approximated → one `ParaBorderOmitted`. Engine geometry follows Word: text stays at its indent and
+  edges extend outward by space + width; the fill covers the text lines only (not the border space).
 - **C-5 · styles.xml + theme + resolver (L — the long pole).** Walkers for styles.xml (id → props + basedOn
   + type + default) and theme1.xml fontScheme; `doc-core/src/style.rs` resolver (docDefaults → basedOn
   chain, cycle-safe → table-style overlay → direct); theme font/color indirection (`asciiTheme="minorHAnsi"`

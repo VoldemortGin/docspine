@@ -481,7 +481,7 @@ def anchored_image_docx_bytes() -> bytes:
 
 
 # 一段带四周边框(``pBdr``)+ 底纹(``shd`` fill=D9E2F3)的段落:真画的填充矩形 +
-# 四边描边线(渲染层把该段包成单格表)。
+# 四边描边线(渲染层落进引擎原生段落边框 / 底纹)。
 _PARA_BOX_DOCUMENT = (
     _DOC_HEADER
     + """
