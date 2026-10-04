@@ -55,8 +55,8 @@ fn count_note_probe(n: usize) {
 
 #[cfg(test)]
 thread_local! {
-    /// 仅测试编译:行内拼接时为判定「是否在行首」而检查的字节数(线性性断言用)。
-    static LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 仅测试编译:行内拼接 / Markdown 转义各趟扫描检查的字节数(线性性断言用)。
+    static SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // ============================================================ 纯文本
@@ -69,33 +69,36 @@ pub fn to_text(doc: &Document) -> String {
         let lines = notes.scope(|| non_empty_lines(blocks, &notes));
         if !lines.is_empty() {
             out.push(format!("[Header: {}]", kind.as_str()));
-            out.extend(lines);
+            out.extend(lines.into_iter().map(|b| b.s));
         }
     }
-    text_blocks(&doc.body, &mut out, &notes);
+    let mut body = Vec::new();
+    text_blocks(&doc.body, &mut body, &notes);
+    out.extend(body.into_iter().map(|b| b.s));
     for (label, blocks) in notes.referenced() {
         let lines = notes.scope(|| non_empty_lines(blocks, &notes));
-        out.push(format!("{label} {}", lines.join(" ")));
+        out.push(format!("{label} {}", MdBuf::join(lines, " ").s));
     }
     for (kind, blocks) in header_footer_parts(doc, true) {
         let lines = notes.scope(|| non_empty_lines(blocks, &notes));
         if !lines.is_empty() {
             out.push(format!("[Footer: {}]", kind.as_str()));
-            out.extend(lines);
+            out.extend(lines.into_iter().map(|b| b.s));
         }
     }
     out.join("\n")
 }
 
 /// 一串块的纯文本行,去掉空行(页眉页脚 / 注内容用:Word 里空段落很常见,别灌噪声)。
-fn non_empty_lines(blocks: &[Block], notes: &Notes) -> Vec<String> {
+/// Markdown 导出的脚注内容也走这里(行内容未转义,由调用方整条转义)。
+fn non_empty_lines(blocks: &[Block], notes: &Notes) -> Vec<MdBuf> {
     let mut lines = Vec::new();
     text_blocks(blocks, &mut lines, notes);
     lines.retain(|l| !l.is_empty());
     lines
 }
 
-fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
+fn text_blocks(blocks: &[Block], out: &mut Vec<MdBuf>, notes: &Notes) {
     let mode = notes.plain_mode();
     for b in blocks {
         match b {
@@ -103,7 +106,7 @@ fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
                 let item = notes.list_item(p);
                 let t = para_inline(p, notes, mode);
                 out.push(match item {
-                    Some(it) if !t.is_empty() => format!("{}{t}", plain_prefix(&it, mode)),
+                    Some(it) if !t.is_empty() => prefixed(&it, t),
                     _ => t,
                 });
                 for tb in p.text_boxes() {
@@ -116,25 +119,25 @@ fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
 }
 
 /// 一张表的纯文本行:每行的单元格用 `\t` 连接(单元格内多行用 `\n` 连成一格,嵌套表的行同理压平)。
-fn table_lines(t: &Table, notes: &Notes, mode: Mode) -> Vec<String> {
+fn table_lines(t: &Table, notes: &Notes, mode: Mode) -> Vec<MdBuf> {
     t.rows
         .iter()
         .map(|row| {
             // 行首跳过的网格列(`gridBefore`)补空字段,首个单元格才落在正确的列。
-            let mut cells: Vec<String> = vec![String::new(); row.grid_before as usize];
+            let mut cells: Vec<MdBuf> = (0..row.grid_before).map(|_| MdBuf::new(mode)).collect();
             cells.extend(
                 row.cells
                     .iter()
-                    .map(|c| cell_lines(&c.blocks, notes, mode).join("\n")),
+                    .map(|c| MdBuf::join(cell_lines(&c.blocks, notes, mode), "\n")),
             );
-            cells.join("\t")
+            MdBuf::join(cells, "\t")
         })
         .collect()
 }
 
 /// 单元格内的行(纯文本 / GFM 单元格用):每段一行(空段保留空行),列表标签作前缀,
 /// 段落锚定的文本框内容紧随其后;嵌套表按 [`table_lines`] 压平成多行(行内单元格 `\t`),不丢字。
-fn cell_lines(blocks: &[Block], notes: &Notes, mode: Mode) -> Vec<String> {
+fn cell_lines(blocks: &[Block], notes: &Notes, mode: Mode) -> Vec<MdBuf> {
     let mut lines = Vec::new();
     for b in blocks {
         match b {
@@ -142,11 +145,12 @@ fn cell_lines(blocks: &[Block], notes: &Notes, mode: Mode) -> Vec<String> {
                 let item = notes.list_item(p);
                 let t = para_inline(p, notes, mode);
                 lines.push(match item {
-                    Some(it) if !t.is_empty() => format!("{}{t}", plain_prefix(&it, mode)),
+                    Some(it) if !t.is_empty() => prefixed(&it, t),
                     _ => t,
                 });
                 for tb in p.text_boxes() {
-                    let inner = notes.scope(|| cell_lines(&tb.blocks, notes, mode).join("\n"));
+                    let inner =
+                        notes.scope(|| MdBuf::join(cell_lines(&tb.blocks, notes, mode), "\n"));
                     if !inner.is_empty() {
                         lines.push(inner);
                     }
@@ -171,7 +175,8 @@ pub fn to_markdown(doc: &Document) -> String {
     markdown_blocks(&doc.body, &mut parts, &notes);
     for (label, blocks) in notes.referenced() {
         let lines = notes.scope(|| non_empty_lines(blocks, &notes));
-        parts.push(format!("{label}: {}", lines.join(" ")));
+        let content = md_escape(&MdBuf::join(lines, " "), MdCtx::NoteDef);
+        parts.push(format!("{label}: {content}"));
     }
     for (kind, blocks) in header_footer_parts(doc, true) {
         push_md_header_footer("Footer", kind, blocks, &notes, &mut parts);
@@ -207,16 +212,18 @@ fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>, notes: &Notes) {
                 if !t.is_empty() {
                     match (heading_level(notes, p), item) {
                         (Some(level), item) => {
-                            let prefix = match item {
-                                Some(it) if !it.bullet => plain_prefix(&it, Mode::Markdown),
-                                _ => String::new(),
+                            let content = match item {
+                                Some(it) if !it.bullet => prefixed(&it, t),
+                                _ => t,
                             };
-                            parts.push(format!("{} {prefix}{t}", "#".repeat(level as usize)));
+                            let content = md_escape(&content, MdCtx::Heading);
+                            parts.push(format!("{} {content}", "#".repeat(level as usize)));
                             prev_list_level = None;
                         }
                         (None, Some(it)) => match md_list_marker(&it) {
                             Some(marker) => {
                                 let level = it.level.min(prev_list_level.map_or(0, |l| l + 1));
+                                let t = md_escape(&t, MdCtx::Block);
                                 let line = format!("{}{marker} {t}", "    ".repeat(level as usize));
                                 match (prev_list_level, parts.last_mut()) {
                                     (Some(_), Some(last)) => {
@@ -228,12 +235,12 @@ fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>, notes: &Notes) {
                                 prev_list_level = Some(level);
                             }
                             None => {
-                                parts.push(format!("{}{t}", plain_prefix(&it, Mode::Markdown)));
+                                parts.push(md_escape(&prefixed(&it, t), MdCtx::Block));
                                 prev_list_level = None;
                             }
                         },
                         (None, None) => {
-                            parts.push(t);
+                            parts.push(md_escape(&t, MdCtx::Block));
                             prev_list_level = None;
                         }
                     }
@@ -287,12 +294,11 @@ fn markdown_table(table: &Table, notes: &Notes) -> String {
     lines.join("\n")
 }
 
-/// GFM 单元格文字:换行规整为 `<br>`(否则会撑破表格),竖线转义,避免破坏管道语法。
+/// GFM 单元格文字:各行(及行内换行)规整为导出器生成的 `<br>`(否则会撑破表格),按单元格规则转义
+/// (竖线一律转义,不做行首规则)。
 fn md_cell_text(cell: &Cell, notes: &Notes) -> String {
-    cell_lines(&cell.blocks, notes, Mode::Markdown)
-        .join("\n")
-        .replace('\n', "<br>")
-        .replace('|', "\\|")
+    let lines = cell_lines(&cell.blocks, notes, Mode::Markdown);
+    md_escape(&MdBuf::join(lines, "\n"), MdCtx::Cell)
 }
 
 /// 表格是否需要退回 HTML:任一单元格横向跨列 / 参与纵向合并 / 含嵌套表(GFM 表无法表达)。
@@ -361,8 +367,8 @@ fn html_blocks(blocks: &[Block], out: &mut String, notes: &Notes) {
                 let t = para_inline(p, notes, Mode::Html);
                 if !t.is_empty() {
                     let t = match item {
-                        Some(it) => format!("{}{t}", plain_prefix(&it, Mode::Html)),
-                        None => t,
+                        Some(it) => prefixed(&it, t).s,
+                        None => t.s,
                     };
                     match heading_level(notes, p) {
                         Some(level) => out.push_str(&format!("<h{level}>{t}</h{level}>\n")),
@@ -507,8 +513,8 @@ fn html_cell_content(blocks: &[Block], notes: &Notes) -> String {
                 let t = para_inline(p, notes, Mode::Html);
                 if !t.is_empty() {
                     parts.push(match item {
-                        Some(it) => format!("{}{t}", plain_prefix(&it, Mode::Html)),
-                        None => t,
+                        Some(it) => prefixed(&it, t).s,
+                        None => t.s,
                     });
                 }
                 for tb in p.text_boxes() {
@@ -569,7 +575,7 @@ struct ListItem {
 }
 
 /// Markdown 真列表项的标记:项目符号 `-`;标签恰是合法有序列表标记(1–9 位数字 + `.` / `)`)
-/// 时直接用;其它标签没有对应的列表语法,返回 `None`(改作文字前缀,见 [`plain_prefix`])。
+/// 时直接用;其它标签没有对应的列表语法,返回 `None`(改作文字前缀,见 [`prefixed`])。
 fn md_list_marker(item: &ListItem) -> Option<String> {
     if item.bullet {
         return Some("-".to_string());
@@ -582,21 +588,21 @@ fn md_list_marker(item: &ListItem) -> Option<String> {
     ok.then(|| item.label.clone())
 }
 
-/// 把标签当文字前缀(含尾随空格):纯文本 / HTML 原样(HTML 转义),Markdown 走 [`escape_md`],
-/// 避免被误解析成强调 / 标题 / 列表等。
-fn plain_prefix(item: &ListItem, mode: Mode) -> String {
-    match mode {
-        Mode::Text => format!("{} ", item.label),
-        Mode::Html => format!("{} ", escape_html(&item.label)),
-        Mode::Markdown => format!("{} ", escape_md(&item.label, true)),
-    }
+/// 把标签当文字前缀(含尾随空格)接在行内内容之前。标签是文档内容:纯文本原样、HTML 转义、
+/// Markdown 与后面的文字一起整块转义(见 [`md_escape`])。
+fn prefixed(item: &ListItem, t: MdBuf) -> MdBuf {
+    let mut out = MdBuf::new(t.mode);
+    out.text(&format!("{} ", item.label));
+    out.append(t);
+    out
 }
 
 /// 段落的行内内容:run 文字 + 注标记 + 图片;连续同目标的超链接 run 合成一个链接。
-/// Markdown 下所有来自文档的文字都经 [`escape_md`] 转义,行首状态跨 run 跟踪。
-fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
-    let mut out = String::new();
-    let mut out_blank = true;
+/// 链接按需打开:注标记(HTML 自带 `<a>`,嵌套非法;Markdown 的 `[^n]` 在链接文字里会让 CommonMark 的
+/// 外层链接失效)出现时先闭合链接、输出标记,有后续内容再重新打开,首尾的标记因此不留空链接。
+/// Markdown 不在这里转义:返回带来源掩码的缓冲,由块的组装方拼成整块后一趟转义(上下文会跨 run)。
+fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> MdBuf {
+    let mut out = MdBuf::new(mode);
     let mut i = 0;
     while i < p.runs.len() {
         let target = p.runs[i].link_target.as_deref();
@@ -604,196 +610,471 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
             .iter()
             .take_while(|r| r.link_target.as_deref() == target)
             .count();
-        let url = target.and_then(safe_url);
-        let linked = url.is_some() && mode != Mode::Text;
-        // 链接文字紧跟在 `[` 之后,不在行首;否则看本行迄今是否只有空白。
-        // HTML 链接:注标记不能嵌在 `<a>` 里,遇到时先闭合再重新打开(见 `run_inline`)。
-        let reopen = (linked && mode == Mode::Html)
-            .then(|| {
-                url.as_deref()
-                    .map(|u| format!("<a href=\"{}\">", escape_html(u)))
-            })
-            .flatten();
-        let mut group = String::new();
-        // 「本行迄今只有空白」增量维护(只看新追加的字节),不回扫已拼好的输出。
-        let mut group_blank = true;
+        out.link = target.and_then(safe_url).and_then(|url| match mode {
+            Mode::Text => None,
+            Mode::Markdown => Some(LinkState::new("[".into(), format!("]({})", md_url(&url)))),
+            Mode::Html => Some(LinkState::new(
+                format!("<a href=\"{}\">", escape_html(&url)),
+                "</a>".into(),
+            )),
+        });
         for r in &p.runs[i..end] {
-            let line_start = if group.is_empty() {
-                !linked && out_blank
-            } else {
-                !linked && group_blank
-            };
-            let piece = run_inline(r, notes, mode, line_start, reopen.as_deref());
-            group_blank = blank_after(group_blank, &piece);
-            group.push_str(&piece);
+            run_inline(r, notes, &mut out);
         }
-        let start = out.len();
-        match url {
-            Some(url) if linked && !group.is_empty() => match mode {
-                Mode::Markdown => out.push_str(&format!("[{group}]({})", md_url(&url))),
-                _ => {
-                    let open = format!("<a href=\"{}\">", escape_html(&url));
-                    // 链接首 / 尾的注标记会留下空 `<a>`(转义后的文字里不会出现字面 `<a `),去掉。
-                    let anchored = format!("{open}{group}</a>");
-                    out.push_str(&anchored.replace(&format!("{open}</a>"), ""));
-                }
-            },
-            _ => out.push_str(&group),
-        }
-        out_blank = blank_after(out_blank, &out[start..]);
+        out.close_link();
+        out.link = None;
         i = end;
     }
     out
 }
 
-/// 一个 run 的行内内容(文字分段 + 图片)。`line_start`:本 run 的开头是否在行首
-/// (Markdown 的块级标记转义用)。`reopen`:run 位于 HTML 超链接内时该链接的开标签;注标记自带
-/// `<a>`,嵌在链接里非法,所以先 `</a>`、输出标记、再 `reopen`(文字顺序不变)。
-fn run_inline(
-    run: &TextRun,
-    notes: &Notes,
-    mode: Mode,
-    line_start: bool,
-    reopen: Option<&str>,
-) -> String {
-    let mut out = String::new();
-    // `out` 本行迄今是否只有空白:每段追加后只扫新增部分。
-    let mut blank = true;
+/// 一个 run 的行内内容(文字分段 + 图片),写进 `out`(可能位于一个按需打开的链接里)。
+fn run_inline(run: &TextRun, notes: &Notes, out: &mut MdBuf) {
+    let mode = out.mode;
     for seg in &run.segments {
-        let start = out.len();
         match seg {
-            RunSegment::Text(s) => match mode {
-                Mode::Html => out.push_str(&escape_html(s)),
-                Mode::Markdown => {
-                    let at_start = if out.is_empty() { line_start } else { blank };
-                    out.push_str(&escape_md(s, at_start));
-                }
-                Mode::Text => out.push_str(s),
+            RunSegment::Text(s) => out.text(s),
+            RunSegment::Tab => out.text("\t"),
+            RunSegment::Break(_) => match mode {
+                Mode::Html => out.content_gen("<br>"),
+                // 链接文字里的换行折成空格:连续两个换行会产生空行、把链接截断。
+                Mode::Markdown if out.link.is_some() => out.text(" "),
+                _ => out.text("\n"),
             },
-            RunSegment::Tab => out.push('\t'),
-            RunSegment::Break(_) => out.push_str(if mode == Mode::Html { "<br>" } else { "\n" }),
             RunSegment::NoteRef { kind, id } => {
                 if let Some(mark) = notes.mark(*kind, *id) {
-                    match reopen {
-                        Some(open) => out.push_str(&format!("</a>{mark}{open}")),
-                        None => out.push_str(&mark),
-                    }
+                    out.close_link();
+                    out.gen(&mark);
                 }
             }
             RunSegment::CommentRef { .. } => {}
         }
-        blank = blank_after(blank, &out[start..]);
     }
     for pic in &run.pictures {
         let alt = pic.alt.as_deref().unwrap_or("");
         match (mode, pic.media_name.as_deref()) {
             (Mode::Markdown, Some(src)) => {
-                out.push_str(&format!("![{}]({})", escape_md(alt, false), md_url(src)))
+                out.content_gen("![");
+                out.alt_text(alt);
+                out.gen(&format!("]({})", md_url(src)));
             }
-            (Mode::Html, Some(src)) => out.push_str(&format!(
+            (Mode::Html, Some(src)) => out.content_gen(&format!(
                 "<img alt=\"{}\" src=\"{}\">",
                 escape_html(alt),
                 escape_html(src)
             )),
-            // 纯文本,或没有可引用的媒体名:有 alt 才出,没有就不出。
-            _ if !alt.is_empty() => out.push_str(&format!("[图片: {alt}]")),
+            // 纯文本,或没有可引用的媒体名:有 alt 才出(alt 是文档内容,按模式转义),没有就不出。
+            _ if !alt.is_empty() => out.text(&format!("[图片: {alt}]")),
             _ => {}
         }
     }
-    out
 }
 
-/// 增量的行首状态:`blank` 为追加前「本行迄今只有空白」,返回追加 `appended` 之后的状态。
-/// 只检查新增字节(换行重置为 `true`,非空白字符置 `false`),整段拼接因此是线性的。
-fn blank_after(blank: bool, appended: &str) -> bool {
-    #[cfg(test)]
-    LINE_SCAN_BYTES.with(|c| c.set(c.get() + appended.len()));
-    match appended.rfind('\n') {
-        Some(i) => appended[i + 1..].trim().is_empty(),
-        None => blank && appended.trim().is_empty(),
+/// 行内缓冲里每个字节的来源(只在 Markdown 下记录)。
+#[derive(Clone, Copy, PartialEq)]
+enum Span {
+    /// 导出器生成的 Markdown 语法(链接括号与目的地、脚注标记、图片语法、分隔符),不转义。
+    Gen,
+    /// 文档内容,按块的上下文转义。
+    Text,
+    /// 链接文字 / 图片 alt 里的文档内容:另外转义 `]`。
+    Link,
+}
+
+/// 一个按需打开的超链接:有内容要写时才输出开标记;闭合时若没写进任何内容就撤掉开标记。
+struct LinkState {
+    open: String,
+    close: String,
+    /// 开标记在缓冲里的起点;`None` = 当前未打开。
+    opened_at: Option<usize>,
+}
+
+impl LinkState {
+    fn new(open: String, close: String) -> Self {
+        LinkState {
+            open,
+            close,
+            opened_at: None,
+        }
     }
 }
 
-/// Markdown 文本转义:**所有**来自文档内容的文字(段落 / 链接文字 / 图片 alt / 表格单元格 /
-/// 标题 / 脚注)都经它,使内容无法形成链接 / 图片 / 行内 HTML / 强调 / 代码段 / 块级标记。
-/// - 行内:反斜杠先转义,再 `* _ ` + `` ` `` + `[ ] ( ) < > & ~`(CommonMark 允许反斜杠转义任何 ASCII 标点)。
-///   `&` 防 `&#60;` 之类实体还原出 `<`;`~` 防 GFM 删除线。
-/// - 行首(`at_line_start`,换行后也是行首):`# > - + =` 转义;「1–9 位数字 + `.` / `)`」转义其标点
-///   (否则成有序列表);前导空白 >= 4 列会成缩进代码块,去掉。
-/// - 表格里的 `|` 由 [`md_cell_text`] 在单元格层处理(整行才知道是否在表内)。
-fn escape_md(s: &str, at_line_start: bool) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut at_start = at_line_start;
-    let mut lead = String::new();
-    let mut lead_cols = 0usize;
+/// 行内输出缓冲。纯文本 / HTML 直接拼好(HTML 文字写入时即转义);Markdown 额外记**逐字节来源**
+/// (与 `s` 等长),由块的组装方把整块拼完后一趟 [`md_escape`]——转义规则依赖跨 run 的上下文
+/// (`&` 与后一个 run 的 `#x3C;`、导出器生成的 `]` 与后一个 run 的 `(`),不能逐片段转义。
+struct MdBuf {
+    mode: Mode,
+    s: String,
+    spans: Vec<Span>,
+    link: Option<LinkState>,
+}
+
+impl MdBuf {
+    fn new(mode: Mode) -> Self {
+        MdBuf {
+            mode,
+            s: String::new(),
+            spans: Vec::new(),
+            link: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.s.is_empty()
+    }
+
+    fn push(&mut self, t: &str, span: Span) {
+        self.s.push_str(t);
+        if self.mode == Mode::Markdown {
+            self.spans.extend(std::iter::repeat_n(span, t.len()));
+        }
+    }
+
+    /// 导出器生成的语法(不转义;不打开链接)。
+    fn gen(&mut self, t: &str) {
+        self.push(t, Span::Gen);
+    }
+
+    /// 导出器生成、但属于链接内容的语法(图片、HTML `<br>`):先按需打开链接。
+    fn content_gen(&mut self, t: &str) {
+        self.open_link();
+        self.gen(t);
+    }
+
+    /// 文档内容。HTML 写入时转义;Markdown 记来源,链接文字里的换行折成空格。
+    fn text(&mut self, t: &str) {
+        if t.is_empty() {
+            return;
+        }
+        self.open_link();
+        match self.mode {
+            Mode::Text => self.s.push_str(t),
+            Mode::Html => self.s.push_str(&escape_html(t)),
+            Mode::Markdown if self.link.is_some() => self.push(&t.replace('\n', " "), Span::Link),
+            Mode::Markdown => self.push(t, Span::Text),
+        }
+    }
+
+    /// 图片 alt(Markdown 专用):与链接文字同样转义 `]`,换行折成空格。
+    fn alt_text(&mut self, t: &str) {
+        self.push(&t.replace('\n', " "), Span::Link);
+    }
+
+    fn open_link(&mut self) {
+        let Some(l) = self.link.as_mut() else { return };
+        if l.opened_at.is_some() {
+            return;
+        }
+        l.opened_at = Some(self.s.len());
+        let open = l.open.clone();
+        self.gen(&open);
+    }
+
+    fn close_link(&mut self) {
+        let Some(l) = self.link.as_mut() else { return };
+        let Some(at) = l.opened_at.take() else { return };
+        if self.s.len() == at + l.open.len() {
+            self.s.truncate(at);
+            self.spans.truncate(at);
+        } else {
+            let close = l.close.clone();
+            self.gen(&close);
+        }
+    }
+
+    fn append(&mut self, other: MdBuf) {
+        self.s.push_str(&other.s);
+        self.spans.extend(other.spans);
+    }
+
+    /// 用导出器生成的分隔符连接若干缓冲。
+    fn join(parts: Vec<MdBuf>, sep: &str) -> MdBuf {
+        let mode = parts.first().map_or(Mode::Text, |p| p.mode);
+        let mut out = MdBuf::new(mode);
+        for (i, p) in parts.into_iter().enumerate() {
+            if i > 0 {
+                out.gen(sep);
+            }
+            out.append(p);
+        }
+        out
+    }
+}
+
+/// Markdown 块的转义上下文。
+#[derive(Clone, Copy, PartialEq)]
+enum MdCtx {
+    /// 段落 / 列表项内容 / 列表标签作前缀的段落:每行行首做块结构转义;块的首行(含空行之后的行)
+    /// 去掉 >= 4 列的前导空白。
+    Block,
+    /// ATX 标题内容:标题行只做行内转义 + 结尾 `#` 序列转义;标题里的换行之后按 `Block` 处理。
+    Heading,
+    /// GFM 表格单元格:只做行内转义,`|` 一律转义,换行写成 `<br>`,**不做任何行首规则**。
+    Cell,
+    /// 脚注定义 `[^n]: 内容`:只做行内转义,换行折成空格,并保证纯 CommonMark 下不构成链接引用定义。
+    NoteDef,
+}
+
+#[cfg(test)]
+fn count_scan(n: usize) {
+    SCAN_BYTES.with(|c| c.set(c.get() + n));
+}
+
+/// Markdown 转义:**在文档内容不能注入任何 Markdown 结构的前提下,转义越少越好**(输出给 RAG)。
+/// 只转义文档内容(`Span::Text` / `Span::Link`),导出器生成的语法原样。规则(最小必要集,复审用
+/// markdown-it 逐条验证过):
+/// - `[` 一律(链接 / 图片 / 引用定义 / 脚注都要它开头);`]` 只在链接文字与图片 alt 里。
+/// - `(` 与 `:` 只在紧跟**导出器生成的** `]` 时(脚注标记 `[^1]` 后接文档的 `(javascript:…)` 会成内联链接,
+///   接 `: x` 会成引用定义);`)` 不转义。
+/// - `<` 只在后跟 ASCII 字母、`/`、`!`、`?` 时(HTML 标签 / 注释 / 处理指令 / 自动链接都以此开头)。
+/// - `>` 只在行首(引用块)。`&` 只在构成实体引用时(`&名字;`、`&#数字;`、`&#x十六进制;`)。
+/// - `_` 只在词边界(两侧都是字母数字的词内 `_` 不能开闭强调);`*` 两侧都是空白时不转义。
+/// - 反引号一律;`~` 同一块里出现两个及以上时(删除线成对)。
+/// - `\` 只在后跟 ASCII 标点、换行或位于块尾时(否则它本就是字面反斜杠)。
+/// - 行首(`Block`,及 `Heading` 的续行):`#{1,6}` 后跟空白 / 行尾、`- + *` 后跟空白 / 行尾、只由
+///   `- = * _` 与空白组成的行(setext / 分隔线)、1–9 位数字 + `.`/`)` + 空白 / 行尾、`>`、像表格分隔行的行,
+///   各转义其首个(或数字后的)标点。三个以上的反引号 / `~` 已由上面的规则覆盖。
+/// - 块的首行(段落首行、列表项内容首行、空行之后的行)前导空白 >= 4 列会成缩进代码块:**去掉这段前导
+///   空白**——CommonMark 渲染段落时本来就会去掉首行前导空白,可见内容不变,只是原始 Markdown 里该行
+///   失去缩进;续行(段落内换行)不会成代码块,缩进保留。
+/// - `|`:单元格里一律;`Block` / `Heading` 里只要有一行像表格分隔行(只含 `|` `-` `:` 与空白、含 `-`
+///   且含 `|` 或 `:`),整块的 `|` 都转义(否则可拼出管道表)。
+/// - 标题:结尾的 `#` 序列(前面是空白或整行都是 `#`)会被当成结束序列吃掉,转义其首个 `#`。
+/// - 脚注定义:见 [`note_def_guard`]。
+///
+/// 一趟线性扫描(另有两趟线性预扫:`~` 计数、分隔行检测);前瞻都有常数上界。
+fn md_escape(buf: &MdBuf, ctx: MdCtx) -> String {
+    let s = buf.s.as_str();
+    let bytes = s.as_bytes();
+    let is_content = |i: usize| buf.spans.get(i).is_some_and(|&k| k != Span::Gen);
+    let line_ctx = matches!(ctx, MdCtx::Block | MdCtx::Heading);
+    #[cfg(test)]
+    count_scan(if line_ctx { 2 * s.len() } else { s.len() });
+    let tildes = bytes
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| b == b'~' && is_content(i))
+        .count();
+    let pipes = ctx == MdCtx::Cell || (line_ctx && s.split('\n').any(is_delimiter_row));
+    let heading_hash = match ctx {
+        MdCtx::Heading => closing_hash(&s[..s.find('\n').unwrap_or(s.len())]),
+        _ => None,
+    };
+    let guard = match ctx {
+        MdCtx::NoteDef => note_def_guard(s),
+        _ => NoteGuard::default(),
+    };
+    let mut out = String::with_capacity(s.len() + s.len() / 8 + 8);
+    // 行状态(只在 Block / Heading 下用):本行是否做行首规则、是否块的首行、是否在行首、本行是否空白。
+    let mut line_rules = ctx == MdCtx::Block;
+    let mut block_first = true;
+    let mut at_line_begin = line_rules;
+    let mut line_blank = false;
+    // 行首规则要求转义的位置。
+    let mut force: Option<usize> = None;
+    let mut prev: Option<char> = None;
     let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
+    while i < s.len() {
+        if at_line_begin {
+            at_line_begin = false;
+            let line_end = s[i..].find('\n').map_or(s.len(), |k| i + k);
+            #[cfg(test)]
+            count_scan(line_end - i);
+            let line = &s[i..line_end];
+            let rest = line.trim_start_matches([' ', '\t']);
+            let ws = &line[..line.len() - rest.len()];
+            line_blank = rest.is_empty();
+            if !(block_first && !line_blank && indent_cols(ws) >= 4) {
+                out.push_str(ws);
+                prev = ws.chars().next_back().or(prev);
+            }
+            i += ws.len();
+            force = line_start_escape(rest).map(|off| i + off);
+            continue;
+        }
+        let Some(c) = s[i..].chars().next() else {
+            break;
+        };
+        let len = c.len_utf8();
         if c == '\n' {
-            if lead_cols < 4 {
-                out.push_str(&lead);
-            }
-            lead.clear();
-            lead_cols = 0;
-            out.push('\n');
-            at_start = true;
-            i += 1;
-            continue;
-        }
-        if at_start && (c == ' ' || c == '\t') {
-            lead.push(c);
-            lead_cols += if c == '\t' { 4 } else { 1 };
-            i += 1;
-            continue;
-        }
-        if at_start {
-            if lead_cols < 4 {
-                out.push_str(&lead);
-            }
-            lead.clear();
-            lead_cols = 0;
-            at_start = false;
-            match c {
-                '#' | '>' | '-' | '+' | '=' => {
-                    out.push('\\');
-                    out.push(c);
-                    i += 1;
+            match ctx {
+                MdCtx::Cell => {
+                    out.push_str("<br>");
+                    prev = Some('>');
+                    i += len;
                     continue;
                 }
-                '0'..='9' => {
-                    let mut j = i;
-                    while j < chars.len() && chars[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    // 仅当标点后是空白 / 段尾才构成列表标记(`1.2.3` 不是)。
-                    let marker = matches!(chars.get(j), Some('.' | ')'))
-                        && chars.get(j + 1).is_none_or(|n| n.is_whitespace());
-                    if (1..=9).contains(&(j - i)) && marker {
-                        out.extend(&chars[i..j]);
-                        out.push('\\');
-                        out.push(chars[j]);
-                        i = j + 1;
-                        continue;
-                    }
+                MdCtx::NoteDef => out.push(' '),
+                MdCtx::Block | MdCtx::Heading => {
+                    out.push('\n');
+                    // 标题行结束后是新块;否则空行之后才是新块的首行。
+                    block_first = !line_rules || line_blank;
+                    line_rules = true;
+                    at_line_begin = true;
                 }
-                _ => {}
             }
+            prev = Some('\n');
+            i += len;
+            continue;
         }
-        if matches!(
-            c,
-            '\\' | '*' | '_' | '`' | '[' | ']' | '(' | ')' | '<' | '>' | '&' | '~'
-        ) {
+        // 下一个字符按它最终的样子算:单元格里的换行写成 `<br>`(不是空白)。
+        let next = match s[i + len..].chars().next() {
+            Some('\n') if ctx == MdCtx::Cell => Some('<'),
+            n => n,
+        };
+        let after_gen_bracket = i > 0 && bytes[i - 1] == b']' && !is_content(i - 1);
+        let escape = is_content(i)
+            && (force == Some(i)
+                || heading_hash == Some(i)
+                || guard.escape.contains(&Some(i))
+                || match c {
+                    '\\' => next.is_none_or(|n| n == '\n' || n.is_ascii_punctuation()),
+                    '[' | '`' => true,
+                    ']' => buf.spans.get(i) == Some(&Span::Link),
+                    '(' | ':' => after_gen_bracket,
+                    '<' => next
+                        .is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?')),
+                    '&' => entity_follows(&s[i..]),
+                    '_' => {
+                        !(prev.is_some_and(char::is_alphanumeric)
+                            && next.is_some_and(char::is_alphanumeric))
+                    }
+                    '*' => {
+                        !(prev.is_none_or(char::is_whitespace)
+                            && next.is_none_or(char::is_whitespace))
+                    }
+                    '~' => tildes >= 2,
+                    '|' => pipes,
+                    _ => false,
+                });
+        if escape {
             out.push('\\');
         }
         out.push(c);
-        i += 1;
+        prev = Some(c);
+        i += len;
     }
-    // 整段(或最后一行)全是空白且已 >= 4 列:丢掉,免得与后续 run 拼成缩进代码块。
-    if lead_cols < 4 {
-        out.push_str(&lead);
+    if guard.zwsp {
+        out.push_str(" \u{200B}");
     }
     out
+}
+
+/// 前导空白的列数(制表符推进到下一个 4 的倍数)。
+fn indent_cols(ws: &str) -> usize {
+    ws.chars().fold(
+        0,
+        |col, c| if c == '\t' { col / 4 * 4 + 4 } else { col + 1 },
+    )
+}
+
+/// 行首(已去掉前导空白的本行 `rest`)需要转义的字节偏移;不需要时 `None`。
+fn line_start_escape(rest: &str) -> Option<usize> {
+    let first = rest.chars().next()?;
+    let ws_or_end = |at: usize| {
+        rest[at..]
+            .chars()
+            .next()
+            .is_none_or(|c| c == ' ' || c == '\t')
+    };
+    let only_marks = rest
+        .chars()
+        .all(|c| matches!(c, '-' | '=' | '*' | '_' | ' ' | '\t'));
+    if only_marks || is_delimiter_row(rest) {
+        return Some(0);
+    }
+    match first {
+        '#' => {
+            let run = rest.bytes().take_while(|&b| b == b'#').count();
+            (run <= 6 && ws_or_end(run)).then_some(0)
+        }
+        '-' | '+' | '*' => ws_or_end(1).then_some(0),
+        '>' => Some(0),
+        '0'..='9' => {
+            let d = rest.bytes().take_while(u8::is_ascii_digit).count();
+            let marker = d <= 9 && matches!(rest.as_bytes().get(d), Some(b'.' | b')'));
+            (marker && ws_or_end(d + 1)).then_some(d)
+        }
+        _ => None,
+    }
+}
+
+/// 一行是否像 GFM 表格分隔行:只含 `|` `-` `:` 与空白,含 `-`,且含 `|` 或 `:`。
+fn is_delimiter_row(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty()
+        && t.contains('-')
+        && (t.contains('|') || t.contains(':'))
+        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+}
+
+/// ATX 标题行结尾的 `#` 结束序列(前面是空白,或整行都是 `#`)的起点;没有则 `None`。
+fn closing_hash(line: &str) -> Option<usize> {
+    let t = line.trim_end_matches([' ', '\t']);
+    let start = t.trim_end_matches('#').len();
+    if start == t.len() {
+        return None;
+    }
+    let before = &t[..start];
+    (before.trim().is_empty() || before.ends_with([' ', '\t'])).then_some(start)
+}
+
+/// `&` 开头的串是否构成实体引用(`&名字;` / `&#1–7 位数字;` / `&#x1–6 位十六进制;`);前瞻有上界。
+fn entity_follows(t: &str) -> bool {
+    let b = t.as_bytes();
+    let run = |from: usize, max: usize, ok: fn(&u8) -> bool| {
+        let n = b[from.min(b.len())..]
+            .iter()
+            .take(max + 1)
+            .take_while(|c| ok(c))
+            .count();
+        (n >= 1 && n <= max && b.get(from + n) == Some(&b';')).then_some(())
+    };
+    match b.get(1) {
+        Some(b'#') => match b.get(2) {
+            Some(b'x' | b'X') => run(3, 6, u8::is_ascii_hexdigit).is_some(),
+            _ => run(2, 7, u8::is_ascii_digit).is_some(),
+        },
+        Some(c) if c.is_ascii_alphabetic() => run(1, 32, u8::is_ascii_alphanumeric).is_some(),
+        _ => false,
+    }
+}
+
+/// 脚注定义的防护:`[^1]: 内容` 在不开脚注扩展的 CommonMark 里是**链接引用定义**——内容的第一个词
+/// 成为链接目的地(`javascript:` / `data:` 也行),正文的 `[^1]` 就渲染成指向它的链接。定义只在
+/// 「目的地 + 可选标题 + 行尾」时成立,所以:
+/// - 内容以 `<` 开头时转义它(否则可成尖括号目的地,里面还能有空格);
+/// - 第二个词以 `"` `'` `(` 开头时转义它(不再能作标题,定义因多余内容不成立);
+/// - 只有一个词时在末尾补「空格 + U+200B」:U+200B 不是 CommonMark 空白、也不能开始标题,定义不成立;
+///   渲染不可见,在支持脚注扩展的解析器(GFM)里仍是同一条脚注。
+#[derive(Default)]
+struct NoteGuard {
+    escape: [Option<usize>; 2],
+    zwsp: bool,
+}
+
+fn note_def_guard(s: &str) -> NoteGuard {
+    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n');
+    let lead = s.len() - s.trim_start_matches(is_ws).len();
+    if lead == s.len() {
+        return NoteGuard::default();
+    }
+    let first_end = s[lead..].find(is_ws).map_or(s.len(), |k| lead + k);
+    let second = s[first_end..].find(|c| !is_ws(c)).map(|k| first_end + k);
+    let lt = (s.as_bytes()[lead] == b'<').then_some(lead);
+    match second {
+        None => NoteGuard {
+            escape: [lt, None],
+            zwsp: true,
+        },
+        Some(k) => NoteGuard {
+            escape: [
+                lt,
+                matches!(s.as_bytes()[k], b'"' | b'\'' | b'(').then_some(k),
+            ],
+            zwsp: false,
+        },
+    }
 }
 
 /// 超链接目标白名单:只放行 `http` / `https` / `mailto`(scheme 大小写不敏感,先去掉控制字符与
@@ -812,11 +1093,12 @@ fn safe_url(target: &str) -> Option<String> {
     (has_colon && matches!(scheme.as_str(), "http" | "https" | "mailto")).then_some(url)
 }
 
-/// Markdown 链接 / 图片目的地:空白、反斜杠与括号 / 尖括号百分号编码(其余原样),
-/// 保证目的地不会被 `)` / 空白提前终止、也不会被 `\` 转义吞掉。
+/// Markdown 链接 / 图片目的地:空白、反斜杠与括号 / 尖括号百分号编码(其余原样),保证目的地不会被
+/// `)` / 空白提前终止、也不会被 `\` 转义吞掉;构成实体引用的 `&` 反斜杠转义(目的地里的实体会被解码,
+/// `?q=&copy;` 会变成 `?q=©`;用 `\&` 而不是 `%26`,不改变查询串的含义)。
 fn md_url(url: &str) -> String {
     let mut out = String::with_capacity(url.len());
-    for c in url.chars() {
+    for (i, c) in url.char_indices() {
         match c {
             ' ' => out.push_str("%20"),
             '\\' => out.push_str("%5C"),
@@ -824,6 +1106,7 @@ fn md_url(url: &str) -> String {
             ')' => out.push_str("%29"),
             '<' => out.push_str("%3C"),
             '>' => out.push_str("%3E"),
+            '&' if entity_follows(&url[i..]) => out.push_str("\\&"),
             _ => out.push(c),
         }
     }
@@ -1238,7 +1521,7 @@ mod tests {
     }
 
     /// 修复 1:同一段里 N 个 run(普通文字 / 同一尾注的 N 次引用 / 满是 Markdown 特殊字符)时,
-    /// 三种导出为判定行首而检查的总字节数与输出同阶(线性),不随 run 数平方增长。
+    /// 三种导出为判定行首 / 做 Markdown 转义而检查的总字节数与输出同阶(线性),不随 run 数平方增长。
     #[test]
     fn inline_line_state_is_linear_in_run_count() {
         let n = 4_000usize;
@@ -1276,12 +1559,12 @@ mod tests {
                 ("markdown", to_markdown),
                 ("html", to_html),
             ] {
-                LINE_SCAN_BYTES.with(|c| c.set(0));
+                SCAN_BYTES.with(|c| c.set(0));
                 let out = f(&doc);
-                let scanned = LINE_SCAN_BYTES.with(|c| c.get());
+                let scanned = SCAN_BYTES.with(|c| c.get());
                 assert!(
                     scanned <= 4 * out.len() + 64,
-                    "{name}/{fmt}: 行首判定检查了 {scanned} 字节,输出仅 {} 字节",
+                    "{name}/{fmt}: 扫描检查了 {scanned} 字节,输出仅 {} 字节",
                     out.len()
                 );
             }

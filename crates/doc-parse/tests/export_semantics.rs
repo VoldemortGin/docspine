@@ -285,8 +285,9 @@ fn multilevel_numbered_list_labels_in_all_exports() {
     // Markdown:`1.` 是合法有序列表语法,直接用;`1.1` / `(a)` 不是,作文字前缀成独立段。
     assert_eq!(
         to_markdown(&doc),
-        // `(a)` 标签前缀是文字,经统一 Markdown 转义后括号带反斜杠(原先不转义括号)。
-        "1. A\n\n1.1 B\n\n1.2 C\n\n\\(a\\) D\n\n2. E\n\n2.1 F"
+        // `(a)` 标签前缀是文字;括号不在导出器生成的 `]` 之后,不构成任何语法,不转义
+        // (第二轮复审:上一轮的 `\(a\)` 是过度转义)。
+        "1. A\n\n1.1 B\n\n1.2 C\n\n(a) D\n\n2. E\n\n2.1 F"
     );
     assert_eq!(
         to_html(&doc),
@@ -316,8 +317,8 @@ fn list_level_jump_does_not_over_indent() {
     // 从 0 级直接跳到 2 级:缩进不得超过父级内容 +1 层(否则 Markdown 当成缩进代码块)。
     let body = li(3, 0, "a") + &li(3, 1, "b");
     let md = to_markdown(&with_numbering(&li(1, 2, "deep")));
-    // 标签前缀走统一 Markdown 转义:括号带反斜杠。
-    assert_eq!(md, "\\(a\\) deep");
+    // 标签前缀 `(a)` 不构成 Markdown 语法,不转义。
+    assert_eq!(md, "(a) deep");
     assert_eq!(to_markdown(&with_numbering(&body)), "- a\n    - b");
 }
 
@@ -342,8 +343,8 @@ fn list_counters_continue_across_table_cells() {
     assert_eq!(to_text(&doc), "1. a\n2. b\tplain\n3. c");
     assert_eq!(
         to_markdown(&doc),
-        // 单元格内的标签前缀 `2. ` 位于单元格(行)首,按统一转义写成 `2\.`。
-        "1. a\n\n| 2\\. b | plain |\n| --- | --- |\n\n3. c"
+        // 单元格内不做行首规则(GFM 单元格只有行内内容,`2. ` 成不了列表),标签前缀原样。
+        "1. a\n\n| 2. b | plain |\n| --- | --- |\n\n3. c"
     );
     let html = to_html(&doc);
     assert!(
@@ -562,8 +563,8 @@ fn picture_alt_falls_back_to_title_then_empty() {
 #[test]
 fn picture_alt_is_escaped_and_whitespace_collapsed() {
     let doc = pic_doc(r#"descr="a ] &quot;b&quot;&#10;c &lt;d&gt;""#, "");
-    // 统一 Markdown 转义后 `<` `>` 也要转义(原先只转义 `[` `]`)。
-    assert_eq!(to_markdown(&doc), "![a \\] \"b\" c \\<d\\>](image1.png)");
+    // alt 里的 `]` 转义;`<d` 后跟字母会成 HTML 标签,`<` 转义;`>` 不在行首,不转义。
+    assert_eq!(to_markdown(&doc), "![a \\] \"b\" c \\<d>](image1.png)");
     assert_eq!(
         to_html(&doc),
         "<p><img alt=\"a ] &quot;b&quot; c &lt;d&gt;\" src=\"image1.png\"></p>"
@@ -740,4 +741,30 @@ fn proper_vmerge_chain_still_spans_and_swallows_continuations() {
         "<table>\n<tr>\n<td rowspan=\"3\">m</td>\n<td>1</td>\n</tr>\n<tr>\n<td>2</td>\n</tr>\n\
          <tr>\n<td>3</td>\n</tr>\n<tr>\n<td>n</td>\n<td>4</td>\n</tr>\n</table>"
     );
+}
+
+/// 没有可引用媒体名的图片:三种导出都退回 `[图片: alt]` 文字;alt 是文档内容,HTML / Markdown 照常转义
+/// (原先 HTML 把 alt 原样拼进输出,`<script>` 可直接注入)。
+#[test]
+fn picture_without_media_name_alt_is_escaped_in_html_and_markdown() {
+    use doc_core::model::{Block, Paragraph, Picture, TextRun};
+    let mut run = TextRun::default();
+    run.pictures.push(Picture {
+        media_name: None,
+        alt: Some("<script>x</script>".into()),
+        ..Picture::default()
+    });
+    let doc = Document {
+        body: vec![Block::Paragraph(Paragraph {
+            runs: vec![run],
+            ..Paragraph::default()
+        })],
+        ..Document::default()
+    };
+    assert_eq!(to_text(&doc), "[图片: <script>x</script>]");
+    assert_eq!(
+        to_html(&doc),
+        "<p>[图片: &lt;script&gt;x&lt;/script&gt;]</p>"
+    );
+    assert_eq!(to_markdown(&doc), "\\[图片: \\<script>x\\</script>]");
 }

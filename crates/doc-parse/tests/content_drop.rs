@@ -535,7 +535,8 @@ fn inline_omath_text_extracted_in_document_order() {
     // 复审:原期望 `x1/2y^3` 本身是错的(读成 x1 除以 2y³)。x 与分式、分式与 y^3 之间是乘法:
     // 分式整体加括号、结构与相邻项之间一个空格。
     assert_eq!(txt, "Let x (1/2) y^3 end");
-    assert!(to_markdown(&parsed.document).contains("x \\(1/2\\) y^3"));
+    // Markdown 不转义普通括号与 `^`(最小转义集)。
+    assert!(to_markdown(&parsed.document).contains("x (1/2) y^3"));
 }
 
 #[test]
