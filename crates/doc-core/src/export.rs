@@ -53,6 +53,12 @@ fn count_note_probe(n: usize) {
     NOTE_PROBES.with(|c| c.set(c.get() + n));
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 仅测试编译:行内拼接时为判定「是否在行首」而检查的字节数(线性性断言用)。
+    static LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // ============================================================ 纯文本
 
 /// 全文按块拼成纯文本:段落各占一行,表格每行的单元格用 `\t` 连接,块/行之间用 `\n`。
@@ -590,6 +596,7 @@ fn plain_prefix(item: &ListItem, mode: Mode) -> String {
 /// Markdown 下所有来自文档的文字都经 [`escape_md`] 转义,行首状态跨 run 跟踪。
 fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
     let mut out = String::new();
+    let mut out_blank = true;
     let mut i = 0;
     while i < p.runs.len() {
         let target = p.runs[i].link_target.as_deref();
@@ -608,14 +615,19 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
             })
             .flatten();
         let mut group = String::new();
+        // 「本行迄今只有空白」增量维护(只看新追加的字节),不回扫已拼好的输出。
+        let mut group_blank = true;
         for r in &p.runs[i..end] {
             let line_start = if group.is_empty() {
-                !linked && line_blank_so_far(&out)
+                !linked && out_blank
             } else {
-                !linked && line_blank_so_far(&group)
+                !linked && group_blank
             };
-            group.push_str(&run_inline(r, notes, mode, line_start, reopen.as_deref()));
+            let piece = run_inline(r, notes, mode, line_start, reopen.as_deref());
+            group_blank = blank_after(group_blank, &piece);
+            group.push_str(&piece);
         }
+        let start = out.len();
         match url {
             Some(url) if linked && !group.is_empty() => match mode {
                 Mode::Markdown => out.push_str(&format!("[{group}]({})", md_url(&url))),
@@ -628,6 +640,7 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
             },
             _ => out.push_str(&group),
         }
+        out_blank = blank_after(out_blank, &out[start..]);
         i = end;
     }
     out
@@ -644,16 +657,15 @@ fn run_inline(
     reopen: Option<&str>,
 ) -> String {
     let mut out = String::new();
+    // `out` 本行迄今是否只有空白:每段追加后只扫新增部分。
+    let mut blank = true;
     for seg in &run.segments {
+        let start = out.len();
         match seg {
             RunSegment::Text(s) => match mode {
                 Mode::Html => out.push_str(&escape_html(s)),
                 Mode::Markdown => {
-                    let at_start = if out.is_empty() {
-                        line_start
-                    } else {
-                        line_blank_so_far(&out)
-                    };
+                    let at_start = if out.is_empty() { line_start } else { blank };
                     out.push_str(&escape_md(s, at_start));
                 }
                 Mode::Text => out.push_str(s),
@@ -670,6 +682,7 @@ fn run_inline(
             }
             RunSegment::CommentRef { .. } => {}
         }
+        blank = blank_after(blank, &out[start..]);
     }
     for pic in &run.pictures {
         let alt = pic.alt.as_deref().unwrap_or("");
@@ -690,9 +703,15 @@ fn run_inline(
     out
 }
 
-/// `s` 的最后一行迄今是否只有空白(即下一个字符仍在行首)。
-fn line_blank_so_far(s: &str) -> bool {
-    s.rsplit('\n').next().is_none_or(|l| l.trim().is_empty())
+/// 增量的行首状态:`blank` 为追加前「本行迄今只有空白」,返回追加 `appended` 之后的状态。
+/// 只检查新增字节(换行重置为 `true`,非空白字符置 `false`),整段拼接因此是线性的。
+fn blank_after(blank: bool, appended: &str) -> bool {
+    #[cfg(test)]
+    LINE_SCAN_BYTES.with(|c| c.set(c.get() + appended.len()));
+    match appended.rfind('\n') {
+        Some(i) => appended[i + 1..].trim().is_empty(),
+        None => blank && appended.trim().is_empty(),
+    }
 }
 
 /// Markdown 文本转义:**所有**来自文档内容的文字(段落 / 链接文字 / 图片 alt / 表格单元格 /
@@ -1216,6 +1235,57 @@ mod tests {
         let probes = NOTE_PROBES.with(|c| c.get());
         assert!(text.starts_with("[1][2][3]"), "编号按首次引用顺序");
         assert!(probes <= 4 * f, "probes {probes} 应 <= 4 * F = {}", 4 * f);
+    }
+
+    /// 修复 1:同一段里 N 个 run(普通文字 / 同一尾注的 N 次引用 / 满是 Markdown 特殊字符)时,
+    /// 三种导出为判定行首而检查的总字节数与输出同阶(线性),不随 run 数平方增长。
+    #[test]
+    fn inline_line_state_is_linear_in_run_count() {
+        let n = 4_000usize;
+        let plain = || TextRun::from_text("a");
+        let evil = || TextRun::from_text("[](<>*_`&~\\#-");
+        let note = || TextRun {
+            segments: vec![crate::model::RunSegment::NoteRef {
+                kind: NoteKind::Endnote,
+                id: 1,
+            }],
+            ..Default::default()
+        };
+        let link = |t: &str| TextRun {
+            link_target: Some("http://x.example/".into()),
+            ..TextRun::from_text(t)
+        };
+        let cases: Vec<(&str, Vec<TextRun>)> = vec![
+            ("plain", (0..n).map(|_| plain()).collect()),
+            ("note", (0..n).map(|_| note()).collect()),
+            ("evil", (0..n).map(|_| evil()).collect()),
+            ("link", (0..n).map(|_| link("a")).collect()),
+        ];
+        for (name, runs) in cases {
+            let mut doc = Document {
+                body: vec![Block::Paragraph(Paragraph {
+                    runs,
+                    ..Default::default()
+                })],
+                ..Default::default()
+            };
+            doc.endnotes
+                .insert(1, vec![Block::Paragraph(para("e", None))]);
+            for (fmt, f) in [
+                ("text", to_text as fn(&Document) -> String),
+                ("markdown", to_markdown),
+                ("html", to_html),
+            ] {
+                LINE_SCAN_BYTES.with(|c| c.set(0));
+                let out = f(&doc);
+                let scanned = LINE_SCAN_BYTES.with(|c| c.get());
+                assert!(
+                    scanned <= 4 * out.len() + 64,
+                    "{name}/{fmt}: 行首判定检查了 {scanned} 字节,输出仅 {} 字节",
+                    out.len()
+                );
+            }
+        }
     }
 
     /// HTML:超链接内的脚注引用不能生成嵌套 `<a>`(非法):在该位置先闭合外层链接、输出注标记、
