@@ -12,7 +12,8 @@
 //! (解析 / OCR)在 [`Python::detach`] 下释放 GIL 运行。错误折成以 `_core.DocError` 为根的
 //! 类型化异常层级。
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,7 +28,7 @@ use doc_parse::{parse_bytes, parse_path};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
 /// 包版本(镜像 Rust workspace 版本)。
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -72,6 +73,29 @@ fn color_hex(c: &Color) -> String {
 }
 
 // --- dict 构造:把领域模型映射成可自省的 list[dict] ----------------------
+
+/// 一次转换调用内的共享缓存:模型里由多处共享的同一份数据,Python 侧也只建一个对象,
+/// 避免按 run / 按节放大内存(4 KB 字段指令 × 20 万个结果 run 曾把 RSS 从 272 MB 推到 1.1 GB)。
+/// - 字段指令:同一字段结果区的 run 共享一个 `Arc<str>`,按指针缓存成同一个 `str`;
+/// - 页眉页脚部件:多节引用同一部件(同一 `rel_id`)时,`blocks` 是同一个 `list`。
+#[derive(Default)]
+struct Conv {
+    fields: RefCell<HashMap<usize, Py<PyString>>>,
+    parts: RefCell<HashMap<String, Py<PyList>>>,
+}
+
+impl Conv {
+    /// 字段指令对应的 Python `str`(同一 `Arc` 只建一次)。
+    fn field<'py>(&self, py: Python<'py>, instr: &Arc<str>) -> Bound<'py, PyString> {
+        let key = Arc::as_ptr(instr) as *const u8 as usize;
+        if let Some(s) = self.fields.borrow().get(&key) {
+            return s.bind(py).clone();
+        }
+        let s = PyString::new(py, instr);
+        self.fields.borrow_mut().insert(key, s.clone().unbind());
+        s
+    }
+}
 
 /// 一个 [`RunSegment`] -> dict(`kind` 为 `"text"` / `"tab"` / `"break"` / `"note_ref"` / `"comment_ref"`;
 /// `break` 段另带 `break_type`:`"line"` / `"page"` / `"column"`;`note_ref` 段带 `note_kind`:
@@ -118,7 +142,7 @@ fn segment_dict<'py>(py: Python<'py>, seg: &RunSegment) -> PyResult<Bound<'py, P
 /// 一个 [`TextRun`] -> dict。`text` 是分段折叠后的纯文本(契约不变:Tab -> `\t`、
 /// Break -> `\n`);`segments` 是无损的内容分段(`w:br@w:type` 不再丢失);`field` 是所属可见字段结果的
 /// 字段指令(如 `"PAGE"`),不属于字段为 `None`。
-fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>> {
+fn run_dict<'py>(py: Python<'py>, cv: &Conv, run: &TextRun) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("text", run.text())?;
     let segs = PyList::empty(py);
@@ -143,7 +167,7 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
     for tb in &run.text_boxes {
         let blocks = PyList::empty(py);
         for b in &tb.blocks {
-            blocks.append(block_dict(py, b)?)?;
+            blocks.append(block_dict(py, cv, b)?)?;
         }
         let bd = PyDict::new(py);
         bd.set_item("blocks", blocks)?;
@@ -151,7 +175,7 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
     }
     d.set_item("text_boxes", boxes)?;
     d.set_item("is_math", run.is_math)?;
-    d.set_item("field", run.field.as_deref())?;
+    d.set_item("field", run.field.as_ref().map(|f| cv.field(py, f)))?;
     Ok(d)
 }
 
@@ -176,11 +200,15 @@ fn picture_dict<'py>(py: Python<'py>, pic: &Picture) -> PyResult<Bound<'py, PyDi
 }
 
 /// 一个 [`Paragraph`] -> dict。
-fn paragraph_dict<'py>(py: Python<'py>, para: &Paragraph) -> PyResult<Bound<'py, PyDict>> {
+fn paragraph_dict<'py>(
+    py: Python<'py>,
+    cv: &Conv,
+    para: &Paragraph,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let runs = PyList::empty(py);
     for r in &para.runs {
-        runs.append(run_dict(py, r)?)?;
+        runs.append(run_dict(py, cv, r)?)?;
     }
     d.set_item("kind", "paragraph")?;
     d.set_item("runs", runs)?;
@@ -192,11 +220,11 @@ fn paragraph_dict<'py>(py: Python<'py>, para: &Paragraph) -> PyResult<Bound<'py,
 }
 
 /// 一个 [`Cell`] -> dict(`blocks` 递归,所以嵌套表天然展开)。
-fn cell_dict<'py>(py: Python<'py>, cell: &Cell) -> PyResult<Bound<'py, PyDict>> {
+fn cell_dict<'py>(py: Python<'py>, cv: &Conv, cell: &Cell) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let blocks = PyList::empty(py);
     for b in &cell.blocks {
-        blocks.append(block_dict(py, b)?)?;
+        blocks.append(block_dict(py, cv, b)?)?;
     }
     d.set_item("blocks", blocks)?;
     // 便利:单元格直接段落文字(忽略嵌套表)。
@@ -220,12 +248,12 @@ fn vmerge_str(v: VMerge) -> &'static str {
 }
 
 /// 一个 [`Row`] -> dict(`cells` + 便利的 `text` 列表)。
-fn row_dict<'py>(py: Python<'py>, row: &Row) -> PyResult<Bound<'py, PyDict>> {
+fn row_dict<'py>(py: Python<'py>, cv: &Conv, row: &Row) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let cells = PyList::empty(py);
     let texts = PyList::empty(py);
     for c in &row.cells {
-        let cd = cell_dict(py, c)?;
+        let cd = cell_dict(py, cv, c)?;
         texts.append(cd.get_item("text")?)?;
         cells.append(cd)?;
     }
@@ -239,11 +267,11 @@ fn row_dict<'py>(py: Python<'py>, row: &Row) -> PyResult<Bound<'py, PyDict>> {
 }
 
 /// 一张 [`Table`] -> dict。
-fn table_dict<'py>(py: Python<'py>, table: &Table) -> PyResult<Bound<'py, PyDict>> {
+fn table_dict<'py>(py: Python<'py>, cv: &Conv, table: &Table) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let rows = PyList::empty(py);
     for r in &table.rows {
-        rows.append(row_dict(py, r)?)?;
+        rows.append(row_dict(py, cv, r)?)?;
     }
     d.set_item("kind", "table")?;
     d.set_item("rows", rows)?;
@@ -255,10 +283,10 @@ fn table_dict<'py>(py: Python<'py>, table: &Table) -> PyResult<Bound<'py, PyDict
 }
 
 /// 一个 [`Block`] -> dict。
-fn block_dict<'py>(py: Python<'py>, block: &Block) -> PyResult<Bound<'py, PyDict>> {
+fn block_dict<'py>(py: Python<'py>, cv: &Conv, block: &Block) -> PyResult<Bound<'py, PyDict>> {
     match block {
-        Block::Paragraph(p) => paragraph_dict(py, p),
-        Block::Table(t) => table_dict(py, t),
+        Block::Paragraph(p) => paragraph_dict(py, cv, p),
+        Block::Table(t) => table_dict(py, cv, t),
     }
 }
 
@@ -266,6 +294,7 @@ fn block_dict<'py>(py: Python<'py>, block: &Block) -> PyResult<Bound<'py, PyDict
 /// `width` / `width_points` 的既有惯例)。
 fn section_dict<'py>(
     py: Python<'py>,
+    cv: &Conv,
     doc: &CoreDocument,
     sect: &Section,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -314,16 +343,17 @@ fn section_dict<'py>(
             PageNumFormat::Other => "other",
         },
     )?;
-    d.set_item("headers", header_footer_list(py, doc, &sect.headers)?)?;
-    d.set_item("footers", header_footer_list(py, doc, &sect.footers)?)?;
+    d.set_item("headers", header_footer_list(py, cv, doc, &sect.headers)?)?;
+    d.set_item("footers", header_footer_list(py, cv, doc, &sect.footers)?)?;
     Ok(d)
 }
 
 /// 一组页眉 / 页脚引用 -> `list[{"type", "rel_id", "blocks"}]`:`type` 为 `"default"` /
-/// `"first"` / `"even"`,`blocks` 是部件内容(块 dict 同 `body()`)。指向同一部件的节
-/// 各自带一份;`rel_id` 相同即同一部件。
+/// `"first"` / `"even"`,`blocks` 是部件内容(块 dict 同 `body()`)。`rel_id` 相同即同一部件;
+/// 同一次调用里引用同一部件的各节共享同一个 `blocks` 列表对象(部件内容只转换一次)。
 fn header_footer_list<'py>(
     py: Python<'py>,
+    cv: &Conv,
     doc: &CoreDocument,
     refs: &[HeaderFooterRef],
 ) -> PyResult<Bound<'py, PyList>> {
@@ -332,21 +362,32 @@ fn header_footer_list<'py>(
         let d = PyDict::new(py);
         d.set_item("type", r.kind.as_str())?;
         d.set_item("rel_id", &r.rel_id)?;
-        let blocks = doc
-            .header_footers
-            .get(&r.rel_id)
-            .map_or(&[][..], Vec::as_slice);
-        d.set_item("blocks", blocks_list(py, blocks)?)?;
+        let cached = cv.parts.borrow().get(&r.rel_id).map(|l| l.bind(py).clone());
+        let blocks = match cached {
+            Some(list) => list,
+            None => {
+                let blocks = doc
+                    .header_footers
+                    .get(&r.rel_id)
+                    .map_or(&[][..], Vec::as_slice);
+                let list = blocks_list(py, cv, blocks)?;
+                cv.parts
+                    .borrow_mut()
+                    .insert(r.rel_id.clone(), list.clone().unbind());
+                list
+            }
+        };
+        d.set_item("blocks", blocks)?;
         list.append(d)?;
     }
     Ok(list)
 }
 
 /// 一串块 -> `list[dict]`(块 dict 同 `body()`)。
-fn blocks_list<'py>(py: Python<'py>, blocks: &[Block]) -> PyResult<Bound<'py, PyList>> {
+fn blocks_list<'py>(py: Python<'py>, cv: &Conv, blocks: &[Block]) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
     for b in blocks {
-        list.append(block_dict(py, b)?)?;
+        list.append(block_dict(py, cv, b)?)?;
     }
     Ok(list)
 }
@@ -354,13 +395,14 @@ fn blocks_list<'py>(py: Python<'py>, blocks: &[Block]) -> PyResult<Bound<'py, Py
 /// 注表 -> `list[{"id", "blocks"}]`(按 id 升序)。
 fn notes_list<'py>(
     py: Python<'py>,
+    cv: &Conv,
     notes: &BTreeMap<i64, Vec<Block>>,
 ) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
     for (id, blocks) in notes {
         let d = PyDict::new(py);
         d.set_item("id", id)?;
-        d.set_item("blocks", blocks_list(py, blocks)?)?;
+        d.set_item("blocks", blocks_list(py, cv, blocks)?)?;
         list.append(d)?;
     }
     Ok(list)
@@ -370,6 +412,7 @@ fn notes_list<'py>(
 /// 缺失的 `author` / `date` / `initials` 为 `None`)。
 fn comments_list<'py>(
     py: Python<'py>,
+    cv: &Conv,
     comments: &BTreeMap<i64, Comment>,
 ) -> PyResult<Bound<'py, PyList>> {
     let list = PyList::empty(py);
@@ -379,7 +422,7 @@ fn comments_list<'py>(
         d.set_item("author", c.author.as_deref())?;
         d.set_item("date", c.date.as_deref())?;
         d.set_item("initials", c.initials.as_deref())?;
-        d.set_item("blocks", blocks_list(py, &c.blocks)?)?;
+        d.set_item("blocks", blocks_list(py, cv, &c.blocks)?)?;
         list.append(d)?;
     }
     Ok(list)
@@ -493,19 +536,21 @@ impl PyDocument {
 
     /// 顶层正文块,作为 `list[dict]`(段落 / 表格)。
     fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let cv = &Conv::default();
         let list = PyList::empty(py);
         for b in &self.inner.body {
-            list.append(block_dict(py, b)?)?;
+            list.append(block_dict(py, cv, b)?)?;
         }
         Ok(list)
     }
 
     /// 便利:顶层段落,作为 `list[dict]`(过滤掉表格)。
     fn paragraphs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let cv = &Conv::default();
         let list = PyList::empty(py);
         for b in &self.inner.body {
             if let Block::Paragraph(p) = b {
-                list.append(paragraph_dict(py, p)?)?;
+                list.append(paragraph_dict(py, cv, p)?)?;
             }
         }
         Ok(list)
@@ -513,10 +558,11 @@ impl PyDocument {
 
     /// 便利:顶层表格,作为 `list[dict]`(过滤掉段落)。
     fn tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let cv = &Conv::default();
         let list = PyList::empty(py);
         for b in &self.inner.body {
             if let Block::Table(t) = b {
-                list.append(table_dict(py, t)?)?;
+                list.append(table_dict(py, cv, t)?)?;
             }
         }
         Ok(list)
@@ -530,9 +576,10 @@ impl PyDocument {
     /// `page_number_format`(`"decimal"` / `"lowerRoman"` / `"upperRoman"` / `"lowerLetter"` /
     /// `"upperLetter"`,其它取值为 `"other"`)。
     fn sections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let cv = &Conv::default();
         let list = PyList::empty(py);
         for s in &self.inner.sections {
-            list.append(section_dict(py, &self.inner, s)?)?;
+            list.append(section_dict(py, cv, &self.inner, s)?)?;
         }
         Ok(list)
     }
@@ -541,19 +588,22 @@ impl PyDocument {
     /// separator 类非内容注;`blocks` 同 `body()` 的块 dict)。正文里的引用是 run 的
     /// `kind == "note_ref"` 分段。
     fn footnotes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        notes_list(py, &self.inner.footnotes)
+        let cv = &Conv::default();
+        notes_list(py, cv, &self.inner.footnotes)
     }
 
     /// 尾注(`word/endnotes.xml`),形状同 [`footnotes`](Self::footnotes)。
     fn endnotes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        notes_list(py, &self.inner.endnotes)
+        let cv = &Conv::default();
+        notes_list(py, cv, &self.inner.endnotes)
     }
 
     /// 批注(`word/comments.xml`),作为 `list[{"id", "author", "date", "initials", "blocks"}]`
     /// (按 id 升序;属性缺失为 `None`;`blocks` 同 `body()` 的块 dict)。正文里的锚点是 run 的
     /// `kind == "comment_ref"` 分段。批注是审阅元数据,**不进** `to_text` / `to_markdown` / `to_html`。
     fn comments<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        comments_list(py, &self.inner.comments)
+        let cv = &Conv::default();
+        comments_list(py, cv, &self.inner.comments)
     }
 
     /// 便利:把全文按段落顺序拼成纯文本(表格按行、单元格按 tab 连接)。

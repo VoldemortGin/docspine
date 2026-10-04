@@ -796,3 +796,44 @@ def test_exports_release_the_gil():
         th.join()
         # 持有 GIL 时整个导出期间计数线程拿不到时间片(gained≈0);释放时约每毫秒一次。
         assert gained >= 5, f"{name}: ticker only advanced {gained} during a {solo:.3f}s export"
+
+
+def test_field_instruction_is_one_shared_str_across_result_runs():
+    """同一字段结果区的 run 在 Rust 里共享一份指令(`Arc<str>`);Python 侧也只建一个 str 对象,
+    否则 4 KB 指令 × 数十万结果 run 会把内存放大到 GB 级。"""
+    instr = "PAGE " + "x" * 3000
+    runs = "".join(f"<w:r><w:t>{i}</w:t></w:r>" for i in range(50))
+    complex_field = (
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        f"<w:r><w:instrText>{instr}</w:instrText></w:r>"
+        f'<w:r><w:fldChar w:fldCharType="separate"/></w:r>{runs}'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    )
+    simple_field = f'<w:p><w:fldSimple w:instr="{instr}">{runs}</w:fldSimple></w:p>'
+    doc = docspine.open_bytes(
+        build_docx(_DOC_HEADER + f"<w:body>{complex_field}{simple_field}</w:body></w:document>")
+    )
+    for para in (doc.paragraphs()[0], doc.body()[1]):
+        fields = [r["field"] for r in para["runs"] if r["field"] is not None]
+        assert len(fields) == 50 and fields[0].startswith("PAGE")
+        assert all(f is fields[0] for f in fields)
+
+
+def test_sections_referencing_one_header_part_share_its_blocks():
+    """多节引用同一页眉部件时,`sections()` 里各节的 `blocks` 是同一个列表对象(不按节复制部件内容)。"""
+    sect = '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>'
+    body = (
+        f"<w:body><w:p><w:pPr>{sect}</w:pPr><w:r><w:t>a</w:t></w:r></w:p>"
+        f"<w:p><w:pPr>{sect}</w:pPr><w:r><w:t>b</w:t></w:r></w:p>"
+        f"<w:p><w:r><w:t>c</w:t></w:r></w:p>{sect}</w:body>"
+    )
+    docx = _with_parts(
+        build_docx(_DOC_HEADER + body + "</w:document>"),
+        {"word/header1.xml": f"<w:hdr {_W_NS}>{_p('Top')}</w:hdr>"},
+        {"rIdH": ("header", "header1.xml")},
+    )
+    sections = docspine.open_bytes(docx).sections()
+    assert len(sections) == 3
+    blocks = [s["headers"][0]["blocks"] for s in sections]
+    assert blocks[0][0]["text"] == "Top"
+    assert all(b is blocks[0] for b in blocks)
