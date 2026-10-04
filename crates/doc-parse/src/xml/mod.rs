@@ -124,25 +124,26 @@ pub fn media_name_from_target(target: &str) -> String {
     t.rsplit('/').next().unwrap_or(t).to_string()
 }
 
-/// 把主文档关系的 `Target` 规范化成包内部件路径:相对目标以 `word/` 为基准,`/` 开头视作
-/// 包根绝对路径,`.` / `..` 组件折叠(越过包根的 `..` 丢弃)。如 `header1.xml` ->
-/// `word/header1.xml`。
-pub fn part_path_from_target(target: &str) -> String {
+/// 把关系的 `Target` 解析成包内部件路径:`/` 开头视作包根绝对路径,否则相对 `base_dir`
+/// (持有该关系的部件所在目录,如 `word`;包根为空串),`.` / `..` 组件折叠。`..` 越过包根
+/// 视为非法返回 `None`(拒绝逃出包根)。如 (`word`, `header1.xml`) -> `word/header1.xml`。
+pub fn resolve_part_path(base_dir: &str, target: &str) -> Option<String> {
     let joined = match target.strip_prefix('/') {
         Some(abs) => abs.to_string(),
-        None => format!("word/{target}"),
+        None if base_dir.is_empty() => target.to_string(),
+        None => format!("{base_dir}/{target}"),
     };
     let mut parts: Vec<&str> = Vec::new();
     for seg in joined.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
-                parts.pop();
+                parts.pop()?;
             }
             s => parts.push(s),
         }
     }
-    parts.join("/")
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 /// 一个部件自己的关系文件路径:`word/header1.xml` -> `word/_rels/header1.xml.rels`。

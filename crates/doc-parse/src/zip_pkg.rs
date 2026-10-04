@@ -10,6 +10,11 @@ use std::io::{Cursor, Read};
 use doc_core::{DocError, LimitKind, Result};
 use zip::ZipArchive;
 
+use crate::xml::{parse_rels, part_rels_path, resolve_part_path};
+
+/// 主文档部件的缺省路径(包根 `_rels/.rels` 缺失 / 畸形 / 指向不存在的部件时的回退)。
+const DEFAULT_MAIN_PART: &str = "word/document.xml";
+
 const MIB: u64 = 1024 * 1024;
 
 /// 压缩比检查只对声明未压缩大小超过该阈值的条目生效(小条目高压缩比很正常)。
@@ -81,6 +86,8 @@ fn is_safe_name(name: &str) -> bool {
 pub struct Package {
     /// 部件路径 -> 原始字节(如 `word/document.xml`)。包含 XML 与 media。
     parts: BTreeMap<String, Vec<u8>>,
+    /// 主文档部件路径(经包根 `_rels/.rels` 的 `officeDocument` 关系定位,缺省 `word/document.xml`)。
+    main: String,
 }
 
 impl Package {
@@ -156,7 +163,34 @@ impl Package {
             }
             parts.insert(name, buf);
         }
-        Ok(Package { parts })
+        let main = locate_main_part(&parts);
+        Ok(Package { parts, main })
+    }
+
+    /// 主文档部件的包内路径。
+    pub fn main_part(&self) -> &str {
+        &self.main
+    }
+
+    /// 主文档部件所在目录(包根为空串),相对 Target 的解析基准。
+    pub fn main_dir(&self) -> &str {
+        self.main.rsplit_once('/').map_or("", |(dir, _)| dir)
+    }
+
+    /// 附属部件的包内路径:优先经主部件 rels 按关系类型(`rel_suffix`,如 `styles`)定位 ——
+    /// Target 相对主部件目录解析,逃出包根或指向不存在的部件都视为没找到 —— 找不到回退 `fallback`
+    /// (固定路径,保持历史行为)。
+    pub fn related_part(&self, rel_suffix: &str, fallback: &str) -> String {
+        let suffix = format!("/{rel_suffix}");
+        self.part_str(&part_rels_path(&self.main))
+            .map(|xml| parse_rels(&xml))
+            .and_then(|rels| {
+                rels.values()
+                    .filter(|r| r.rel_type.ends_with(&suffix))
+                    .filter_map(|r| resolve_part_path(self.main_dir(), &r.target))
+                    .find(|p| self.parts.contains_key(p))
+            })
+            .unwrap_or_else(|| fallback.to_string())
     }
 
     /// 取一个部件并解码为 UTF-8 字符串(XML 部件用)。
@@ -166,48 +200,42 @@ impl Package {
             .map(|v| String::from_utf8_lossy(v).into_owned())
     }
 
-    /// 主文档部件 `word/document.xml` 的文本(必有,缺失即非法 docx)。
+    /// 主文档部件的文本(必有,缺失即非法 docx)。
     pub fn document_xml(&self) -> Result<String> {
-        self.part_str("word/document.xml")
-            .ok_or_else(|| DocError::Zip("missing word/document.xml".into()))
+        self.part_str(&self.main)
+            .ok_or_else(|| DocError::Zip(format!("missing main document part {}", self.main)))
     }
 
-    /// 主文档关系文件 `word/_rels/document.xml.rels` 的文本(把 `r:embed/r:id` 映射到 media)。
+    /// 主文档关系文件(如 `word/_rels/document.xml.rels`)的文本(把 `r:embed/r:id` 映射到 media)。
     pub fn document_rels_str(&self) -> Option<String> {
-        self.part_str("word/_rels/document.xml.rels")
+        self.part_str(&part_rels_path(&self.main))
     }
 
-    /// 样式部件 `word/styles.xml` 的文本(可缺;缺失即空样式表)。
-    pub fn styles_xml_str(&self) -> Option<String> {
-        self.part_str("word/styles.xml")
+    /// 主题部件路径:经主部件 rels 定位,回退标准名 `word/theme/theme1.xml`;再不行容错取
+    /// `word/theme/` 下第一个 `.xml`(BTreeMap 序,确定性)。可缺。
+    pub fn theme_path(&self) -> Option<String> {
+        let path = self.related_part("theme", "word/theme/theme1.xml");
+        if self.parts.contains_key(&path) {
+            return Some(path);
+        }
+        self.parts
+            .keys()
+            .find(|k| k.starts_with("word/theme/") && k.ends_with(".xml"))
+            .cloned()
     }
 
-    /// 编号部件 `word/numbering.xml` 的文本(可缺;缺失即空编号表,列表段按普通段渲染)。
-    pub fn numbering_xml_str(&self) -> Option<String> {
-        self.part_str("word/numbering.xml")
-    }
-
-    /// 设置部件 `word/settings.xml` 的文本(可缺;缺失即全 Word 缺省)。
-    pub fn settings_xml_str(&self) -> Option<String> {
-        self.part_str("word/settings.xml")
-    }
-
-    /// 主题部件文本:标准名 `word/theme/theme1.xml`;容错取 `word/theme/` 下第一个
-    /// `.xml`(BTreeMap 序,确定性)。可缺;缺失即空主题。
-    pub fn theme_xml_str(&self) -> Option<String> {
-        self.part_str("word/theme/theme1.xml").or_else(|| {
-            self.parts
-                .iter()
-                .find(|(k, _)| k.starts_with("word/theme/") && k.ends_with(".xml"))
-                .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
-        })
-    }
-
-    /// 收集全部 `word/media/*` 字节,键为**裸文件名**(如 `image1.png`)。
+    /// 收集 `word/media/*`(及主部件目录下的 `media/*`)字节,键为**裸文件名**(如 `image1.png`)。
     pub fn collect_media(&self) -> BTreeMap<String, Vec<u8>> {
+        let main_media = match self.main_dir() {
+            "" => "media/".to_string(),
+            dir => format!("{dir}/media/"),
+        };
         let mut out = BTreeMap::new();
         for (k, v) in &self.parts {
-            if let Some(rest) = k.strip_prefix("word/media/") {
+            let rest = k
+                .strip_prefix("word/media/")
+                .or_else(|| k.strip_prefix(main_media.as_str()));
+            if let Some(rest) = rest {
                 if !rest.is_empty() && !rest.contains('/') {
                     out.insert(rest.to_string(), v.clone());
                 }
@@ -215,4 +243,19 @@ impl Package {
         }
         out
     }
+}
+
+/// 主文档部件定位:包根 `_rels/.rels` 里类型以 `/officeDocument` 结尾、Target 解析后确实存在的
+/// 第一条关系;`.rels` 缺失 / 畸形 / 无合法关系时回退 [`DEFAULT_MAIN_PART`]。
+fn locate_main_part(parts: &BTreeMap<String, Vec<u8>>) -> String {
+    parts
+        .get("_rels/.rels")
+        .map(|b| parse_rels(&String::from_utf8_lossy(b)))
+        .and_then(|rels| {
+            rels.values()
+                .filter(|r| r.rel_type.ends_with("/officeDocument"))
+                .filter_map(|r| resolve_part_path("", &r.target))
+                .find(|p| parts.contains_key(p))
+        })
+        .unwrap_or_else(|| DEFAULT_MAIN_PART.to_string())
 }

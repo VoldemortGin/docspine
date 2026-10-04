@@ -78,7 +78,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
 
     // 3) 走 w:body -> 块序列(段落 + 表格,表格是重点)+ 节序列(sectPr 页面几何)。
     let (body, mut sections, alt_chunk_count) =
-        parse_part(&mut diags, DOCUMENT_PART, &doc_xml, |stats| {
+        parse_part(&mut diags, pkg.main_part(), &doc_xml, |stats| {
             xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index, stats)
         });
 
@@ -92,13 +92,14 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         &mut sections,
         &mut diags,
     );
+    let footnotes_path = pkg.related_part("footnotes", "word/footnotes.xml");
     let footnotes = pkg
-        .part_str("word/footnotes.xml")
+        .part_str(&footnotes_path)
         .map(|s| {
-            parse_part(&mut diags, "word/footnotes.xml", &s, |stats| {
+            parse_part(&mut diags, &footnotes_path, &s, |stats| {
                 xml::document::parse_notes(
                     &s,
-                    pkg_rels(&pkg, "word/footnotes.xml").as_deref(),
+                    pkg_rels(&pkg, &footnotes_path).as_deref(),
                     &media_index,
                     b"footnote",
                     stats,
@@ -106,13 +107,14 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             })
         })
         .unwrap_or_default();
+    let endnotes_path = pkg.related_part("endnotes", "word/endnotes.xml");
     let endnotes = pkg
-        .part_str("word/endnotes.xml")
+        .part_str(&endnotes_path)
         .map(|s| {
-            parse_part(&mut diags, "word/endnotes.xml", &s, |stats| {
+            parse_part(&mut diags, &endnotes_path, &s, |stats| {
                 xml::document::parse_notes(
                     &s,
-                    pkg_rels(&pkg, "word/endnotes.xml").as_deref(),
+                    pkg_rels(&pkg, &endnotes_path).as_deref(),
                     &media_index,
                     b"endnote",
                     stats,
@@ -121,13 +123,14 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         })
         .unwrap_or_default();
     // 批注:固定部件名 `word/comments.xml`(与脚注尾注一致),带自己的 rels。
+    let comments_path = pkg.related_part("comments", "word/comments.xml");
     let comments = pkg
-        .part_str("word/comments.xml")
+        .part_str(&comments_path)
         .map(|s| {
-            parse_part(&mut diags, "word/comments.xml", &s, |stats| {
+            parse_part(&mut diags, &comments_path, &s, |stats| {
                 xml::document::parse_comments(
                     &s,
-                    pkg_rels(&pkg, "word/comments.xml").as_deref(),
+                    pkg_rels(&pkg, &comments_path).as_deref(),
                     &media_index,
                     stats,
                 )
@@ -138,34 +141,30 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     // 4) 跨部件表(C-5/C-6):styles.xml -> 样式表、numbering.xml -> 编号表、
     //    theme1.xml -> 主题;部件缺失时为空缺省(有效样式解析器落到 Word 内置兜底,
     //    列表段按普通段渲染)。级联/计数在 doc-core,这里只机械搬运。
+    let styles_path = pkg.related_part("styles", "word/styles.xml");
     let styles = pkg
-        .styles_xml_str()
-        .map(|s| {
-            parse_part(&mut diags, "word/styles.xml", &s, |_| {
-                xml::styles::parse(&s)
-            })
-        })
+        .part_str(&styles_path)
+        .map(|s| parse_part(&mut diags, &styles_path, &s, |_| xml::styles::parse(&s)))
         .unwrap_or_default();
+    let numbering_path = pkg.related_part("numbering", "word/numbering.xml");
     let numbering = pkg
-        .numbering_xml_str()
+        .part_str(&numbering_path)
         .map(|s| {
-            parse_part(&mut diags, "word/numbering.xml", &s, |_| {
+            parse_part(&mut diags, &numbering_path, &s, |_| {
                 xml::numbering::parse(&s)
             })
         })
         .unwrap_or_default();
-    record_numbering_clamps(&mut diags, "word/numbering.xml", &numbering);
+    record_numbering_clamps(&mut diags, &numbering_path, &numbering);
     let theme = pkg
-        .theme_xml_str()
-        .map(|s| {
-            parse_part(&mut diags, "word/theme/theme1.xml", &s, |_| {
-                xml::theme::parse(&s)
-            })
-        })
+        .theme_path()
+        .and_then(|path| pkg.part_str(&path).map(|s| (path, s)))
+        .map(|(path, s)| parse_part(&mut diags, &path, &s, |_| xml::theme::parse(&s)))
         .unwrap_or_default();
-    let settings_xml = pkg.settings_xml_str();
+    let settings_path = pkg.related_part("settings", "word/settings.xml");
+    let settings_xml = pkg.part_str(&settings_path);
     if let Some(s) = settings_xml.as_deref() {
-        record_truncation(&mut diags, "word/settings.xml", s);
+        record_truncation(&mut diags, &settings_path, s);
     }
     let default_tab_stop = settings_xml.as_deref().and_then(xml::settings::parse);
     let even_and_odd_headers = settings_xml
@@ -214,7 +213,7 @@ fn load_header_footers(
             s.headers.clear();
             s.footers.clear();
         }
-        add_diag(diags, DiagnosticKind::MissingPart, DOCUMENT_PART, missing);
+        add_diag(diags, DiagnosticKind::MissingPart, pkg.main_part(), missing);
         return parts;
     };
     let rels = xml::parse_rels(rels_xml);
@@ -227,8 +226,9 @@ fn load_header_footers(
                     missing += 1;
                     return false;
                 };
-                let path = xml::part_path_from_target(&rel.target);
-                let Some(part_xml) = pkg.part_str(&path) else {
+                let part_xml = xml::resolve_part_path(pkg.main_dir(), &rel.target)
+                    .and_then(|path| pkg.part_str(&path).map(|x| (path, x)));
+                let Some((path, part_xml)) = part_xml else {
                     missing += 1;
                     return false;
                 };
@@ -250,7 +250,7 @@ fn load_header_footers(
             });
         }
     }
-    add_diag(diags, DiagnosticKind::MissingPart, DOCUMENT_PART, missing);
+    add_diag(diags, DiagnosticKind::MissingPart, pkg.main_part(), missing);
     parts
 }
 
@@ -268,9 +268,6 @@ fn add_diag(diags: &mut Vec<Diagnostic>, kind: DiagnosticKind, part: &str, count
         }),
     }
 }
-
-/// 主文档部件路径(诊断里的 `part`)。
-const DOCUMENT_PART: &str = "word/document.xml";
 
 /// 部件 XML 中途损坏 / 被截断则记 [`DiagnosticKind::XmlTruncated`]。
 fn record_truncation(diags: &mut Vec<Diagnostic>, part: &str, xml: &str) {

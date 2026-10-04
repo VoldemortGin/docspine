@@ -76,7 +76,7 @@ crates/
     src/export.rs  Document → 纯文本 / Markdown / HTML(纯序列化;含合并单元格转 HTML `<table>`);标题识别走样式表(`style::resolve_heading_level`:段落 / 样式 `outlineLvl` → 样式名沿 basedOn → styleId 字面;Markdown / HTML 7–9 级按 6 级);列表标签(`ListCounters` 现算,正文含单元格连续、页眉页脚 / 注 / 文本框各自独立)/ 超链接(仅 `http`·`https`·`mailto`)/ 图片(`Picture.alt` ← `docPr@descr|title`)进三种导出
   doc-parse/   OOXML 读取:zip 解包 + quick-xml 遍历 -> Document。本轮核心。#![forbid(unsafe_code)]
     src/lib.rs     parse_path / parse_bytes -> ParsedDoc { document, media };CFB 早判降级
-    src/zip_pkg.rs zip 读 API:word/document.xml / word/_rels / word/media + ZipLimits 解压限额
+    src/zip_pkg.rs zip 读 API:主部件经 `_rels/.rels` 的 officeDocument 关系定位(回退 word/document.xml),附属部件(styles/numbering/settings/footnotes/endnotes/comments/theme)经主部件 rels 按类型定位(回退固定路径;`..` 逃出包根拒绝)+ media + ZipLimits 解压限额
     src/xml/document.rs  quick-xml walker:w:body -> blocks;段落/run/样式 + **表格(合并/嵌套/填充)** + 图片
     src/xml/props.rs     共享 rPr/pPr 属性片段解析(document.xml 与 styles.xml 同构,只写一份)
     src/xml/styles.rs    styles.xml → StyleTable:docDefaults + 样式定义(id/basedOn/type/default)
