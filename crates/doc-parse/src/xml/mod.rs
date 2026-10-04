@@ -51,6 +51,8 @@ pub struct PartStats {
     pub missing_media: usize,
     /// `w:altChunk` 个数(含页眉页脚 / 注内的)。
     pub alt_chunks: usize,
+    /// 超过 `MAX_NOTES` 被丢弃的脚注 / 尾注 / 批注条目数。
+    pub notes_dropped: usize,
 }
 
 /// 一份 XML 是否完整良构地读到了结尾。各 walker 遇读错误都是 `break`、返回已解析的部分;

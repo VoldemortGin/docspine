@@ -120,6 +120,8 @@ pub enum DiagnosticKind {
     /// 样式 `basedOn` 链深度超过 `MAX_STYLE_CHAIN`:最基祖先被截断、不参与级联
     /// (计数 = 链过深的样式数)。
     StyleChainTruncated,
+    /// 脚注 / 尾注 / 批注部件的条目数超过 [`MAX_NOTES`],多余条目被丢弃(计数 = 丢弃的条目数)。
+    NotesTruncated,
 }
 
 impl DiagnosticKind {
@@ -134,6 +136,7 @@ impl DiagnosticKind {
             DiagnosticKind::MissingPart => "missing-part",
             DiagnosticKind::AltChunkNotImported => "alt-chunk-not-imported",
             DiagnosticKind::StyleChainTruncated => "style-chain-truncated",
+            DiagnosticKind::NotesTruncated => "notes-truncated",
         }
     }
 }
@@ -565,6 +568,11 @@ pub const MAX_TABLE_COLS: usize = 63;
 /// 超出时只映射前 `预算 / 列数` 行并告警(`table-over-budget`),不中止进程。取值依据:63 列
 /// 满宽时约 4 000 行,覆盖实际文档(几千行 × 十来列),占用约几十 MiB。
 pub const MAX_TABLE_CELLS: usize = 250_000;
+
+/// 单个脚注 / 尾注 / 批注部件最多收录的条目数。超出的条目丢弃并记 `notes-truncated` 诊断。
+/// 取值依据:真实长文档(法律文书 / 学术专著)脚注至多几千条,10 万留足 20 倍以上余量;
+/// 每条约百字节级的固定开销,封顶后单部件的条目表至多十几 MiB,而不被几百 KB 的合成文件撑到不可控。
+pub const MAX_NOTES: usize = 100_000;
 
 impl Table {
     /// 逻辑列数:优先取 `w:tblGrid` 的列数;退而取首行的 `grid_before` + 单元格 `grid_span` 之和 +

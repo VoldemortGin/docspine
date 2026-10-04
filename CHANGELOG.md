@@ -273,6 +273,8 @@ change.
 
 - **Style-level numbering and heading resolution no longer scale as chain length x paragraphs** (performance / DoS fix from review): a ~35 KB `.docx` with a 4,000-deep `basedOn` chain and 200 paragraphs made `to_text` walk the chain once per paragraph with an O(L²) cycle check. Cycle detection now uses a set (`style_chain_ids`), `to_text` / `to_markdown` / `to_html` resolve each style's numbering and heading level once per export through a call-local `StyleCache` (no shared state; `Document` stays immutable behind `Arc`), `StyleTable::validate` visits each style once, and every `basedOn` walk is capped at `MAX_STYLE_CHAIN = 64` (the most-base ancestors beyond the cap are ignored; the parse diagnostic `style-chain-truncated` counts styles with an over-deep chain).
 
+- **Footnote / endnote numbering is no longer quadratic** (performance / DoS fix from review): exports looked up each reference in a `Vec` with `contains` / `position`, so 40,000 distinct references (a ~200 KB `.docx`) made `to_text` take seconds. The first-reference order now has an `id -> number` ordered index (O(log n) per reference). Footnote / endnote / comment parts are also capped at `MAX_NOTES = 100,000` entries each (real books have at most a few thousand notes); extra entries are dropped and counted by the new parse diagnostic `notes-truncated`.
+
 ### Security
 
 - Table size is now bounded: `gridSpan` and `w:tblGrid` are clamped to Word's 63-column

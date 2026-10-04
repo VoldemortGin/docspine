@@ -3,7 +3,7 @@
 
 use std::io::{Cursor, Write};
 
-use doc_core::model::{Block, Diagnostic, DiagnosticKind};
+use doc_core::model::{Block, Diagnostic, DiagnosticKind, MAX_NOTES};
 use doc_core::Document;
 use doc_parse::parse_bytes;
 use zip::write::SimpleFileOptions;
@@ -306,6 +306,40 @@ fn overlong_style_chain_is_reported() {
         DiagnosticKind::StyleChainTruncated.code(),
         "style-chain-truncated"
     );
+}
+
+#[test]
+fn notes_beyond_cap_are_dropped_and_reported() {
+    // 脚注与批注部件各超出 MAX_NOTES 5 / 3 条:只收前 MAX_NOTES 条,多余的计入诊断。
+    let n = MAX_NOTES + 5;
+    let fns: String = (1..=n)
+        .map(|i| format!(r#"<w:footnote w:id="{i}"/>"#))
+        .collect();
+    let cms: String = (1..=MAX_NOTES + 3)
+        .map(|i| format!(r#"<w:comment w:id="{i}"/>"#))
+        .collect();
+    let doc = parse_parts(&[
+        ("word/document.xml", &doc_xml(&p("x"))),
+        (
+            "word/footnotes.xml",
+            &format!(r#"<w:footnotes xmlns:w="{W_NS}">{fns}</w:footnotes>"#),
+        ),
+        (
+            "word/comments.xml",
+            &format!(r#"<w:comments xmlns:w="{W_NS}">{cms}</w:comments>"#),
+        ),
+    ]);
+    assert_eq!(doc.footnotes.len(), MAX_NOTES);
+    assert_eq!(doc.comments.len(), MAX_NOTES);
+    assert_eq!(
+        count_of(&doc, DiagnosticKind::NotesTruncated, "word/footnotes.xml"),
+        Some(5)
+    );
+    assert_eq!(
+        count_of(&doc, DiagnosticKind::NotesTruncated, "word/comments.xml"),
+        Some(3)
+    );
+    assert_eq!(DiagnosticKind::NotesTruncated.code(), "notes-truncated");
 }
 
 #[test]

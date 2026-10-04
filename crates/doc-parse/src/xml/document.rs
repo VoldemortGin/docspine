@@ -29,7 +29,7 @@ use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
     AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, Comment, HeaderFooterKind,
     HeaderFooterRef, HeightRule, NoteKind, Orientation, Paragraph, Picture, Placement, Row,
-    RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge, MAX_TABLE_COLS,
+    RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge, MAX_NOTES, MAX_TABLE_COLS,
 };
 use doc_core::page_number::PageNumFormat;
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
@@ -230,6 +230,13 @@ pub fn parse_notes(
                     Some("separator" | "continuationSeparator" | "continuationNotice")
                 );
                 match id {
+                    // 条目数封顶:超出的新 id 整条丢弃(重复 id 本来就不收,不计)。
+                    Some(id) if is_content && notes.len() >= MAX_NOTES => {
+                        if !notes.contains_key(&id) {
+                            ctx.note(|s| s.notes_dropped += 1);
+                        }
+                        skip_element(&mut reader);
+                    }
                     Some(id) if is_content => {
                         let blocks = parse_block_container(&mut reader, &ctx);
                         notes.entry(id).or_insert(blocks);
@@ -239,7 +246,11 @@ pub fn parse_notes(
             }
             Ok(Event::Empty(e)) if local_name(e.name().as_ref()) == note_tag => {
                 if let Some(id) = attr_of(&e, b"id").and_then(|s| s.trim().parse::<i64>().ok()) {
-                    notes.entry(id).or_insert_with(Vec::new);
+                    if notes.len() < MAX_NOTES {
+                        notes.entry(id).or_insert_with(Vec::new);
+                    } else if !notes.contains_key(&id) {
+                        ctx.note(|s| s.notes_dropped += 1);
+                    }
                 }
             }
             Ok(Event::Start(_)) => skip_element(&mut reader),
@@ -291,6 +302,12 @@ pub fn parse_comments(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) if local_name(e.name().as_ref()) == b"comment" => match head(&e) {
+                Some(c) if comments.len() >= MAX_NOTES => {
+                    if !comments.contains_key(&c.id) {
+                        ctx.note(|s| s.notes_dropped += 1);
+                    }
+                    skip_element(&mut reader);
+                }
                 Some(mut c) => {
                     c.blocks = parse_block_container(&mut reader, &ctx);
                     comments.entry(c.id).or_insert(c);
@@ -299,7 +316,11 @@ pub fn parse_comments(
             },
             Ok(Event::Empty(e)) if local_name(e.name().as_ref()) == b"comment" => {
                 if let Some(c) = head(&e) {
-                    comments.entry(c.id).or_insert(c);
+                    if comments.len() < MAX_NOTES {
+                        comments.entry(c.id).or_insert(c);
+                    } else if !comments.contains_key(&c.id) {
+                        ctx.note(|s| s.notes_dropped += 1);
+                    }
                 }
             }
             Ok(Event::Start(_)) => skip_element(&mut reader),

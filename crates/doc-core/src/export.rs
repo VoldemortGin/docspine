@@ -33,7 +33,7 @@
 //! 容错:空段落跳过、空表跳过、未知样式当普通段落,绝不 panic。
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
     Block, Cell, Document, HeaderFooterKind, NoteKind, Paragraph, RunSegment, Table, TextRun,
@@ -41,6 +41,17 @@ use crate::model::{
 };
 use crate::numbering::{ListCounters, NumFmt};
 use crate::style::{NumRef, StyleCache};
+
+#[cfg(test)]
+thread_local! {
+    /// 仅测试编译:注编号表的查找探测次数(Vec 线性扫描每比较一个元素计 1,索引查找计 1)。
+    static NOTE_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_note_probe(n: usize) {
+    NOTE_PROBES.with(|c| c.set(c.get() + n));
+}
 
 // ============================================================ 纯文本
 
@@ -720,13 +731,40 @@ enum NoteStyle {
     Markdown,
 }
 
+/// 一类注(脚注 / 尾注)的首次引用顺序:`ids` 按编号排,`index` 是 `id -> 编号(1 起)` 的有序索引,
+/// 登记与取号都是 O(log n)(不再对 `ids` 线性扫描)。
+#[derive(Default)]
+struct NoteOrder {
+    ids: Vec<i64>,
+    index: BTreeMap<i64, usize>,
+}
+
+impl NoteOrder {
+    /// 登记一次引用:首次出现才分配下一个编号。
+    fn insert(&mut self, id: i64) {
+        #[cfg(test)]
+        count_note_probe(1);
+        if let std::collections::btree_map::Entry::Vacant(e) = self.index.entry(id) {
+            self.ids.push(id);
+            e.insert(self.ids.len());
+        }
+    }
+
+    /// 该 id 的编号(1 起);未登记 `None`。
+    fn number(&self, id: i64) -> Option<usize> {
+        #[cfg(test)]
+        count_note_probe(1);
+        self.index.get(&id).copied()
+    }
+}
+
 /// 导出期的注编号表:脚注 / 尾注各按正文中**首次引用的顺序**从 1 编号(重复引用沿用
 /// 同一号);只收有定义的注,悬空引用不编号。
 struct Notes<'a> {
     doc: &'a Document,
     style: NoteStyle,
-    footnotes: Vec<i64>,
-    endnotes: Vec<i64>,
+    footnotes: NoteOrder,
+    endnotes: NoteOrder,
     /// HTML 已输出过 `id` 的引用标签(同一注多次引用时只首次带 `id`,避免重复 id)。
     emitted: RefCell<BTreeSet<String>>,
     /// 当前作用域的列表计数。正文(含表格单元格)共用一份、按文档顺序连续推进;页眉页脚部件、
@@ -741,8 +779,8 @@ impl<'a> Notes<'a> {
         let mut notes = Notes {
             doc,
             style,
-            footnotes: Vec::new(),
-            endnotes: Vec::new(),
+            footnotes: NoteOrder::default(),
+            endnotes: NoteOrder::default(),
             emitted: RefCell::new(BTreeSet::new()),
             counters: RefCell::new(ListCounters::new()),
             styles: RefCell::new(StyleCache::new()),
@@ -779,8 +817,8 @@ impl<'a> Notes<'a> {
             NoteKind::Footnote => (&self.doc.footnotes, &mut self.footnotes),
             NoteKind::Endnote => (&self.doc.endnotes, &mut self.endnotes),
         };
-        if defined.contains_key(&id) && !order.contains(&id) {
-            order.push(id);
+        if defined.contains_key(&id) {
+            order.insert(id);
         }
     }
 
@@ -836,7 +874,7 @@ impl<'a> Notes<'a> {
             NoteKind::Footnote => &self.footnotes,
             NoteKind::Endnote => &self.endnotes,
         };
-        let n = order.iter().position(|&x| x == id)? + 1;
+        let n = order.number(id)?;
         let label = Self::label(kind, n);
         match self.style {
             NoteStyle::Html => {
@@ -862,7 +900,7 @@ impl<'a> Notes<'a> {
             (NoteKind::Footnote, &self.footnotes, &self.doc.footnotes),
             (NoteKind::Endnote, &self.endnotes, &self.doc.endnotes),
         ] {
-            for (i, id) in order.iter().enumerate() {
+            for (i, id) in order.ids.iter().enumerate() {
                 let label = Self::label(kind, i + 1);
                 let head = match self.style {
                     NoteStyle::Markdown => format!("[^{label}]"),
@@ -1043,6 +1081,30 @@ mod tests {
         assert_eq!(to_text(&doc), "a\tb\nc\n");
         // HTML 侧换行(不分种类)规整为 <br>。
         assert!(to_html(&doc).contains("a\tb<br>c<br>"));
+    }
+
+    /// F 个不同脚注引用:编号登记与取号的查找总探测次数与 F 同阶(线性),而不是 F²。
+    #[test]
+    fn note_numbering_lookups_are_linear() {
+        let f = 2000usize;
+        let mut doc = Document::default();
+        let mut p = Paragraph::default();
+        for i in 1..=f as i64 {
+            p.runs.push(TextRun {
+                segments: vec![crate::model::RunSegment::NoteRef {
+                    kind: NoteKind::Footnote,
+                    id: i,
+                }],
+                ..Default::default()
+            });
+            doc.footnotes.insert(i, vec![]);
+        }
+        doc.body.push(Block::Paragraph(p));
+        NOTE_PROBES.with(|c| c.set(0));
+        let text = to_text(&doc);
+        let probes = NOTE_PROBES.with(|c| c.get());
+        assert!(text.starts_with("[1][2][3]"), "编号按首次引用顺序");
+        assert!(probes <= 4 * f, "probes {probes} 应 <= 4 * F = {}", 4 * f);
     }
 
     #[test]
