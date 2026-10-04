@@ -27,8 +27,9 @@ use std::collections::BTreeMap;
 
 use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
-    AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, HeightRule, Orientation, Paragraph,
-    Picture, Placement, Row, RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge,
+    AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, HeaderFooterKind, HeaderFooterRef,
+    HeightRule, NoteKind, Orientation, Paragraph, Picture, Placement, Row, RunSegment, Section,
+    Table, TableWidth, TextBox, TextRun, VMerge,
 };
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
 use quick_xml::events::{BytesStart, Event};
@@ -110,6 +111,95 @@ pub fn parse(
         buf.clear();
     }
     (Vec::new(), vec![Section::default()])
+}
+
+/// 解析页眉 / 页脚部件(`w:hdr` / `w:ftr`):根元素的直接子块,与正文同一套块级解析
+/// (段落 / 表格 / 透明容器,共享 [`MAX_NEST_DEPTH`] 深度守卫)。`rels_xml` 是该部件自己的
+/// `.rels`(图片 `r:embed`)。畸形 XML 按容错风格降级:返回已解析出的部分。
+pub fn parse_hdr_ftr(
+    xml: &str,
+    rels_xml: Option<&str>,
+    media_index: &BTreeMap<String, usize>,
+) -> Vec<Block> {
+    let rels = rels_xml.map(parse_rels).unwrap_or_default();
+    let ctx = Ctx {
+        rels: &rels,
+        media_index,
+        depth: std::cell::Cell::new(0),
+    };
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    if !enter_root(&mut reader) {
+        return Vec::new();
+    }
+    parse_block_container(&mut reader, &ctx)
+}
+
+/// 解析脚注 / 尾注部件(`w:footnotes` / `w:endnotes`):`note_tag`(`footnote` / `endnote`)
+/// 子元素按 `w:id` 建表,内容走块级解析。`w:type` 为 `separator` / `continuationSeparator` /
+/// `continuationNotice` 的非内容注、缺 / 非法 `w:id` 的注跳过;重复 id 以先出现者为准。
+pub fn parse_notes(
+    xml: &str,
+    rels_xml: Option<&str>,
+    media_index: &BTreeMap<String, usize>,
+    note_tag: &[u8],
+) -> BTreeMap<i64, Vec<Block>> {
+    let rels = rels_xml.map(parse_rels).unwrap_or_default();
+    let ctx = Ctx {
+        rels: &rels,
+        media_index,
+        depth: std::cell::Cell::new(0),
+    };
+    let mut notes = BTreeMap::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    if !enter_root(&mut reader) {
+        return notes;
+    }
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if local_name(e.name().as_ref()) == note_tag => {
+                let id = attr_of(&e, b"id").and_then(|s| s.trim().parse::<i64>().ok());
+                let is_content = !matches!(
+                    attr_of(&e, b"type").as_deref(),
+                    Some("separator" | "continuationSeparator" | "continuationNotice")
+                );
+                match id {
+                    Some(id) if is_content => {
+                        let blocks = parse_block_container(&mut reader, &ctx);
+                        notes.entry(id).or_insert(blocks);
+                    }
+                    _ => skip_element(&mut reader),
+                }
+            }
+            Ok(Event::Empty(e)) if local_name(e.name().as_ref()) == note_tag => {
+                if let Some(id) = attr_of(&e, b"id").and_then(|s| s.trim().parse::<i64>().ok()) {
+                    notes.entry(id).or_insert_with(Vec::new);
+                }
+            }
+            Ok(Event::Start(_)) => skip_element(&mut reader),
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    notes
+}
+
+/// 读到部件根元素的起始标签并消费它;找不到(空 / 畸形)返回 `false`。
+fn enter_root<R: std::io::BufRead>(reader: &mut Reader<R>) -> bool {
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) => return true,
+            Ok(Event::Eof) | Err(_) => return false,
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// 解析 `w:body` 的直接子块 + 节序列。假定 reader 已经消费了 `<w:body>` 起始标签。
@@ -283,6 +373,20 @@ fn apply_sectpr_prop(e: &BytesStart, sect: &mut Section) {
         b"cols" => {
             if let Some(n) = attr_of(e, b"num").and_then(|s| s.parse().ok()) {
                 sect.cols = n;
+            }
+        }
+        // 页眉 / 页脚引用:先只记 `r:id` + 类型,部件由 lib.rs 经 rels 解析并归一。
+        name @ (b"headerReference" | b"footerReference") => {
+            if let Some(rel_id) = attr_of(e, b"id").filter(|id| !id.is_empty()) {
+                let kind = attr_of(e, b"type")
+                    .map(|t| HeaderFooterKind::from_attr(&t))
+                    .unwrap_or_default();
+                let list = if name == b"headerReference" {
+                    &mut sect.headers
+                } else {
+                    &mut sect.footers
+                };
+                list.push(HeaderFooterRef { kind, rel_id });
             }
         }
         _ => {}
@@ -556,6 +660,7 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
 }
 
 /// 自闭合 run 内容元素 -> 分段:`w:tab`/`w:ptab` -> 制表、`w:br`/`w:cr` -> 断,
+/// `w:footnoteReference` / `w:endnoteReference` -> 带 id 的注引用段,
 /// `w:sym` -> `@w:char` 十六进制码点(Symbol/Wingdings 等的 `U+F0xx` 私有区码点原样
 /// 保留,不做字体映射)、`w:softHyphen` -> U+00AD、`w:noBreakHyphen` -> U+2011。
 /// 其余元素忽略。
@@ -570,6 +675,17 @@ fn push_run_char(run: &mut TextRun, e: &BytesStart, name: &[u8]) {
                 .and_then(char::from_u32)
             {
                 run.push_text(c.encode_utf8(&mut [0; 4]));
+            }
+        }
+        // 脚注 / 尾注引用:在 run 序列里留一个带 id 的定位点(无 / 非法 id 忽略)。
+        b"footnoteReference" | b"endnoteReference" => {
+            if let Some(id) = attr_of(e, b"id").and_then(|s| s.trim().parse().ok()) {
+                let kind = if name == b"footnoteReference" {
+                    NoteKind::Footnote
+                } else {
+                    NoteKind::Endnote
+                };
+                run.segments.push(RunSegment::NoteRef { kind, id });
             }
         }
         b"softHyphen" => run.push_text("\u{00AD}"),

@@ -410,3 +410,109 @@ def test_to_html_simple_table(simple_table_docx_bytes):
     assert "<table>" in html
     assert "<td>H1</td>" in html
     assert "<h2>Sub</h2>" in html
+
+
+# --- 页眉页脚 / 脚注尾注 / 公式标记 --------------------------------------------
+
+_W_NS = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+)
+_REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _with_parts(docx: bytes, parts: dict[str, str], rels: dict[str, tuple[str, str]]) -> bytes:
+    """在 ``build_docx`` 产物上追加部件与主文档关系(``rId -> (类型后缀, Target)``)。"""
+    src = zipfile.ZipFile(io.BytesIO(docx))
+    out = io.BytesIO()
+    extra = "".join(
+        f'<Relationship Id="{rid}" Type="{_REL_BASE}/{ty}" Target="{target}"/>'
+        for rid, (ty, target) in rels.items()
+    )
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "word/_rels/document.xml.rels":
+                data = data.decode().replace("</Relationships>", f"{extra}</Relationships>").encode()
+            dst.writestr(info.filename, data)
+        for name, xml in parts.items():
+            dst.writestr(name, xml)
+    return out.getvalue()
+
+
+def _p(text: str) -> str:
+    return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def test_header_footer_and_notes_exposed_and_exported():
+    body = (
+        "<w:body><w:p><w:r><w:t>Body</w:t></w:r>"
+        '<w:r><w:footnoteReference w:id="1"/></w:r>'
+        '<w:r><w:endnoteReference w:id="1"/></w:r></w:p>'
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/>'
+        '<w:headerReference w:type="first" r:id="rIdH2"/>'
+        '<w:footerReference w:type="even" r:id="rIdF"/></w:sectPr></w:body>'
+    )
+    docx = _with_parts(
+        build_docx(_DOC_HEADER + body + "</w:document>"),
+        {
+            "word/header1.xml": f"<w:hdr {_W_NS}>{_p('Top')}</w:hdr>",
+            "word/header2.xml": f"<w:hdr {_W_NS}>{_p('Title page')}</w:hdr>",
+            "word/footer1.xml": f"<w:ftr {_W_NS}>{_p('Bottom')}</w:ftr>",
+            "word/footnotes.xml": (
+                f'<w:footnotes {_W_NS}><w:footnote w:type="separator" w:id="-1">'
+                f"{_p('SEP')}</w:footnote><w:footnote w:id=\"1\">{_p('Foot')}</w:footnote></w:footnotes>"
+            ),
+            "word/endnotes.xml": (
+                f'<w:endnotes {_W_NS}><w:endnote w:id="1">{_p("End")}</w:endnote></w:endnotes>'
+            ),
+        },
+        {
+            "rIdH": ("header", "header1.xml"),
+            "rIdH2": ("header", "header2.xml"),
+            "rIdF": ("footer", "footer1.xml"),
+        },
+    )
+    doc = docspine.open_bytes(docx)
+
+    (sect,) = doc.sections()
+    assert [h["type"] for h in sect["headers"]] == ["default", "first"]
+    assert sect["headers"][0]["rel_id"] == "rIdH"
+    assert sect["headers"][0]["blocks"][0]["text"] == "Top"
+    assert [f["type"] for f in sect["footers"]] == ["even"]
+    assert sect["footers"][0]["blocks"][0]["text"] == "Bottom"
+
+    kinds = [
+        (seg["note_kind"], seg["id"])
+        for run in doc.paragraphs()[0]["runs"]
+        for seg in run["segments"]
+        if seg["kind"] == "note_ref"
+    ]
+    assert kinds == [("footnote", 1), ("endnote", 1)]
+    assert [(n["id"], n["blocks"][0]["text"]) for n in doc.footnotes()] == [(1, "Foot")]
+    assert [(n["id"], n["blocks"][0]["text"]) for n in doc.endnotes()] == [(1, "End")]
+
+    assert doc.to_text() == (
+        "[Header: default]\nTop\n[Header: first]\nTitle page\n"
+        "Body[1][e1]\n[1] Foot\n[e1] End\n[Footer: even]\nBottom"
+    )
+    md = doc.to_markdown()
+    assert "Body[^1][^e1]" in md and "[^1]: Foot" in md and "[^e1]: End" in md
+    assert "SEP" not in doc.to_text()
+
+
+def test_sections_without_header_footer_or_notes_have_empty_lists(minimal_docx_bytes):
+    doc = docspine.open_bytes(minimal_docx_bytes)
+    assert doc.sections()[0]["headers"] == []
+    assert doc.sections()[0]["footers"] == []
+    assert doc.footnotes() == []
+    assert doc.endnotes() == []
+
+
+def test_math_run_exposes_is_math_flag():
+    body = (
+        '<w:body><w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+        "<w:r><w:t>t</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p></w:body>"
+    )
+    doc = docspine.open_bytes(build_docx(_DOC_HEADER + body + "</w:document>"))
+    assert [r["is_math"] for r in doc.paragraphs()[0]["runs"]] == [False, True]

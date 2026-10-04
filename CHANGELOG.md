@@ -64,6 +64,31 @@ change.
   more than one text fragment is parenthesised, e.g. `(a+b)/c`. Other math
   structures keep plain concatenation; still no LaTeX. Iterative walk, structure
   depth capped by `MAX_NEST_DEPTH`.
+- **Headers, footers, footnotes and endnotes enter the model and text exports.**
+  `word/header*.xml` / `footer*.xml` are located through the `w:headerReference` /
+  `w:footerReference` entries of each `w:sectPr` (types `default` / `first` /
+  `even`) and the main-document rels, then parsed with the existing block parser
+  (paragraphs and tables). `word/footnotes.xml` / `endnotes.xml` are keyed by
+  `w:id` (separator / continuationSeparator / continuationNotice notes skipped);
+  body references stay in the run sequence as `RunSegment::NoteRef`. `to_text`
+  and `to_markdown` emit each distinct header/footer part once (headers first,
+  footers last, labelled `[Header: default]` / `**Header (default)**`) and number
+  notes by first reference (`[1]` / `[e1]` plus a trailing list; Markdown
+  `[^1]` / `[^e1]` with `[^1]: ...` definitions). References to missing ids,
+  rels to missing parts and malformed parts degrade without panicking. `to_html`
+  is unchanged. PDF export still does not draw them and emits one
+  `header-footer-not-rendered` and one `notes-not-rendered` warning; SSIM
+  baselines are unchanged. Python: `sections()[i]["headers"|"footers"]`,
+  `Document.footnotes()` / `endnotes()`, `kind == "note_ref"` run segments, and
+  the previously missing `run["is_math"]`.
+
+### Breaking (Rust API, pre-1.0)
+
+- `Document` gains `header_footers`, `footnotes`, `endnotes`; `Section` gains
+  `headers`, `footers`; `RunSegment` gains the `NoteRef { kind, id }` variant;
+  `RenderWarning` gains `HeaderFooterNotRendered` / `NotesNotRendered`. Struct
+  literals without `..Default::default()` and exhaustive matches on `RunSegment` /
+  `RenderWarning` must be updated.
 
 ### Fixed
 

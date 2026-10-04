@@ -10,31 +10,73 @@
 //!
 //! 浮动文本框([`crate::model::TextBox`])的内容紧随其锚定段落之后,按同样规则输出。
 //!
+//! 页眉页脚与脚注尾注(`to_text` / `to_markdown`;`to_html` 暂不含):
+//! - 页眉页脚按节引用顺序**去重**后各输出一次,页眉放文首、页脚放文末,带 `[Header: 类型]` /
+//!   `[Footer: 类型]`(Markdown 为加粗标题行)标记;内容为空的部件不输出。
+//! - 脚注 / 尾注按**在正文中首次出现的顺序**编号:纯文本正文 `[n]` / `[en]`、文末 `[n] 内容`;
+//!   Markdown 正文 `[^n]` / `[^en]`、文末 `[^n]: 内容`。引用指向不存在的 id 时不出标记;
+//!   定义了却无人引用的注不输出(与 Word 一致)。
+//!
 //! 容错:空段落跳过、空表跳过、未知样式当普通段落,绝不 panic。
 
-use crate::model::{Block, Cell, Document, Table, VMerge};
+use std::collections::BTreeSet;
+
+use crate::model::{Block, Cell, Document, HeaderFooterKind, NoteKind, RunSegment, Table, VMerge};
 
 // ============================================================ 纯文本
 
 /// 全文按块拼成纯文本:段落各占一行,表格每行的单元格用 `\t` 连接,块/行之间用 `\n`。
 pub fn to_text(doc: &Document) -> String {
+    let notes = Notes::new(doc, NoteStyle::Text);
     let mut out: Vec<String> = Vec::new();
-    text_blocks(&doc.body, &mut out);
+    for (kind, blocks) in header_footer_parts(doc, false) {
+        let lines = non_empty_lines(blocks, &notes);
+        if !lines.is_empty() {
+            out.push(format!("[Header: {}]", kind.as_str()));
+            out.extend(lines);
+        }
+    }
+    text_blocks(&doc.body, &mut out, &notes);
+    for (label, blocks) in notes.referenced() {
+        out.push(format!(
+            "{label} {}",
+            non_empty_lines(blocks, &notes).join(" ")
+        ));
+    }
+    for (kind, blocks) in header_footer_parts(doc, true) {
+        let lines = non_empty_lines(blocks, &notes);
+        if !lines.is_empty() {
+            out.push(format!("[Footer: {}]", kind.as_str()));
+            out.extend(lines);
+        }
+    }
     out.join("\n")
 }
 
-fn text_blocks(blocks: &[Block], out: &mut Vec<String>) {
+/// 一串块的纯文本行,去掉空行(页眉页脚 / 注内容用:Word 里空段落很常见,别灌噪声)。
+fn non_empty_lines(blocks: &[Block], notes: &Notes) -> Vec<String> {
+    let mut lines = Vec::new();
+    text_blocks(blocks, &mut lines, notes);
+    lines.retain(|l| !l.is_empty());
+    lines
+}
+
+fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                out.push(p.text());
+                out.push(p.text_with_notes(&|k, id| notes.mark(k, id)));
                 for tb in p.text_boxes() {
-                    text_blocks(&tb.blocks, out);
+                    text_blocks(&tb.blocks, out, notes);
                 }
             }
             Block::Table(t) => {
                 for row in &t.rows {
-                    let cells: Vec<String> = row.cells.iter().map(|c| c.text()).collect();
+                    let cells: Vec<String> = row
+                        .cells
+                        .iter()
+                        .map(|c| c.text_with_notes(&|k, id| notes.mark(k, id)))
+                        .collect();
                     out.push(cells.join("\t"));
                 }
             }
@@ -47,16 +89,45 @@ fn text_blocks(blocks: &[Block], out: &mut Vec<String>) {
 /// 全文导出为 Markdown。段落以空行分隔;标题样式映射成 `#`;表格无合并时输出 GFM 管道表,
 /// 含合并(或嵌套表)时退回 HTML `<table>` 以保真 `rowspan`/`colspan`。
 pub fn to_markdown(doc: &Document) -> String {
+    let notes = Notes::new(doc, NoteStyle::Markdown);
     let mut parts: Vec<String> = Vec::new();
-    markdown_blocks(&doc.body, &mut parts);
+    for (kind, blocks) in header_footer_parts(doc, false) {
+        push_md_header_footer("Header", kind, blocks, &notes, &mut parts);
+    }
+    markdown_blocks(&doc.body, &mut parts, &notes);
+    for (label, blocks) in notes.referenced() {
+        parts.push(format!(
+            "{label}: {}",
+            non_empty_lines(blocks, &notes).join(" ")
+        ));
+    }
+    for (kind, blocks) in header_footer_parts(doc, true) {
+        push_md_header_footer("Footer", kind, blocks, &notes, &mut parts);
+    }
     parts.join("\n\n")
 }
 
-fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>) {
+/// 一个页眉 / 页脚部件 -> Markdown:加粗标题行 + 内容块;内容为空的部件整体跳过。
+fn push_md_header_footer(
+    role: &str,
+    kind: HeaderFooterKind,
+    blocks: &[Block],
+    notes: &Notes,
+    parts: &mut Vec<String>,
+) {
+    let mut inner = Vec::new();
+    markdown_blocks(blocks, &mut inner, notes);
+    if !inner.is_empty() {
+        parts.push(format!("**{role} ({})**", kind.as_str()));
+        parts.extend(inner);
+    }
+}
+
+fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>, notes: &Notes) {
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                let t = p.text();
+                let t = p.text_with_notes(&|k, id| notes.mark(k, id));
                 if !t.is_empty() {
                     match heading_level(p.style.as_deref()) {
                         Some(level) => parts.push(format!("{} {t}", "#".repeat(level as usize))),
@@ -64,11 +135,11 @@ fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>) {
                     }
                 }
                 for tb in p.text_boxes() {
-                    markdown_blocks(&tb.blocks, parts);
+                    markdown_blocks(&tb.blocks, parts, notes);
                 }
             }
             Block::Table(t) => {
-                let md = markdown_table(t);
+                let md = markdown_table(t, notes);
                 if !md.is_empty() {
                     parts.push(md);
                 }
@@ -78,10 +149,10 @@ fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>) {
 }
 
 /// 一张表 -> Markdown。无合并/无嵌套表时用 GFM 管道表(首行作表头);否则退回 HTML 表。
-fn markdown_table(table: &Table) -> String {
+fn markdown_table(table: &Table, notes: &Notes) -> String {
     if table_needs_html(table) {
         let mut s = String::new();
-        push_html_table(table, &mut s);
+        push_html_table(table, &mut s, notes);
         return s;
     }
     let ncols = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
@@ -90,7 +161,7 @@ fn markdown_table(table: &Table) -> String {
     }
     let mut lines: Vec<String> = Vec::new();
     for (i, row) in table.rows.iter().enumerate() {
-        let mut cells: Vec<String> = row.cells.iter().map(md_cell_text).collect();
+        let mut cells: Vec<String> = row.cells.iter().map(|c| md_cell_text(c, notes)).collect();
         while cells.len() < ncols {
             cells.push(String::new());
         }
@@ -104,8 +175,10 @@ fn markdown_table(table: &Table) -> String {
 }
 
 /// GFM 单元格文字:换行规整为 `<br>`(否则会撑破表格),竖线转义,避免破坏管道语法。
-fn md_cell_text(cell: &Cell) -> String {
-    cell.text().replace('\n', "<br>").replace('|', "\\|")
+fn md_cell_text(cell: &Cell, notes: &Notes) -> String {
+    cell.text_with_notes(&|k, id| notes.mark(k, id))
+        .replace('\n', "<br>")
+        .replace('|', "\\|")
 }
 
 /// 表格是否需要退回 HTML:任一单元格横向跨列 / 参与纵向合并 / 含嵌套表(GFM 表无法表达)。
@@ -123,12 +196,13 @@ fn table_needs_html(table: &Table) -> bool {
 
 /// 全文导出为 HTML 片段:段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带合并)。文本经转义。
 pub fn to_html(doc: &Document) -> String {
+    let notes = Notes::new(doc, NoteStyle::Off);
     let mut out = String::new();
-    html_blocks(&doc.body, &mut out);
+    html_blocks(&doc.body, &mut out, &notes);
     out.trim_end().to_string()
 }
 
-fn html_blocks(blocks: &[Block], out: &mut String) {
+fn html_blocks(blocks: &[Block], out: &mut String, notes: &Notes) {
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
@@ -142,11 +216,11 @@ fn html_blocks(blocks: &[Block], out: &mut String) {
                     }
                 }
                 for tb in p.text_boxes() {
-                    html_blocks(&tb.blocks, out);
+                    html_blocks(&tb.blocks, out, notes);
                 }
             }
             Block::Table(t) => {
-                push_html_table(t, out);
+                push_html_table(t, out, notes);
                 out.push('\n');
             }
         }
@@ -158,7 +232,7 @@ fn html_blocks(blocks: &[Block], out: &mut String) {
 /// 纵向合并语义:`restart` 格起始并向下吞并若干 `continue` 格;`continue` 格被吞掉,**不**
 /// 单独输出 `<td>`。合并按**网格列**对齐(用 `gridSpan` 累加出每格的起始网格列号),不是按
 /// 单元格序号,这样横向合并与纵向合并叠加时也对得上。
-fn push_html_table(table: &Table, out: &mut String) {
+fn push_html_table(table: &Table, out: &mut String, notes: &Notes) {
     let starts = grid_starts(table);
     out.push_str("<table>\n");
     for (i, row) in table.rows.iter().enumerate() {
@@ -184,7 +258,7 @@ fn push_html_table(table: &Table, out: &mut String) {
                 out.push_str(&format!(" rowspan=\"{rowspan}\""));
             }
             out.push('>');
-            out.push_str(&html_cell_content(&cell.blocks));
+            out.push_str(&html_cell_content(&cell.blocks, notes));
             out.push_str("</");
             out.push_str(tag);
             out.push_str(">\n");
@@ -237,17 +311,17 @@ fn vmerge_rowspan(table: &Table, starts: &[Vec<usize>], start_row: usize, g: usi
 
 /// 单元格内容 -> HTML:段落文字转义后以 `<br>` 连接,嵌套表递归成内层 `<table>`;
 /// 段落锚定的文本框内容紧随该段之后。
-fn html_cell_content(blocks: &[Block]) -> String {
+fn html_cell_content(blocks: &[Block], notes: &Notes) -> String {
     let mut parts: Vec<String> = Vec::new();
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                let t = p.text();
+                let t = p.text_with_notes(&|k, id| notes.mark(k, id));
                 if !t.is_empty() {
                     parts.push(escape_html(&t));
                 }
                 for tb in p.text_boxes() {
-                    let inner = html_cell_content(&tb.blocks);
+                    let inner = html_cell_content(&tb.blocks, notes);
                     if !inner.is_empty() {
                         parts.push(inner);
                     }
@@ -255,7 +329,7 @@ fn html_cell_content(blocks: &[Block]) -> String {
             }
             Block::Table(t) => {
                 let mut s = String::new();
-                push_html_table(t, &mut s);
+                push_html_table(t, &mut s, notes);
                 parts.push(s);
             }
         }
@@ -278,6 +352,139 @@ fn escape_html(s: &str) -> String {
         }
     }
     out
+}
+
+// ============================================================ 页眉页脚 / 脚注尾注
+
+/// 按节引用顺序去重后的页眉(`footer = false`)或页脚部件;同一部件只出一次,
+/// 标签取其最先出现的类型。
+fn header_footer_parts(doc: &Document, footer: bool) -> Vec<(HeaderFooterKind, &[Block])> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for sect in &doc.sections {
+        let refs = if footer { &sect.footers } else { &sect.headers };
+        for r in refs {
+            if let Some(blocks) = doc.header_footers.get(&r.rel_id) {
+                if seen.insert(r.rel_id.as_str()) {
+                    out.push((r.kind, blocks.as_slice()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 注标记的写法。
+#[derive(Clone, Copy, PartialEq)]
+enum NoteStyle {
+    /// 不出标记(HTML)。
+    Off,
+    /// 纯文本:`[1]` / `[e1]`。
+    Text,
+    /// Markdown 脚注:`[^1]` / `[^e1]`。
+    Markdown,
+}
+
+/// 导出期的注编号表:脚注 / 尾注各按正文中**首次引用的顺序**从 1 编号(重复引用沿用
+/// 同一号);只收有定义的注,悬空引用不编号。
+struct Notes<'a> {
+    doc: &'a Document,
+    style: NoteStyle,
+    footnotes: Vec<i64>,
+    endnotes: Vec<i64>,
+}
+
+impl<'a> Notes<'a> {
+    fn new(doc: &'a Document, style: NoteStyle) -> Self {
+        let mut notes = Notes {
+            doc,
+            style,
+            footnotes: Vec::new(),
+            endnotes: Vec::new(),
+        };
+        if style != NoteStyle::Off {
+            notes.collect(&doc.body);
+        }
+        notes
+    }
+
+    /// 按文档顺序扫引用(含表格单元格与文本框)。
+    fn collect(&mut self, blocks: &[Block]) {
+        for b in blocks {
+            match b {
+                Block::Paragraph(p) => {
+                    for seg in p.runs.iter().flat_map(|r| &r.segments) {
+                        if let RunSegment::NoteRef { kind, id } = seg {
+                            self.register(*kind, *id);
+                        }
+                    }
+                    for tb in p.text_boxes() {
+                        self.collect(&tb.blocks);
+                    }
+                }
+                Block::Table(t) => {
+                    for cell in t.rows.iter().flat_map(|r| &r.cells) {
+                        self.collect(&cell.blocks);
+                    }
+                }
+            }
+        }
+    }
+
+    fn register(&mut self, kind: NoteKind, id: i64) {
+        let (defined, order) = match kind {
+            NoteKind::Footnote => (&self.doc.footnotes, &mut self.footnotes),
+            NoteKind::Endnote => (&self.doc.endnotes, &mut self.endnotes),
+        };
+        if defined.contains_key(&id) && !order.contains(&id) {
+            order.push(id);
+        }
+    }
+
+    /// 标签正文(不含方括号):脚注 `1`,尾注 `e1`。
+    fn label(kind: NoteKind, n: usize) -> String {
+        match kind {
+            NoteKind::Footnote => n.to_string(),
+            NoteKind::Endnote => format!("e{n}"),
+        }
+    }
+
+    /// 正文里该引用的标记串;悬空引用 / 关闭标记时 `None`。
+    fn mark(&self, kind: NoteKind, id: i64) -> Option<String> {
+        let order = match kind {
+            NoteKind::Footnote => &self.footnotes,
+            NoteKind::Endnote => &self.endnotes,
+        };
+        let n = order.iter().position(|&x| x == id)? + 1;
+        let label = Self::label(kind, n);
+        match self.style {
+            NoteStyle::Off => None,
+            NoteStyle::Text => Some(format!("[{label}]")),
+            NoteStyle::Markdown => Some(format!("[^{label}]")),
+        }
+    }
+
+    /// 文末的注定义:`(行首标签, 内容块)`,脚注在前、尾注在后,各按编号顺序。
+    /// 标签:纯文本 `[1]`,Markdown `[^1]`(调用方按需加 `:`)。
+    fn referenced(&self) -> Vec<(String, &'a [Block])> {
+        let mut out = Vec::new();
+        for (kind, order, defined) in [
+            (NoteKind::Footnote, &self.footnotes, &self.doc.footnotes),
+            (NoteKind::Endnote, &self.endnotes, &self.doc.endnotes),
+        ] {
+            for (i, id) in order.iter().enumerate() {
+                let label = Self::label(kind, i + 1);
+                let head = match self.style {
+                    NoteStyle::Markdown => format!("[^{label}]"),
+                    _ => format!("[{label}]"),
+                };
+                if let Some(blocks) = defined.get(id) {
+                    out.push((head, blocks.as_slice()));
+                }
+            }
+        }
+        out
+    }
 }
 
 // ============================================================ 标题映射

@@ -25,8 +25,8 @@ use quick_xml::Reader;
 
 /// 一个 OOXML 关系条目(`<Relationship Id="rIdN" Type="..." Target="..."/>`)。
 ///
-/// docspine 当前只按 `r:id` 取 `target`(图片定位),`id`/`rel_type` 保留以完整刻画关系
-/// 形状、供后续按类型过滤(如 header/footer/footnotes 关系)使用。
+/// docspine 当前只按 `r:id` 取 `target`(图片 / 页眉页脚部件定位),`id`/`rel_type` 保留以
+/// 完整刻画关系形状、供后续按类型过滤使用。
 #[derive(Debug, Clone)]
 pub struct Relationship {
     #[allow(dead_code)]
@@ -86,6 +86,35 @@ pub fn media_name_from_target(target: &str) -> String {
         t = rest;
     }
     t.rsplit('/').next().unwrap_or(t).to_string()
+}
+
+/// 把主文档关系的 `Target` 规范化成包内部件路径:相对目标以 `word/` 为基准,`/` 开头视作
+/// 包根绝对路径,`.` / `..` 组件折叠(越过包根的 `..` 丢弃)。如 `header1.xml` ->
+/// `word/header1.xml`。
+pub fn part_path_from_target(target: &str) -> String {
+    let joined = match target.strip_prefix('/') {
+        Some(abs) => abs.to_string(),
+        None => format!("word/{target}"),
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+/// 一个部件自己的关系文件路径:`word/header1.xml` -> `word/_rels/header1.xml.rels`。
+pub fn part_rels_path(part: &str) -> String {
+    match part.rsplit_once('/') {
+        Some((dir, name)) => format!("{dir}/_rels/{name}.rels"),
+        None => format!("_rels/{part}.rels"),
+    }
 }
 
 /// 取一个(可能带命名空间前缀的)元素名的本地名,如 `w:p` -> `p`。

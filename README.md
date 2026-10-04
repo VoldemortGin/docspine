@@ -39,7 +39,9 @@ all sharing the same `ocrspine` OCR core.
 | Row height, header rows | parsed |
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent | parsed |
 | Transparent wrappers: `w:sdt`, `w:customXml` (block + inline), `w:smartTag`, `w:hyperlink`, `w:fldSimple` (cached result), including row-level and cell-level `w:sdt` / `w:customXml` inside tables; complex fields keep the cached result, `w:instrText` never leaks | parsed |
-| Math `m:oMath` / `m:oMathPara`: `m:t` text extracted in order as plain text (no layout; PDF draws plain text, `math-flattened` warning) | extracted |
+| Math `m:oMath` / `m:oMathPara`: `m:t` text extracted in order (fractions / scripts / radicals as `1/2`, `x^2`, `x_i`, `sqrt(x)`; `run["is_math"]`; no layout; PDF draws plain text, `math-flattened` warning) | extracted |
+| Headers / footers (`word/header*.xml` / `footer*.xml`; `default` / `first` / `even`, tables included): `sections()[i]["headers"|"footers"]` = `[{type, rel_id, blocks}]`; `to_text` / `to_markdown` emit each distinct part once (headers at the top as `[Header: default]`, footers at the end); **not drawn** in PDF (`header-footer-not-rendered` warning) | extracted |
+| Footnotes / endnotes (`word/footnotes.xml` / `endnotes.xml`; separator notes skipped): `footnotes()` / `endnotes()` = `[{id, blocks}]`, references are `kind == "note_ref"` run segments; `to_text` marks `[1]` / `[e1]` + trailing list, `to_markdown` uses `[^1]` / `[^e1]` footnote syntax; **not drawn** in PDF (`notes-not-rendered` warning) | extracted |
 | Revisions (accept-all semantics): `w:ins` / `w:moveTo` kept, `w:del` / `w:moveFrom` dropped | parsed |
 | `mc:AlternateContent`: first `mc:Choice` that yields content, else `mc:Fallback` (never both) | parsed |
 | Floating text boxes (`wps:txbx` / VML `v:textbox` → `w:txbxContent`): extracted as `run["text_boxes"]`, emitted right after the anchoring paragraph in `to_text` / `to_markdown` / `to_html`; **not drawn** in PDF (`text-box-not-rendered` warning) | extracted |
@@ -184,5 +186,5 @@ shrink it with `cargo +nightly fuzz tmin <target> <crash-file>`. To add a target
 
 - Full legacy binary `.doc` (OLE/CFB / `[MS-DOC]`) body reconstruction (FIB,
   piece table, CHPX/PAPX). Today: detection + typed downgrade + `probe_doc`.
-- Richer styling, headers/footers, footnotes/endnotes, comments, fields,
+- Richer styling, comments, fields, drawing headers/footers/footnotes in the PDF, HTML export of headers/footers/footnotes,
   hyperlinks targets, SmartArt/charts.

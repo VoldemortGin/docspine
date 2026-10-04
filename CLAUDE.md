@@ -40,7 +40,8 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   (`w:instrText` 不进正文);`mc:AlternateContent` 取第一个产出非空内容的 `mc:Choice`,否则 `mc:Fallback`
   (绝不两份都出);浮动文本框只抽取(`TextRun.text_boxes`,导出紧随锚定段落),PDF 不画 + 告警;
   行级·单元格级 `w:sdt`/`w:customXml` 透明展开;`m:oMath`/`m:oMathPara` 只抽 `m:t` 文本(分式 / 上下标 / 根号用 `1/2`·`x^2`·`x_i`·`sqrt(x)` 线性记法消歧,`TextRun.is_math`,PDF 按普通文字出 + `math-flattened` 告警)。
-  仍未覆盖:页眉页脚 / 脚注尾注 / 批注部件。
+  页眉页脚(`Section.headers/footers` 引用 + `Document.header_footers` 部件表,按部件去重导出)与脚注尾注(`Document.footnotes/endnotes` + `RunSegment::NoteRef` 引用)只抽取进 `to_text`/`to_markdown`(`to_html` 暂不含),PDF 不画 + `header-footer-not-rendered` / `notes-not-rendered` 告警。
+  仍未覆盖:批注部件。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现;core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。

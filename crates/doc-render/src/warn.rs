@@ -53,6 +53,12 @@ pub enum RenderWarning {
     /// 公式(`m:oMath` / `m:oMathPara`)只抽取 `m:t` 纯文本:PDF 按普通文字出,不做
     /// 公式排版(分式 / 上下标 / 根号等结构丢失;v1 声明降级;文字不丢)。
     MathFlattened,
+    /// 页眉 / 页脚(`word/header*.xml` / `footer*.xml`)只抽取(进 `to_text` / `to_markdown`),
+    /// PDF **不绘制**(v1 声明降级;正文照常,页边距照旧)。
+    HeaderFooterNotRendered,
+    /// 脚注 / 尾注只抽取(进 `to_text` / `to_markdown`),PDF **不绘制**注文,正文里的引用
+    /// 标记也不画(v1 声明降级;正文照常)。
+    NotesNotRendered,
 }
 
 impl RenderWarning {
@@ -86,6 +92,8 @@ impl RenderWarning {
             RenderWarning::CustomTabStopsIgnored => "custom-tab-stops-ignored",
             RenderWarning::TextBoxNotRendered => "text-box-not-rendered",
             RenderWarning::MathFlattened => "math-flattened",
+            RenderWarning::HeaderFooterNotRendered => "header-footer-not-rendered",
+            RenderWarning::NotesNotRendered => "notes-not-rendered",
         }
     }
 }
@@ -173,6 +181,20 @@ impl fmt::Display for RenderWarning {
                     f,
                     "equations (m:oMath) are rendered as plain text only; math layout \
                      (fractions, scripts, radicals) is not reproduced in this version"
+                )
+            }
+            RenderWarning::HeaderFooterNotRendered => {
+                write!(
+                    f,
+                    "headers and footers are extracted to text/markdown but not drawn \
+                     in the PDF in this version"
+                )
+            }
+            RenderWarning::NotesNotRendered => {
+                write!(
+                    f,
+                    "footnotes and endnotes are extracted to text/markdown but not drawn \
+                     in the PDF (nor their reference marks) in this version"
                 )
             }
         }

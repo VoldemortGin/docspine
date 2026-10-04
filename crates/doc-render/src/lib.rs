@@ -272,6 +272,92 @@ mod tests {
         assert_eq!(n, 1);
     }
 
+    /// 页眉页脚只抽取不绘制:渲染不 panic、页数不变,`header-footer-not-rendered` 只报一次
+    /// (多个部件 / 多个节引用也只一次);内容为空的页眉不触发告警。
+    #[test]
+    fn header_footer_warns_once_and_is_not_drawn() {
+        use doc_core::model::{HeaderFooterKind, HeaderFooterRef};
+        let r = |id: &str| HeaderFooterRef {
+            kind: HeaderFooterKind::Default,
+            rel_id: id.to_string(),
+        };
+        let mut doc = doc_of(vec![para("body")]);
+        doc.sections[0].headers = vec![r("h1")];
+        doc.sections[0].footers = vec![r("f1")];
+        doc.header_footers
+            .insert("h1".into(), vec![para("page header")]);
+        doc.header_footers
+            .insert("f1".into(), vec![para("page footer")]);
+        let res = render_with(
+            deterministic(),
+            &doc,
+            &BTreeMap::new(),
+            &RenderOptions::default(),
+        )
+        .expect("render");
+        assert_eq!(count_pages(&res.pdf), 1);
+        let n = |res: &RenderResult| {
+            res.warnings
+                .iter()
+                .filter(|w| w.kind() == "header-footer-not-rendered")
+                .count()
+        };
+        assert_eq!(n(&res), 1);
+
+        // 只有空页眉:不告警。
+        let mut empty = doc_of(vec![para("body")]);
+        empty
+            .header_footers
+            .insert("h1".into(), vec![DocBlock::Paragraph(Paragraph::default())]);
+        let res = render_with(
+            deterministic(),
+            &empty,
+            &BTreeMap::new(),
+            &RenderOptions::default(),
+        )
+        .expect("render");
+        assert_eq!(n(&res), 0);
+    }
+
+    /// 脚注 / 尾注引用不画不 panic,`notes-not-rendered` 只报一次(多引用、脚注 + 尾注并存)。
+    #[test]
+    fn note_refs_warn_once_and_are_not_drawn() {
+        use doc_core::model::{NoteKind, RunSegment};
+        let mut run = TextRun::from_text("text");
+        run.segments.push(RunSegment::NoteRef {
+            kind: NoteKind::Footnote,
+            id: 1,
+        });
+        run.segments.push(RunSegment::NoteRef {
+            kind: NoteKind::Endnote,
+            id: 1,
+        });
+        let doc = doc_of(vec![
+            DocBlock::Paragraph(Paragraph {
+                runs: vec![run.clone()],
+                ..Paragraph::default()
+            }),
+            DocBlock::Paragraph(Paragraph {
+                runs: vec![run],
+                ..Paragraph::default()
+            }),
+        ]);
+        let res = render_with(
+            deterministic(),
+            &doc,
+            &BTreeMap::new(),
+            &RenderOptions::default(),
+        )
+        .expect("render");
+        assert_eq!(count_pages(&res.pdf), 1);
+        let n = res
+            .warnings
+            .iter()
+            .filter(|w| w.kind() == "notes-not-rendered")
+            .count();
+        assert_eq!(n, 1);
+    }
+
     /// 节界起新页 + 段内 `w:br@page` 起新页:1 + 1 + 1 = 3 页。
     #[test]
     fn sections_and_explicit_page_breaks_paginate() {

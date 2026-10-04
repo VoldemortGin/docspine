@@ -10,6 +10,8 @@
 //! - 合并:横向用 [`Cell::grid_span`](`w:gridSpan`),纵向用 [`Cell::v_merge`](`w:vMerge`,
 //!   区分 `restart` 起始格与 `continue` 延续格)。
 
+use std::collections::BTreeMap;
+
 use crate::geom::{Emu, Twips};
 use crate::numbering::NumberingTable;
 use crate::style::{
@@ -36,6 +38,67 @@ pub struct Document {
     /// 缺省制表位间隔(twip,`word/settings.xml > w:defaultTabStop@w:val`;
     /// 部件/属性缺失时 `None`,渲染侧落 Word 缺省 720 twip = 0.5 英寸)。
     pub default_tab_stop: Option<Twips>,
+    /// 页眉 / 页脚部件内容(`word/header*.xml` / `word/footer*.xml` 的块序列),键为主文档
+    /// 关系 id([`HeaderFooterRef::rel_id`])。只收有节引用且部件存在的;指向同一部件的
+    /// 多个关系 id 已归一成同一个键,所以一个部件只出现一次。
+    pub header_footers: BTreeMap<String, Vec<Block>>,
+    /// 脚注(`word/footnotes.xml`):`w:id` -> 内容块。`w:type` 为 `separator` /
+    /// `continuationSeparator` / `continuationNotice` 的非内容注已跳过。
+    /// 正文里的引用见 [`RunSegment::NoteRef`]。
+    pub footnotes: BTreeMap<i64, Vec<Block>>,
+    /// 尾注(`word/endnotes.xml`):语义同 [`Document::footnotes`]。
+    pub endnotes: BTreeMap<i64, Vec<Block>>,
+}
+
+/// 页眉 / 页脚的类型(`w:headerReference` / `w:footerReference` 的 `@w:type`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeaderFooterKind {
+    /// 通用(`default`;未知取值按它容错)。
+    #[default]
+    Default,
+    /// 首页(`first`,配合 `w:titlePg`)。
+    First,
+    /// 偶数页(`even`,配合 `w:evenAndOddHeaders`)。
+    Even,
+}
+
+impl HeaderFooterKind {
+    /// 解析 `@w:type`。未知值按 `default` 容错。
+    pub fn from_attr(s: &str) -> Self {
+        match s {
+            "first" => HeaderFooterKind::First,
+            "even" => HeaderFooterKind::Even,
+            _ => HeaderFooterKind::Default,
+        }
+    }
+
+    /// 稳定的小写名(`default` / `first` / `even`)。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HeaderFooterKind::Default => "default",
+            HeaderFooterKind::First => "first",
+            HeaderFooterKind::Even => "even",
+        }
+    }
+}
+
+/// 一节对某个页眉 / 页脚部件的引用(`w:sectPr > w:headerReference` / `w:footerReference`)。
+/// 内容在 [`Document::header_footers`] 里按 `rel_id` 取;解析层只保留能解析到存在部件的引用。
+/// 原样记录引用,不做“缺省则继承上一节”的推断。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderFooterRef {
+    pub kind: HeaderFooterKind,
+    /// 主文档关系 id(`r:id`;指向同一部件的多个 id 已归一成第一个)。
+    pub rel_id: String,
+}
+
+/// 注的种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteKind {
+    /// 脚注(`w:footnoteReference`)。
+    Footnote,
+    /// 尾注(`w:endnoteReference`)。
+    Endnote,
 }
 
 /// 一节(`w:sectPr`)的页面几何:页面尺寸 / 页边距 / 纸向 / 分栏。
@@ -54,6 +117,10 @@ pub struct Section {
     pub margins: PageMargins,
     /// 分栏数(`w:cols@w:num`,缺省 1)。
     pub cols: u32,
+    /// 本节的页眉引用(`w:headerReference`),按出现顺序;内容见 [`Document::header_footers`]。
+    pub headers: Vec<HeaderFooterRef>,
+    /// 本节的页脚引用(`w:footerReference`),语义同 [`Section::headers`]。
+    pub footers: Vec<HeaderFooterRef>,
     /// 本节覆盖的正文块区间的**排他性**结束下标(相对 [`Document::body`])。
     /// 本节的块为 `body[上一节.end_block .. 本节.end_block]`,首节从 0 起。
     pub end_block: usize,
@@ -67,6 +134,8 @@ impl Default for Section {
             orientation: Orientation::Portrait,
             margins: PageMargins::default(),
             cols: 1,
+            headers: Vec::new(),
+            footers: Vec::new(),
             end_block: 0,
         }
     }
@@ -151,6 +220,11 @@ impl Paragraph {
         self.runs.iter().map(|r| r.text()).collect()
     }
 
+    /// 同 [`Paragraph::text`],注引用按 `mark` 展开(见 [`TextRun::text_with_notes`])。
+    pub fn text_with_notes(&self, mark: &dyn Fn(NoteKind, i64) -> Option<String>) -> String {
+        self.runs.iter().map(|r| r.text_with_notes(mark)).collect()
+    }
+
     /// 段内各 run 锚定的浮动文本框,按文档顺序。
     pub fn text_boxes(&self) -> impl Iterator<Item = &TextBox> {
         self.runs.iter().flat_map(|r| &r.text_boxes)
@@ -210,13 +284,21 @@ impl TextRun {
 
     /// 把分段折叠成纯文本:`Tab` -> `'\t'`,`Break`(任意种类)-> `'\n'`。
     /// 与历史上的 `text` 字段语义逐字节一致(导出契约依赖这一点)。
+    /// 注引用([`RunSegment::NoteRef`])不产生文字。
     pub fn text(&self) -> String {
+        self.text_with_notes(&|_, _| None)
+    }
+
+    /// 同 [`TextRun::text`],但注引用在原位置按 `mark(种类, id)` 给出的标记串展开
+    /// (`None` = 不出标记)。导出侧用它放 `[1]` / `[^1]` 之类的脚注标记。
+    pub fn text_with_notes(&self, mark: &dyn Fn(NoteKind, i64) -> Option<String>) -> String {
         let mut out = String::new();
         for seg in &self.segments {
             match seg {
                 RunSegment::Text(s) => out.push_str(s),
                 RunSegment::Tab => out.push('\t'),
                 RunSegment::Break(_) => out.push('\n'),
+                RunSegment::NoteRef { kind, id } => out.extend(mark(*kind, *id)),
             }
         }
         out
@@ -244,6 +326,10 @@ pub enum RunSegment {
     Tab,
     /// 一个断行/断页/断栏(`w:br`,`w:cr` 视作换行)。
     Break(BreakKind),
+    /// 脚注 / 尾注引用(`w:footnoteReference` / `w:endnoteReference`):`id` 对应
+    /// [`Document::footnotes`] / [`Document::endnotes`] 的键(可能悬空)。不产生文字:
+    /// [`TextRun::text`] 折叠时忽略,导出侧另行按引用顺序编号。
+    NoteRef { kind: NoteKind, id: i64 },
 }
 
 /// 断的种类(`w:br@w:type`)。
@@ -391,7 +477,12 @@ impl Cell {
     /// 便利:把单元格内**直接段落**的文字按行拼接(忽略嵌套表;嵌套表请遍历 `blocks`)。
     /// 段落锚定的浮动文本框文字紧随该段之后成行。
     pub fn text(&self) -> String {
-        blocks_text(&self.blocks)
+        blocks_text(&self.blocks, &|_, _| None)
+    }
+
+    /// 同 [`Cell::text`],注引用按 `mark` 展开(见 [`TextRun::text_with_notes`])。
+    pub fn text_with_notes(&self, mark: &dyn Fn(NoteKind, i64) -> Option<String>) -> String {
+        blocks_text(&self.blocks, mark)
     }
 
     /// 该单元格是否是被纵向合并“吃掉”的延续格(`w:vMerge` 为 `continue`)。
@@ -401,13 +492,13 @@ impl Cell {
 }
 
 /// 块序列的直接段落文字按行拼接(忽略表格);段落锚定的文本框文字紧随该段之后。
-fn blocks_text(blocks: &[Block]) -> String {
+fn blocks_text(blocks: &[Block], mark: &dyn Fn(NoteKind, i64) -> Option<String>) -> String {
     let mut lines: Vec<String> = Vec::new();
     for b in blocks {
         if let Block::Paragraph(p) = b {
-            lines.push(p.text());
+            lines.push(p.text_with_notes(mark));
             for tb in p.text_boxes() {
-                let t = blocks_text(&tb.blocks);
+                let t = blocks_text(&tb.blocks, mark);
                 if !t.is_empty() {
                     lines.push(t);
                 }

@@ -132,6 +132,7 @@ pub(crate) struct MapCtx {
     tab_warned: bool,
     text_box_warned: bool,
     math_warned: bool,
+    notes_warned: bool,
 }
 
 impl MapCtx {
@@ -154,6 +155,7 @@ impl MapCtx {
             tab_warned: false,
             text_box_warned: false,
             math_warned: false,
+            notes_warned: false,
         };
         ctx.set_frame(&page_geom(&doc_core::model::Section::default()));
         ctx
@@ -236,6 +238,14 @@ impl MapCtx {
         }
     }
 
+    /// 脚注 / 尾注引用只抽取、不画注文与引用标记的一次性降级(map_paragraph 调用)。
+    fn notes(&mut self) {
+        if !self.notes_warned {
+            self.notes_warned = true;
+            self.list.push(RenderWarning::NotesNotRendered);
+        }
+    }
+
     /// 文档内部书签跳转的超链接(`#anchor`)只存不画的一次性降级(map_paragraph 调用)。
     fn internal_link(&mut self) {
         if !self.internal_link_warned {
@@ -269,6 +279,16 @@ pub(crate) fn map_document_with_media(
     // 渲染前体检一次样式表:basedOn 环 / 悬空引用浮成告警(解析自身带防环)。
     for sw in doc.styles.validate() {
         ctx.list.push(RenderWarning::Style(sw));
+    }
+
+    // 页眉页脚有实际内容(段落有 run / 含表格)才报:Word 模板里的空页眉很常见。
+    if doc.header_footers.values().any(|blocks| {
+        blocks.iter().any(|b| match b {
+            DocBlock::Paragraph(p) => !p.runs.is_empty(),
+            DocBlock::Table(_) => true,
+        })
+    }) {
+        ctx.list.push(RenderWarning::HeaderFooterNotRendered);
     }
 
     let mut sections = Vec::new();
@@ -457,6 +477,8 @@ fn map_paragraph(
                     text.clear();
                     parts.push(Vec::new());
                 }
+                // 注引用不画(含引用标记),一次性降级告警。
+                RunSegment::NoteRef { .. } => ctx.notes(),
             }
         }
         push_runs(

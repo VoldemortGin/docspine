@@ -19,8 +19,8 @@ use std::sync::Arc;
 use doc_core::export;
 use doc_core::geom::{emu_to_points, twips_to_points};
 use doc_core::model::{
-    Block, BreakKind, Cell, Color, Document as CoreDocument, Orientation, Paragraph, Picture, Row,
-    RunSegment, Section, Table, TextRun, VMerge,
+    Block, BreakKind, Cell, Color, Document as CoreDocument, HeaderFooterRef, NoteKind,
+    Orientation, Paragraph, Picture, Row, RunSegment, Section, Table, TextRun, VMerge,
 };
 use doc_core::DocError;
 use doc_parse::{parse_bytes, parse_path};
@@ -73,8 +73,9 @@ fn color_hex(c: &Color) -> String {
 
 // --- dict 构造:把领域模型映射成可自省的 list[dict] ----------------------
 
-/// 一个 [`RunSegment`] -> dict(`kind` 为 `"text"` / `"tab"` / `"break"`;`break` 段另带
-/// `break_type`:`"line"` / `"page"` / `"column"`)。
+/// 一个 [`RunSegment`] -> dict(`kind` 为 `"text"` / `"tab"` / `"break"` / `"note_ref"`;
+/// `break` 段另带 `break_type`:`"line"` / `"page"` / `"column"`;`note_ref` 段带 `note_kind`:
+/// `"footnote"` / `"endnote"` 与注 `id`,对应 `footnotes()` / `endnotes()` 的 `id`)。
 fn segment_dict<'py>(py: Python<'py>, seg: &RunSegment) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     match seg {
@@ -93,6 +94,17 @@ fn segment_dict<'py>(py: Python<'py>, seg: &RunSegment) -> PyResult<Bound<'py, P
                     BreakKind::Column => "column",
                 },
             )?;
+        }
+        RunSegment::NoteRef { kind, id } => {
+            d.set_item("kind", "note_ref")?;
+            d.set_item(
+                "note_kind",
+                match kind {
+                    NoteKind::Footnote => "footnote",
+                    NoteKind::Endnote => "endnote",
+                },
+            )?;
+            d.set_item("id", id)?;
         }
     }
     Ok(d)
@@ -132,6 +144,7 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
         boxes.append(bd)?;
     }
     d.set_item("text_boxes", boxes)?;
+    d.set_item("is_math", run.is_math)?;
     Ok(d)
 }
 
@@ -241,7 +254,11 @@ fn block_dict<'py>(py: Python<'py>, block: &Block) -> PyResult<Bound<'py, PyDict
 
 /// 一节 [`Section`] -> dict。长度双份给出:twip 原值 + `_points` 便利换算(对齐
 /// `width` / `width_points` 的既有惯例)。
-fn section_dict<'py>(py: Python<'py>, sect: &Section) -> PyResult<Bound<'py, PyDict>> {
+fn section_dict<'py>(
+    py: Python<'py>,
+    doc: &CoreDocument,
+    sect: &Section,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("page_width", sect.page_width)?;
     d.set_item("page_height", sect.page_height)?;
@@ -274,7 +291,56 @@ fn section_dict<'py>(py: Python<'py>, sect: &Section) -> PyResult<Bound<'py, PyD
     d.set_item("margins_points", margins_points)?;
     d.set_item("cols", sect.cols)?;
     d.set_item("end_block_index", sect.end_block)?;
+    d.set_item("headers", header_footer_list(py, doc, &sect.headers)?)?;
+    d.set_item("footers", header_footer_list(py, doc, &sect.footers)?)?;
     Ok(d)
+}
+
+/// 一组页眉 / 页脚引用 -> `list[{"type", "rel_id", "blocks"}]`:`type` 为 `"default"` /
+/// `"first"` / `"even"`,`blocks` 是部件内容(块 dict 同 `body()`)。指向同一部件的节
+/// 各自带一份;`rel_id` 相同即同一部件。
+fn header_footer_list<'py>(
+    py: Python<'py>,
+    doc: &CoreDocument,
+    refs: &[HeaderFooterRef],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for r in refs {
+        let d = PyDict::new(py);
+        d.set_item("type", r.kind.as_str())?;
+        d.set_item("rel_id", &r.rel_id)?;
+        let blocks = doc
+            .header_footers
+            .get(&r.rel_id)
+            .map_or(&[][..], Vec::as_slice);
+        d.set_item("blocks", blocks_list(py, blocks)?)?;
+        list.append(d)?;
+    }
+    Ok(list)
+}
+
+/// 一串块 -> `list[dict]`(块 dict 同 `body()`)。
+fn blocks_list<'py>(py: Python<'py>, blocks: &[Block]) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for b in blocks {
+        list.append(block_dict(py, b)?)?;
+    }
+    Ok(list)
+}
+
+/// 注表 -> `list[{"id", "blocks"}]`(按 id 升序)。
+fn notes_list<'py>(
+    py: Python<'py>,
+    notes: &BTreeMap<i64, Vec<Block>>,
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for (id, blocks) in notes {
+        let d = PyDict::new(py);
+        d.set_item("id", id)?;
+        d.set_item("blocks", blocks_list(py, blocks)?)?;
+        list.append(d)?;
+    }
+    Ok(list)
 }
 
 // --- pyclass 句柄 ---------------------------------------------------------
@@ -370,9 +436,21 @@ impl PyDocument {
     fn sections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
         for s in &self.inner.sections {
-            list.append(section_dict(py, s)?)?;
+            list.append(section_dict(py, &self.inner, s)?)?;
         }
         Ok(list)
+    }
+
+    /// 脚注(`word/footnotes.xml`),作为 `list[{"id", "blocks"}]`(按 id 升序,不含
+    /// separator 类非内容注;`blocks` 同 `body()` 的块 dict)。正文里的引用是 run 的
+    /// `kind == "note_ref"` 分段。
+    fn footnotes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        notes_list(py, &self.inner.footnotes)
+    }
+
+    /// 尾注(`word/endnotes.xml`),形状同 [`footnotes`](Self::footnotes)。
+    fn endnotes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        notes_list(py, &self.inner.endnotes)
     }
 
     /// 便利:把全文按段落顺序拼成纯文本(表格按行、单元格按 tab 连接)。
