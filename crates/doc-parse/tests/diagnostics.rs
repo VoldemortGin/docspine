@@ -280,6 +280,35 @@ fn numbering_start_beyond_word_limit_is_reported() {
 }
 
 #[test]
+fn overlong_style_chain_is_reported() {
+    // 100 层 basedOn 链:深度超过 MAX_STYLE_CHAIN(64)的样式 s64..s99 共 36 个。
+    let mut styles = format!(r#"<w:styles xmlns:w="{W_NS}">"#);
+    for i in 0..100 {
+        let based = if i > 0 {
+            format!(r#"<w:basedOn w:val="s{}"/>"#, i - 1)
+        } else {
+            String::new()
+        };
+        styles.push_str(&format!(
+            r#"<w:style w:type="paragraph" w:styleId="s{i}">{based}</w:style>"#
+        ));
+    }
+    styles.push_str("</w:styles>");
+    let doc = parse_parts(&[
+        ("word/document.xml", &doc_xml(&p("x"))),
+        ("word/styles.xml", &styles),
+    ]);
+    assert_eq!(
+        count_of(&doc, DiagnosticKind::StyleChainTruncated, "word/styles.xml"),
+        Some(36)
+    );
+    assert_eq!(
+        DiagnosticKind::StyleChainTruncated.code(),
+        "style-chain-truncated"
+    );
+}
+
+#[test]
 fn diagnostics_never_contain_document_text() {
     let secret = "TOPSECRETBODYTEXT";
     let xml = format!(

@@ -271,6 +271,8 @@ change.
   `w:shd@w:fill="DD…"` split inside a multi-byte char), found by fuzzing; it now
   rejects non-ASCII input.
 
+- **Style-level numbering and heading resolution no longer scale as chain length x paragraphs** (performance / DoS fix from review): a ~35 KB `.docx` with a 4,000-deep `basedOn` chain and 200 paragraphs made `to_text` walk the chain once per paragraph with an O(L²) cycle check. Cycle detection now uses a set (`style_chain_ids`), `to_text` / `to_markdown` / `to_html` resolve each style's numbering and heading level once per export through a call-local `StyleCache` (no shared state; `Document` stays immutable behind `Arc`), `StyleTable::validate` visits each style once, and every `basedOn` walk is capped at `MAX_STYLE_CHAIN = 64` (the most-base ancestors beyond the cap are ignored; the parse diagnostic `style-chain-truncated` counts styles with an over-deep chain).
+
 ### Security
 
 - Table size is now bounded: `gridSpan` and `w:tblGrid` are clamped to Word's 63-column

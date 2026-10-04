@@ -117,6 +117,9 @@ pub enum DiagnosticKind {
     MissingPart,
     /// 遇到 `w:altChunk`(外部内容块)而未导入(计数 = 个数)。
     AltChunkNotImported,
+    /// 样式 `basedOn` 链深度超过 `MAX_STYLE_CHAIN`:最基祖先被截断、不参与级联
+    /// (计数 = 链过深的样式数)。
+    StyleChainTruncated,
 }
 
 impl DiagnosticKind {
@@ -130,6 +133,7 @@ impl DiagnosticKind {
             DiagnosticKind::NumberingValueClamped => "numbering-value-clamped",
             DiagnosticKind::MissingPart => "missing-part",
             DiagnosticKind::AltChunkNotImported => "alt-chunk-not-imported",
+            DiagnosticKind::StyleChainTruncated => "style-chain-truncated",
         }
     }
 }

@@ -40,7 +40,7 @@ use crate::model::{
     VMerge,
 };
 use crate::numbering::{ListCounters, NumFmt};
-use crate::style::{resolve_heading_level, resolve_numbering, NumRef};
+use crate::style::{NumRef, StyleCache};
 
 // ============================================================ 纯文本
 
@@ -188,7 +188,7 @@ fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>, notes: &Notes) {
                 let item = notes.list_item(p);
                 let t = para_inline(p, notes, Mode::Markdown);
                 if !t.is_empty() {
-                    match (heading_level(notes.doc, p), item) {
+                    match (heading_level(notes, p), item) {
                         (Some(level), item) => {
                             let prefix = match item {
                                 Some(it) if !it.bullet => plain_prefix(&it, Mode::Markdown),
@@ -347,7 +347,7 @@ fn html_blocks(blocks: &[Block], out: &mut String, notes: &Notes) {
                         Some(it) => format!("{}{t}", plain_prefix(&it, Mode::Html)),
                         None => t,
                     };
-                    match heading_level(notes.doc, p) {
+                    match heading_level(notes, p) {
                         Some(level) => out.push_str(&format!("<h{level}>{t}</h{level}>\n")),
                         None => out.push_str(&format!("<p>{t}</p>\n")),
                     }
@@ -732,6 +732,8 @@ struct Notes<'a> {
     /// 当前作用域的列表计数。正文(含表格单元格)共用一份、按文档顺序连续推进;页眉页脚部件、
     /// 每条脚注尾注、每个文本框各开独立作用域([`Notes::scope`]),与 PDF 映射的划分一致。
     counters: RefCell<ListCounters>,
+    /// 本次导出内的样式解析缓存(局部值,不进 `Document`):同一样式的编号 / 标题级别只解析一次。
+    styles: RefCell<StyleCache>,
 }
 
 impl<'a> Notes<'a> {
@@ -743,6 +745,7 @@ impl<'a> Notes<'a> {
             endnotes: Vec::new(),
             emitted: RefCell::new(BTreeSet::new()),
             counters: RefCell::new(ListCounters::new()),
+            styles: RefCell::new(StyleCache::new()),
         };
         notes.collect(&doc.body);
         notes
@@ -802,7 +805,7 @@ impl<'a> Notes<'a> {
         let NumRef {
             num_id,
             ilvl: level,
-        } = resolve_numbering(self.doc, p)?;
+        } = self.styles.borrow_mut().numbering(self.doc, p)?;
         let label = self
             .counters
             .borrow_mut()
@@ -878,10 +881,14 @@ impl<'a> Notes<'a> {
 // ============================================================ 标题映射
 
 /// 段落的标题层级(1..=6;`None` = 普通段落):走样式表(段落 / 样式 `outlineLvl`、样式名沿
-/// `basedOn` 链、styleId 字面匹配,见 [`resolve_heading_level`]);Markdown / HTML 只有 6 级,
-/// 7–9 级按 6 级输出。
-fn heading_level(doc: &Document, p: &Paragraph) -> Option<u8> {
-    resolve_heading_level(doc, p).map(|l| l.min(6))
+/// `basedOn` 链、styleId 字面匹配,见 [`crate::style::resolve_heading_level`]);Markdown / HTML 只有
+/// 6 级,7–9 级按 6 级输出。样式部分经 [`Notes`] 的缓存,同一样式只解析一次。
+fn heading_level(notes: &Notes, p: &Paragraph) -> Option<u8> {
+    notes
+        .styles
+        .borrow_mut()
+        .heading_level(notes.doc, p)
+        .map(|l| l.min(6))
 }
 
 #[cfg(test)]
@@ -1042,7 +1049,7 @@ mod tests {
     fn heading_level_maps_variants() {
         let level = |style: Option<&str>| {
             let p = para("x", style);
-            heading_level(&Document::default(), &p)
+            heading_level(&Notes::new(&Document::default(), NoteStyle::Text), &p)
         };
         assert_eq!(level(Some("Heading1")), Some(1));
         assert_eq!(level(Some("heading 3")), Some(3));

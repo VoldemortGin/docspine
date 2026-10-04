@@ -27,6 +27,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::geom::{twips_to_points, Twips};
 use crate::model::{Color, Document, Paragraph, Table, TextRun};
 
+#[cfg(test)]
+thread_local! {
+    /// 仅测试编译:basedOn 链遍历的总步数(验证按 styleId 缓存后与「链长 + 段落数」同阶)。
+    pub(crate) static CHAIN_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_chain_step() {
+    CHAIN_STEPS.with(|c| c.set(c.get() + 1));
+}
+
+/// 单次 basedOn 链遍历的最大步数(防恶意长链):超出的最基样式被截断、不参与级联。
+/// 取 64 与 `MAX_NEST_DEPTH` 同量级——Word 自带模板的真实继承深度不过个位数到十余层。
+pub const MAX_STYLE_CHAIN: usize = 64;
+
 // ============================================================ Word 内置缺省(硬编码兜底)
 
 /// Word 内置缺省正文西文字体。出处:Office 默认主题「Office」的 minorFont/latin =
@@ -767,7 +782,6 @@ impl StyleTable {
     /// 这里的告警供 doc-render 汇入 ExportWarning。
     pub fn validate(&self) -> Vec<StyleWarning> {
         let mut warnings = Vec::new();
-        let mut cycle_members: BTreeSet<&str> = BTreeSet::new();
         for (id, style) in &self.styles {
             if let Some(base) = style.based_on.as_deref() {
                 if !self.styles.contains_key(base) {
@@ -777,18 +791,32 @@ impl StyleTable {
                     });
                 }
             }
-            // 从每个样式出发沿 basedOn 走:重访到出发点即证明它在环上。
-            let mut visited: BTreeSet<&str> = BTreeSet::new();
-            let mut cur = Some(id.as_str());
+        }
+        // 每个样式只走一次(已走过的节点记入 done):O(n log n),而不是逐样式重走整条链。
+        let mut cycle_members: BTreeSet<&str> = BTreeSet::new();
+        let mut done: BTreeSet<&str> = BTreeSet::new();
+        for start in self.styles.keys() {
+            let mut path: Vec<&str> = Vec::new();
+            let mut on_path: BTreeSet<&str> = BTreeSet::new();
+            let mut cur = Some(start.as_str());
             while let Some(sid) = cur {
-                if !visited.insert(sid) {
-                    if sid == id {
-                        cycle_members.insert(sid);
+                if done.contains(sid) {
+                    break;
+                }
+                if !on_path.insert(sid) {
+                    // 回到本次路径上的节点:路径上从它起的后缀就是环。
+                    if let Some(pos) = path.iter().position(|&x| x == sid) {
+                        cycle_members.extend(path[pos..].iter().copied());
                     }
                     break;
                 }
-                cur = self.styles.get(sid).and_then(|s| s.based_on.as_deref());
+                let Some(style) = self.styles.get(sid) else {
+                    break;
+                };
+                path.push(sid);
+                cur = style.based_on.as_deref();
             }
+            done.extend(path);
         }
         warnings.extend(
             cycle_members
@@ -798,6 +826,36 @@ impl StyleTable {
                 }),
         );
         warnings
+    }
+
+    /// `basedOn` 链深度(含自身)超过 [`MAX_STYLE_CHAIN`] 的样式数:这些样式的最基祖先在解析时
+    /// 被截断。沿链走一次并记忆深度,O(n log n)。环 / 悬空引用在该处按深度 0 处理。
+    pub fn over_long_chain_count(&self) -> usize {
+        let mut depth: BTreeMap<&str, usize> = BTreeMap::new();
+        for start in self.styles.keys() {
+            let mut path: Vec<&str> = Vec::new();
+            let mut on_path: BTreeSet<&str> = BTreeSet::new();
+            let mut base = 0;
+            let mut cur = Some(start.as_str());
+            while let Some(sid) = cur {
+                if let Some(&d) = depth.get(sid) {
+                    base = d;
+                    break;
+                }
+                let Some(style) = self.styles.get(sid) else {
+                    break;
+                };
+                if !on_path.insert(sid) {
+                    break;
+                }
+                path.push(sid);
+                cur = style.based_on.as_deref();
+            }
+            for (i, sid) in path.iter().rev().enumerate() {
+                depth.insert(sid, base + i + 1);
+            }
+        }
+        depth.values().filter(|&&d| d > MAX_STYLE_CHAIN).count()
     }
 }
 
@@ -1019,16 +1077,27 @@ pub fn resolve_heading_level(doc: &Document, para: &Paragraph) -> Option<u8> {
     }
     let st = &doc.styles;
     let id = para.style.as_deref().or(st.default_para_style.as_deref());
+    match style_heading(st, id) {
+        Some(level) => level,
+        None => para.style.as_deref().and_then(heading_level_from_name),
+    }
+}
+
+/// 样式(沿 `basedOn` 链)给出的标题级别:先级联 `outlineLvl`,再按样式名就近匹配。
+/// 返回 `Some(level)` = 样式已定论(`Some(None)` = 显式正文,如 `outlineLvl = 9`,不再回退 styleId 字面);
+/// `None` = 样式没给出信息(调用方回退 styleId 字面匹配)。
+/// 只依赖样式 id,供 [`resolve_heading_level`] 与 [`StyleCache`] 共用。
+fn style_heading(st: &StyleTable, id: Option<&str>) -> Option<Option<u8>> {
     let chain = style_chain(st, id); // 根在前。
     if let Some(v) = chain.iter().rev().find_map(|s| s.ppr.outline_lvl) {
-        return from_outline(v);
+        return Some((v <= 8).then_some(v + 1));
     }
-    let by_name = chain
+    chain
         .iter()
         .rev()
         .filter_map(|s| s.name.as_deref())
-        .find_map(heading_level_from_name);
-    by_name.or_else(|| para.style.as_deref().and_then(heading_level_from_name))
+        .find_map(heading_level_from_name)
+        .map(Some)
 }
 
 /// 段落的有效编号:编号实例 + 级别。
@@ -1058,52 +1127,126 @@ pub fn resolve_numbering(doc: &Document, para: &Paragraph) -> Option<NumRef> {
         });
     }
     let st = &doc.styles;
-    // 就近优先(段落样式在前,其 basedOn 祖先在后),带 styleId 供反向关联。
-    let mut chain: Vec<(&str, &Style)> = Vec::new();
-    let mut cur = para.style.as_deref().or(st.default_para_style.as_deref());
-    while let Some(sid) = cur {
-        if chain.iter().any(|(id, _)| *id == sid) {
-            break; // basedOn 成环:截断。
-        }
-        let Some(style) = st.styles.get(sid) else {
-            break; // 悬空引用:截断。
-        };
-        chain.push((sid, style));
-        cur = style.based_on.as_deref();
-    }
+    let (num_id, style_ilvl) = style_numbering(
+        doc,
+        para.style.as_deref().or(st.default_para_style.as_deref()),
+    )?;
+    Some(NumRef {
+        num_id,
+        ilvl: para.list_level.unwrap_or(style_ilvl),
+    })
+}
+
+/// 样式(沿 `basedOn` 链就近)给出的 `(numId, ilvl)`;`numId` 缺失或为 0(取消继承)时 `None`。
+/// `ilvl` 先看 `numbering.xml` 的 `lvl@pStyle` 链接,再看样式 `numPr.ilvl`,再缺省 0
+/// (段落自身的 `ilvl` 由调用方覆盖)。只依赖样式 id,供 [`resolve_numbering`] 与 [`StyleCache`] 共用。
+fn style_numbering(doc: &Document, id: Option<&str>) -> Option<(u32, u32)> {
+    let chain = style_chain_ids(&doc.styles, id);
     let num_id = chain.iter().find_map(|(_, s)| s.ppr.num_id)?;
     if num_id == 0 {
         return None;
     }
-    let ilvl = para
-        .list_level
-        .or_else(|| {
-            chain
-                .iter()
-                .find_map(|(id, _)| doc.numbering.level_for_style(num_id, id))
-        })
+    let ilvl = chain
+        .iter()
+        .find_map(|(sid, _)| doc.numbering.level_for_style(num_id, sid))
         .or_else(|| chain.iter().find_map(|(_, s)| s.ppr.num_ilvl))
         .unwrap_or(0);
-    Some(NumRef { num_id, ilvl })
+    Some((num_id, ilvl))
+}
+
+/// 一次导出内的样式解析缓存:同一 styleId 的样式级编号 / 标题级别只沿 `basedOn` 链解析一次
+/// (否则每个段落各走一遍链)。
+///
+/// 并发安全:缓存是调用方栈上的局部值(`&mut`),不进 `Document`、无内部可变性;
+/// `Document` 仍是不可变共享(`Arc<Document>` + 释放 GIL 的导出互不影响)。
+#[derive(Debug, Default)]
+pub struct StyleCache {
+    numbering: BTreeMap<String, Option<(u32, u32)>>,
+    heading: BTreeMap<String, Option<Option<u8>>>,
+}
+
+impl StyleCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 同 [`resolve_numbering`],样式部分按 styleId 缓存。
+    pub fn numbering(&mut self, doc: &Document, para: &Paragraph) -> Option<NumRef> {
+        if let Some(num_id) = para.num_id {
+            return (num_id != 0).then(|| NumRef {
+                num_id,
+                ilvl: para.list_level.unwrap_or(0),
+            });
+        }
+        let sid = para
+            .style
+            .as_deref()
+            .or(doc.styles.default_para_style.as_deref())?;
+        let (num_id, style_ilvl) = (*self
+            .numbering
+            .entry(sid.to_string())
+            .or_insert_with(|| style_numbering(doc, Some(sid))))?;
+        Some(NumRef {
+            num_id,
+            ilvl: para.list_level.unwrap_or(style_ilvl),
+        })
+    }
+
+    /// 同 [`resolve_heading_level`],样式部分按 styleId 缓存。
+    pub fn heading_level(&mut self, doc: &Document, para: &Paragraph) -> Option<u8> {
+        if let Some(v) = para.ppr.outline_lvl {
+            return (v <= 8).then_some(v + 1);
+        }
+        let from_style = match para
+            .style
+            .as_deref()
+            .or(doc.styles.default_para_style.as_deref())
+        {
+            Some(sid) => *self
+                .heading
+                .entry(sid.to_string())
+                .or_insert_with(|| style_heading(&doc.styles, Some(sid))),
+            None => None,
+        };
+        match from_style {
+            Some(level) => level,
+            None => para.style.as_deref().and_then(heading_level_from_name),
+        }
+    }
 }
 
 /// 沿 `basedOn` 走出一条样式链,**根(最基)在前**。visited-set 防环:重访即截断,
-/// 有限步终止(环告警见 [`StyleTable::validate`]);未知 id 处链截断。
+/// 有限步终止(环告警见 [`StyleTable::validate`]);未知 id 处链截断;
+/// 至多 [`MAX_STYLE_CHAIN`] 层(超出的最基样式被截断,见 [`StyleTable::over_long_chain_count`])。
 fn style_chain<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<&'a Style> {
+    let mut chain: Vec<&Style> = style_chain_ids(table, id)
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect();
+    chain.reverse();
+    chain
+}
+
+/// [`style_chain`] 的带 styleId 版本,**就近优先**(自身在前,其 basedOn 祖先在后)。
+fn style_chain_ids<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<(&'a str, &'a Style)> {
     let mut chain = Vec::new();
     let mut visited: BTreeSet<&str> = BTreeSet::new();
     let mut cur = id;
     while let Some(sid) = cur {
+        #[cfg(test)]
+        count_chain_step();
+        if chain.len() >= MAX_STYLE_CHAIN {
+            break; // 链过长:截断。
+        }
         if !visited.insert(sid) {
             break; // basedOn 成环:截断。
         }
-        let Some(style) = table.styles.get(sid) else {
+        let Some((key, style)) = table.styles.get_key_value(sid) else {
             break; // 悬空引用:截断。
         };
-        chain.push(style);
+        chain.push((key.as_str(), style));
         cur = style.based_on.as_deref();
     }
-    chain.reverse();
     chain
 }
 
@@ -2142,6 +2285,85 @@ mod tests {
         // shd fill="auto" 显式无底纹。
         para.ppr.shd_fill = Some(ColorRef::Auto);
         assert_eq!(resolve_para(&doc, &para).shading, None);
+    }
+
+    /// 造一条长 basedOn 链(`s0` 为根,`s{len-1}` 最派生),根上挂 `numPr.numId`,
+    /// 外加 `paras` 个都用最派生样式的正文段落。
+    fn long_chain_doc(len: usize, paras: usize) -> Document {
+        use crate::model::Block;
+        let mut doc = Document::default();
+        for i in 0..len {
+            let mut ppr = ParaProps::default();
+            if i == 0 {
+                ppr.num_id = Some(1);
+            }
+            let based = (i > 0).then(|| format!("s{}", i - 1));
+            doc.styles.styles.insert(
+                format!("s{i}"),
+                para_style(based.as_deref(), RunProps::default(), ppr),
+            );
+        }
+        let last = format!("s{}", len - 1);
+        for _ in 0..paras {
+            let mut p = styled_para(Some(&last));
+            p.runs = vec![TextRun::from_text("x")];
+            doc.body.push(Block::Paragraph(p));
+        }
+        doc
+    }
+
+    fn chain_steps_of(f: impl FnOnce()) -> usize {
+        CHAIN_STEPS.with(|c| c.set(0));
+        f();
+        CHAIN_STEPS.with(|c| c.get())
+    }
+
+    /// 链长 < 上限:同一样式只解析一次,导出的链遍历总步数与「链长 + 段落数」同阶,
+    /// 而不是乘积(修复前 = 段落数 × 链长 × 2)。三种文本导出各自独立计。
+    #[test]
+    fn export_chain_steps_are_linear_not_product() {
+        let (len, paras) = (40, 500);
+        let doc = long_chain_doc(len, paras);
+        for export in [
+            crate::export::to_text as fn(&Document) -> String,
+            crate::export::to_markdown,
+            crate::export::to_html,
+        ] {
+            let steps = chain_steps_of(|| {
+                export(&doc);
+            });
+            assert!(
+                steps <= 2 * (len + paras),
+                "steps {steps} 应 <= 2 * (len + paras) = {}",
+                2 * (len + paras)
+            );
+        }
+    }
+
+    /// 超长链(远超上限):每个样式的遍历被钳到 `MAX_STYLE_CHAIN`,总步数仍与段落数无乘积关系。
+    #[test]
+    fn export_chain_steps_bounded_for_overlong_chain() {
+        let (len, paras) = (1000, 200);
+        let doc = long_chain_doc(len, paras);
+        let steps = chain_steps_of(|| {
+            crate::export::to_text(&doc);
+        });
+        assert!(steps <= 4 * MAX_STYLE_CHAIN + paras, "steps = {steps}");
+    }
+
+    /// 链长超过上限时,超出部分被截断:根上的 numPr 不再生效(有限步、不挂)。
+    #[test]
+    fn overlong_chain_is_truncated_at_cap() {
+        let doc = long_chain_doc(MAX_STYLE_CHAIN + 5, 1);
+        let crate::model::Block::Paragraph(p) = &doc.body[0] else {
+            unreachable!()
+        };
+        assert_eq!(resolve_numbering(&doc, p), None, "根在上限之外");
+        let doc = long_chain_doc(MAX_STYLE_CHAIN, 1);
+        let crate::model::Block::Paragraph(p) = &doc.body[0] else {
+            unreachable!()
+        };
+        assert!(resolve_numbering(&doc, p).is_some(), "恰好上限内仍生效");
     }
 
     /// jc 归一化:left/start/center/right/end/both/distribute;未知值容错为未设置。

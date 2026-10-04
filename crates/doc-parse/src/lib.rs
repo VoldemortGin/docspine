@@ -146,6 +146,12 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         .part_str(&styles_path)
         .map(|s| parse_part(&mut diags, &styles_path, &s, |_| xml::styles::parse(&s)))
         .unwrap_or_default();
+    add_diag(
+        &mut diags,
+        DiagnosticKind::StyleChainTruncated,
+        &styles_path,
+        styles.over_long_chain_count(),
+    );
     let numbering_path = pkg.related_part("numbering", "word/numbering.xml");
     let numbering = pkg
         .part_str(&numbering_path)
