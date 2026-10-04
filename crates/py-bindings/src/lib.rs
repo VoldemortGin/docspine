@@ -233,6 +233,8 @@ fn row_dict<'py>(py: Python<'py>, row: &Row) -> PyResult<Bound<'py, PyDict>> {
     d.set_item("text", texts)?;
     d.set_item("height", row.height)?;
     d.set_item("is_header", row.is_header)?;
+    d.set_item("grid_before", row.grid_before)?;
+    d.set_item("grid_after", row.grid_after)?;
     Ok(d)
 }
 

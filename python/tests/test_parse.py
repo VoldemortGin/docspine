@@ -666,3 +666,20 @@ def test_page_numbering_defaults_when_not_declared(minimal_docx_bytes):
     assert sect["page_number_format"] == "decimal"
     assert doc.even_and_odd_headers is False
     assert all(r["field"] is None for p in doc.paragraphs() for r in p["runs"])
+
+
+def test_grid_before_after_exposed_and_html_aligned():
+    """w:gridBefore / w:gridAfter 暴露在 row 字典里;HTML 导出用空单元格占位行首空缺,vMerge 按网格列配对。"""
+
+    def tc(text, tcpr=""):
+        return f"<w:tc><w:tcPr>{tcpr}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"
+
+    rows = (
+        f'<w:tr>{tc("a")}{tc("b", "<w:vMerge w:val=\"restart\"/>")}{tc("c")}</w:tr>'
+        f'<w:tr><w:trPr><w:gridBefore w:val="1"/><w:gridAfter w:val="1"/></w:trPr>{tc("", "<w:vMerge/>")}</w:tr>'
+    )
+    doc = docspine.open_bytes(_docx(f"<w:tbl>{rows}</w:tbl>"))
+    (table,) = doc.tables()
+    assert [(r["grid_before"], r["grid_after"]) for r in table["rows"]] == [(0, 0), (1, 1)]
+    assert '<td rowspan="2">b</td>' in doc.to_html()
+    assert "<tr>\n<td></td>\n</tr>" in doc.to_html()

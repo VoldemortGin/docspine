@@ -1677,7 +1677,7 @@ fn parse_table_row<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Ro
 }
 
 /// 解析 `w:trPr`(行属性,C-7):`w:trHeight@w:val/@w:hRule`、`w:tblHeader`、
-/// `w:cantSplit`。已消费 `<w:trPr>` 起始标签。深度计数兜底嵌套子树。
+/// `w:cantSplit`、`w:gridBefore` / `w:gridAfter`。已消费 `<w:trPr>` 起始标签。深度计数兜底嵌套子树。
 fn parse_trpr<R: std::io::BufRead>(reader: &mut Reader<R>, row: &mut Row) {
     let mut depth = 0usize;
     let mut buf = Vec::new();
@@ -1719,8 +1719,18 @@ fn apply_trpr_prop(e: &BytesStart, row: &mut Row) {
         }
         b"tblHeader" => row.is_header = on_off_val(e),
         b"cantSplit" => row.cant_split = on_off_val(e),
+        // 行首 / 行末跳过的网格列数:非数字 / 负数按缺失(0),超大值钳到 Word 的列数上限。
+        b"gridBefore" => row.grid_before = grid_skip(e),
+        b"gridAfter" => row.grid_after = grid_skip(e),
         _ => {}
     }
+}
+
+/// `w:gridBefore` / `w:gridAfter` 的 `@w:val`:钳到 [`MAX_TABLE_COLS`];缺失 / 非法 → 0。
+fn grid_skip(e: &BytesStart) -> u32 {
+    attr_of(e, b"val")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map_or(0, |n| n.min(MAX_TABLE_COLS as u64) as u32)
 }
 
 /// 解析 `w:tc`(单元格):`w:tcPr`(合并/宽度/填充)+ 内容块(段落 + 嵌套表)。

@@ -35,7 +35,7 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   `w:tbl` / `w:sdt` / `w:customXml` / 行内 run 容器(`w:hyperlink`·`w:ins`·`w:moveTo`·`w:fldSimple`·
   `w:smartTag`)/ `mc:AlternateContent` / 文本框 `w:txbxContent` 递归深度上限 `MAX_NEST_DEPTH = 64`,
   更深的子树静默跳过(不报错)。
-  表格网格尺寸也有上限:`gridSpan` 与 `w:tblGrid` 列数解析时钳到 Word 的 `MAX_TABLE_COLS = 63`,`Table::col_count()` 同样封顶(饱和求和);PDF 映射按 `MAX_TABLE_CELLS = 250_000`(列数 × 行数)截行并发 `table-over-budget` 告警(文本 / HTML 导出不受影响)。列表 / 页码编号超过 `MAX_LIST_NUMBER = 32767` 时字母 / 罗马格式回退十进制,计数自增饱和。
+  行属性解析 `trHeight` / `tblHeader` / `cantSplit` / `gridBefore` / `gridAfter`(后两者钳到 `MAX_TABLE_COLS`,列号与 `vMerge` 配对 / HTML rowspan / PDF 版面都计入行首空缺;上方不是 restart 的孤立 `vMerge continue` 当普通格,内容保留)。表格网格尺寸也有上限:`gridSpan` 与 `w:tblGrid` 列数解析时钳到 Word 的 `MAX_TABLE_COLS = 63`,`Table::col_count()` 同样封顶(饱和求和);PDF 映射按 `MAX_TABLE_CELLS = 250_000`(列数 × 行数)截行并发 `table-over-budget` 告警(文本 / HTML 导出不受影响)。列表 / 页码编号超过 `MAX_LIST_NUMBER = 32767` 时字母 / 罗马格式回退十进制,计数自增饱和。
 - **正文不静默丢失。** 透明容器(`w:sdt` / `w:customXml` / `w:smartTag` / `w:hyperlink` / `w:fldSimple`)
   展开;修订按“接受全部”:`w:ins`·`w:moveTo` 保留、`w:del`·`w:moveFrom` 丢弃,`w:pPrChange`·`w:rPrChange`·`w:tcPrChange`·`w:tblPrChange`·`w:trPrChange`·`w:sectPrChange`·`w:tblGridChange` 里的修订前旧属性整体跳过;复杂字段只留缓存结果
   (`w:instrText` 不进正文);`mc:AlternateContent` 取第一个产出非空内容的 `mc:Choice`,否则 `mc:Fallback`

@@ -149,8 +149,11 @@ fn column_policies(table: &DocTable, ctx: &MapCtx) -> Vec<ColumnWidth> {
     }
     let mut cols = vec![ColumnWidth::Auto; table.col_count().max(1)];
     if let Some(row) = table.rows.first() {
-        let mut c = 0usize;
+        let mut c = row.grid_before as usize;
         for cell in &row.cells {
+            if c >= cols.len() {
+                break;
+            }
             let span = (cell.grid_span.max(1)) as usize;
             let width = match (cell.width, cell.width_pct) {
                 (Some(t), _) if t > 0 => Some(twips_to_points(t)),
@@ -172,21 +175,24 @@ fn column_policies(table: &DocTable, ctx: &MapCtx) -> Vec<ColumnWidth> {
     cols
 }
 
-/// 压平 `gridSpan`/`vMerge` 成占位网格。vMerge 延续格并入正上方网格位的合并区
-/// (上方无可并区的畸形延续格容错为自立锚格);声明超出列数的格截断。
+/// 压平 `gridSpan`/`vMerge` 成占位网格。每行从 `gridBefore` 列起排(行首空缺 / 行末 `gridAfter`
+/// 留空)。vMerge 延续格并入正上方、同起始网格列的 restart 合并区;上方不是 restart 的孤立延续格
+/// 容错为自立锚格(内容保留);声明超出列数的格截断。
 fn build_span_map(rows: &[DocRow], ncols: usize) -> (Vec<Region<'_>>, Grid) {
     let nrows = rows.len();
     let mut regions: Vec<Region<'_>> = Vec::new();
     let mut grid: Grid = vec![vec![None; ncols]; nrows];
     for (r, row) in rows.iter().enumerate() {
-        let mut c = 0usize;
+        let mut c = row.grid_before as usize;
         for cell in &row.cells {
             if c >= ncols {
                 break; // 声明列数以 grid 为准(与旧行为一致)。
             }
             let span = (cell.grid_span.max(1)) as usize;
             let owner = if cell.v_merge == VMerge::Continue {
-                r.checked_sub(1).and_then(|pr| grid[pr][c])
+                r.checked_sub(1).and_then(|pr| grid[pr][c]).filter(|&ai| {
+                    regions[ai].cell.v_merge == VMerge::Restart && regions[ai].col == c
+                })
             } else {
                 None
             };
@@ -668,5 +674,103 @@ mod tests {
         };
         assert!((w0 - 234.0).abs() < 1e-6, "50% × 468pt 正文宽");
         assert_eq!(spec.columns[1], ColumnWidth::Fixed(144.0));
+    }
+
+    fn cont_cell(text: &str) -> Cell {
+        let mut c = para_cell(text);
+        c.v_merge = VMerge::Continue;
+        c
+    }
+
+    /// `gridBefore` 行:首个单元格从网格第 `grid_before` 列起排,`vMerge` 延续格按网格列
+    /// (而不是单元格序号)并入正上方的 restart 区;行首空缺留空,不再左移。
+    #[test]
+    fn grid_before_shifts_cells_and_vmerge_pairs_by_grid_column() {
+        let mut restart = para_cell("b");
+        restart.v_merge = VMerge::Restart;
+        let table = DocTable {
+            grid_cols: vec![2400, 2400, 2400],
+            borders: full_borders(),
+            rows: vec![
+                Row {
+                    cells: vec![para_cell("a"), restart, para_cell("c")],
+                    ..Row::default()
+                },
+                Row {
+                    cells: vec![cont_cell(""), para_cell("d")],
+                    grid_before: 1,
+                    ..Row::default()
+                },
+            ],
+            ..DocTable::default()
+        };
+        let (spec, _) = map(table);
+        let cell = |r: usize, c: usize| &spec.rows[r].cells[c];
+        assert_eq!(spec.rows[1].cells.len(), 3);
+        assert!(cell(1, 0).blocks.is_empty(), "行首空缺留空");
+        assert!(cell(1, 1).blocks.is_empty(), "延续格并入 b 的合并区,无内容");
+        assert!(
+            !cell(1, 2).blocks.is_empty(),
+            "d 落在第 2 列,而不是左移到第 1 列"
+        );
+        assert_eq!(cell(1, 1).borders.top, None, "合并区内线不画");
+        assert_eq!(
+            cell(0, 0).borders.bottom,
+            None,
+            "a 与行首空缺之间的线仍按表级归下格"
+        );
+    }
+
+    /// `gridAfter`:行末空缺留空;孤立 `vMerge continue`(上方不是 restart)按普通单元格
+    /// 渲染,内容不被上方格吞掉。
+    #[test]
+    fn grid_after_is_left_empty_and_orphan_continue_keeps_content() {
+        let table = DocTable {
+            grid_cols: vec![2400, 2400, 2400],
+            rows: vec![
+                Row {
+                    cells: vec![para_cell("a"), para_cell("b")],
+                    grid_after: 1,
+                    ..Row::default()
+                },
+                Row {
+                    cells: vec![para_cell("c"), cont_cell("orphan")],
+                    grid_after: 1,
+                    ..Row::default()
+                },
+            ],
+            ..DocTable::default()
+        };
+        let (spec, _) = map(table);
+        assert!(spec.rows[0].cells[2].blocks.is_empty(), "gridAfter 空缺");
+        assert!(
+            !spec.rows[1].cells[1].blocks.is_empty(),
+            "孤立 continue 内容保留"
+        );
+    }
+
+    /// 无 `tblGrid` 时列数与列宽推导都计入首行的 `gridBefore` / `gridAfter`。
+    #[test]
+    fn column_count_without_grid_includes_grid_before_and_after() {
+        let mut w = para_cell("w");
+        w.width = Some(2880); // 144pt
+        let table = DocTable {
+            rows: vec![Row {
+                cells: vec![w],
+                grid_before: 1,
+                grid_after: 2,
+                ..Row::default()
+            }],
+            ..DocTable::default()
+        };
+        assert_eq!(table.col_count(), 4);
+        let (spec, _) = map(table);
+        assert_eq!(spec.columns.len(), 4);
+        assert_eq!(spec.columns[0], ColumnWidth::Auto);
+        assert_eq!(
+            spec.columns[1],
+            ColumnWidth::Fixed(144.0),
+            "宽度落在第 1 列"
+        );
     }
 }

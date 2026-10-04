@@ -586,3 +586,154 @@ fn picture_in_table_cell_and_link_nesting() {
     );
     assert!(to_html(&doc).contains("<td><img alt=\"logo\" src=\"image1.png\"></td>"));
 }
+
+// ============================================================ 任务 E:gridBefore / gridAfter / 孤立 vMerge
+
+fn tc(text: &str, tcpr: &str) -> String {
+    format!(r#"<w:tc><w:tcPr>{tcpr}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"#)
+}
+
+fn tr(trpr: &str, cells: &[String]) -> String {
+    format!("<w:tr><w:trPr>{trpr}</w:trPr>{}</w:tr>", cells.concat())
+}
+
+fn tbl(cols: usize, rows: &[String]) -> String {
+    let grid: String = (0..cols).map(|_| r#"<w:gridCol w:w="2000"/>"#).collect();
+    format!(
+        "<w:tbl><w:tblGrid>{grid}</w:tblGrid>{}</w:tbl>",
+        rows.concat()
+    )
+}
+
+const RESTART: &str = r#"<w:vMerge w:val="restart"/>"#;
+const CONT: &str = "<w:vMerge/>";
+
+fn table_doc(cols: usize, rows: &[String]) -> Document {
+    parse_parts(&[("word/document.xml", &body_doc(&tbl(cols, rows)))])
+}
+
+#[test]
+fn grid_before_and_after_are_parsed_and_clamped() {
+    let doc = table_doc(
+        3,
+        &[
+            tr(
+                r#"<w:gridBefore w:val="1"/><w:gridAfter w:val="2"/>"#,
+                &[tc("x", "")],
+            ),
+            tr(
+                r#"<w:gridBefore w:val="99999999999"/><w:gridAfter w:val="-3"/>"#,
+                &[tc("y", "")],
+            ),
+            tr(
+                r#"<w:trPrChange w:id="1"><w:trPr><w:gridBefore w:val="2"/></w:trPr></w:trPrChange>"#,
+                &[tc("z", "")],
+            ),
+        ],
+    );
+    let doc_core::Block::Table(t) = &doc.body[0] else {
+        panic!("table")
+    };
+    assert_eq!((t.rows[0].grid_before, t.rows[0].grid_after), (1, 2));
+    assert_eq!(
+        (t.rows[1].grid_before, t.rows[1].grid_after),
+        (doc_core::model::MAX_TABLE_COLS as u32, 0),
+        "超大值钳到 MAX_TABLE_COLS,非法负数按缺失"
+    );
+    assert_eq!(
+        (t.rows[2].grid_before, t.rows[2].grid_after),
+        (0, 0),
+        "修订前旧属性不生效"
+    );
+}
+
+#[test]
+fn vmerge_below_grid_before_row_aligns_by_grid_column() {
+    // 行 1 在网格第 0 列留空:其第一个单元格实际在第 1 列,正好接在行 0 的 vMerge restart 之下。
+    let doc = table_doc(
+        3,
+        &[
+            tr("", &[tc("a", ""), tc("b", RESTART), tc("c", "")]),
+            tr(r#"<w:gridBefore w:val="1"/>"#, &[tc("", CONT), tc("d", "")]),
+        ],
+    );
+    assert_eq!(
+        to_html(&doc),
+        "<table>\n<tr>\n<td>a</td>\n<td rowspan=\"2\">b</td>\n<td>c</td>\n</tr>\n\
+         <tr>\n<td></td>\n<td>d</td>\n</tr>\n</table>"
+    );
+}
+
+#[test]
+fn grid_before_wider_than_one_uses_colspan_filler() {
+    let doc = table_doc(
+        4,
+        &[
+            tr("", &[tc("a", ""), tc("b", ""), tc("c", ""), tc("d", "")]),
+            tr(
+                r#"<w:gridBefore w:val="2"/><w:gridAfter w:val="1"/>"#,
+                &[tc("x", "")],
+            ),
+        ],
+    );
+    assert_eq!(
+        to_html(&doc),
+        "<table>\n<tr>\n<td>a</td>\n<td>b</td>\n<td>c</td>\n<td>d</td>\n</tr>\n\
+         <tr>\n<td colspan=\"2\"></td>\n<td>x</td>\n</tr>\n</table>"
+    );
+}
+
+#[test]
+fn grid_before_and_after_in_markdown_pipe_table_and_plain_text() {
+    let doc = table_doc(
+        3,
+        &[
+            tr("", &[tc("a", ""), tc("b", ""), tc("c", "")]),
+            tr(r#"<w:gridBefore w:val="1"/>"#, &[tc("x", ""), tc("y", "")]),
+            tr(r#"<w:gridAfter w:val="1"/>"#, &[tc("p", ""), tc("q", "")]),
+        ],
+    );
+    assert_eq!(
+        to_markdown(&doc),
+        "| a | b | c |\n| --- | --- | --- |\n|  | x | y |\n| p | q |  |"
+    );
+    assert_eq!(to_text(&doc), "a\tb\tc\n\tx\ty\np\tq");
+}
+
+#[test]
+fn orphan_vmerge_continue_keeps_its_content() {
+    // 上方不是 restart(普通格 / 首行 / 另一个孤立 continue):按普通单元格输出,内容不丢。
+    let doc = table_doc(
+        2,
+        &[
+            tr("", &[tc("a", ""), tc("lonely-first-row", CONT)]),
+            tr("", &[tc("b", ""), tc("orphan", CONT)]),
+            tr("", &[tc("c", ""), tc("orphan-chain", CONT)]),
+        ],
+    );
+    let html = to_html(&doc);
+    for kept in ["lonely-first-row", "orphan", "orphan-chain"] {
+        assert!(html.contains(&format!("<td>{kept}</td>")), "{kept}: {html}");
+    }
+    assert!(!html.contains("rowspan"), "{html}");
+    assert!(to_markdown(&doc).contains("<td>orphan</td>"));
+    assert!(to_text(&doc).contains("orphan-chain"));
+}
+
+#[test]
+fn proper_vmerge_chain_still_spans_and_swallows_continuations() {
+    let doc = table_doc(
+        2,
+        &[
+            tr("", &[tc("m", RESTART), tc("1", "")]),
+            tr("", &[tc("", CONT), tc("2", "")]),
+            tr("", &[tc("", CONT), tc("3", "")]),
+            tr("", &[tc("n", ""), tc("4", "")]),
+        ],
+    );
+    assert_eq!(
+        to_html(&doc),
+        "<table>\n<tr>\n<td rowspan=\"3\">m</td>\n<td>1</td>\n</tr>\n<tr>\n<td>2</td>\n</tr>\n\
+         <tr>\n<td>3</td>\n</tr>\n<tr>\n<td>n</td>\n<td>4</td>\n</tr>\n</table>"
+    );
+}

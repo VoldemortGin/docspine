@@ -482,7 +482,8 @@ pub const MAX_TABLE_COLS: usize = 63;
 pub const MAX_TABLE_CELLS: usize = 250_000;
 
 impl Table {
-    /// 逻辑列数:优先取 `w:tblGrid` 的列数;退而取首行单元格 `grid_span` 之和(饱和求和)。
+    /// 逻辑列数:优先取 `w:tblGrid` 的列数;退而取首行的 `grid_before` + 单元格 `grid_span` 之和 +
+    /// `grid_after`(饱和求和)。
     /// 结果不超过 [`MAX_TABLE_COLS`]。
     pub fn col_count(&self) -> usize {
         if !self.grid_cols.is_empty() {
@@ -491,9 +492,10 @@ impl Table {
         self.rows
             .first()
             .map(|r| {
-                r.cells
-                    .iter()
-                    .fold(0usize, |acc, c| acc.saturating_add(c.grid_span as usize))
+                r.cells.iter().fold(
+                    (r.grid_before as usize).saturating_add(r.grid_after as usize),
+                    |acc, c| acc.saturating_add(c.grid_span as usize),
+                )
             })
             .unwrap_or(0)
             .min(MAX_TABLE_COLS)
@@ -536,6 +538,11 @@ pub struct Row {
     /// 行不跨页(`w:trPr` > `w:cantSplit`)。v1 渲染对**所有**行整行挪页
     /// (引擎内建),该标志仅保真刻画。
     pub cant_split: bool,
+    /// 行首跳过的网格列数(`w:trPr` > `w:gridBefore@w:val`;钳到 [`MAX_TABLE_COLS`])。
+    /// 该行第一个单元格从网格第 `grid_before` 列起排,`vMerge` 配对与导出 / 渲染的列号都计入它。
+    pub grid_before: u32,
+    /// 行末跳过的网格列数(`w:trPr` > `w:gridAfter@w:val`;钳到 [`MAX_TABLE_COLS`])。
+    pub grid_after: u32,
 }
 
 /// 表格单元格(`w:tc`)。内容是块序列(段落 + 可嵌套的表),所以嵌套表天然落在这里。

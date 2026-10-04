@@ -167,6 +167,8 @@ change.
 
 ### Breaking (Rust API, pre-1.0)
 
+- `Row` gains `grid_before` and `grid_after` (struct literals without `..Default::default()` must be updated).
+
 - `Document` gains `alt_chunk_count`, `Picture` gains `alt`, `ParaProps` gains `outline_lvl`, and `RenderWarning` gains `AltChunkSkipped` (`alt-chunk-skipped`). Struct literals without `..Default::default()` and exhaustive matches on `RenderWarning` must be updated.
 
 - `RenderWarning` gains `TableOverBudget` (`table-over-budget`); exhaustive matches
@@ -194,6 +196,8 @@ change.
   cached result.
 
 ### Fixed
+
+- **`w:gridBefore` / `w:gridAfter` are now parsed** (`Row.grid_before` / `grid_after`, clamped to `MAX_TABLE_COLS`; Python row dict `grid_before` / `grid_after`). Column indices, `vMerge` pairing, HTML `rowspan` and the PDF table layout now count the leading skipped grid columns, so tables whose rows start with a gap no longer shift cells left or mis-pair `vMerge`. HTML emits an empty cell (`colspan` for several columns) for the gap; the Markdown pipe table and plain text pad leading empty cells; the PDF leaves the gap empty. `Table::col_count()` (no `tblGrid`) includes the first row's before/after. **Orphan `vMerge continue` cells** (no `restart` above, or first row) are now ordinary cells: HTML export used to drop their content and the PDF mapping used to swallow them into the cell above.
 
 - **`w:ruby` base text is no longer dropped**: the `w:rubyBase` runs now join the paragraph text in place (Japanese / pinyin-annotated Chinese documents lost whole phrases); the `w:rt` reading is intentionally not emitted (no duplicated text, no model field). **`w:dir` / `w:bdo`** (bidirectional text containers) are now run containers like `w:hyperlink` / `w:smartTag`, so Arabic / Hebrew runs inside them are kept.
 

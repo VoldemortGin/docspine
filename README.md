@@ -36,7 +36,7 @@ all sharing the same `ocrspine` OCR core.
 | **Table merges: `vMerge` restart / continue (vertical)** | parsed |
 | **Nested tables (a table inside a cell)** | parsed |
 | Cell shading/fill, cell width (dxa), table grid columns | parsed |
-| Row height, header rows | parsed |
+| Row height, header rows, `gridBefore` / `gridAfter` (leading / trailing skipped grid columns; orphan `vMerge continue` cells are kept as ordinary cells) | parsed |
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent + alt text (`wp:docPr@descr`, else `@title` → `pic["alt"]`) | parsed |
 | Transparent wrappers: `w:sdt`, `w:customXml` (block + inline), `w:smartTag`, `w:hyperlink`, `w:fldSimple` (cached result), including row-level and cell-level `w:sdt` / `w:customXml` inside tables; complex fields keep the cached result, `w:instrText` never leaks | parsed |
 | Ruby `w:ruby` (base text kept, reading `w:rt` not emitted), bidi containers `w:dir` / `w:bdo` | parsed |

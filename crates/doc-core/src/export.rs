@@ -95,11 +95,13 @@ fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
             }
             Block::Table(t) => {
                 for row in &t.rows {
-                    let cells: Vec<String> = row
-                        .cells
-                        .iter()
-                        .map(|c| cell_lines(&c.blocks, notes, mode).join("\n"))
-                        .collect();
+                    // 行首跳过的网格列(`gridBefore`)补空字段,首个单元格才落在正确的列。
+                    let mut cells: Vec<String> = vec![String::new(); row.grid_before as usize];
+                    cells.extend(
+                        row.cells
+                            .iter()
+                            .map(|c| cell_lines(&c.blocks, notes, mode).join("\n")),
+                    );
                     out.push(cells.join("\t"));
                 }
             }
@@ -233,13 +235,20 @@ fn markdown_table(table: &Table, notes: &Notes) -> String {
         push_html_table(table, &mut s, notes);
         return s;
     }
-    let ncols = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
+    let ncols = table
+        .rows
+        .iter()
+        .map(|r| r.grid_before as usize + r.cells.len())
+        .max()
+        .unwrap_or(0);
     if ncols == 0 {
         return String::new();
     }
     let mut lines: Vec<String> = Vec::new();
     for (i, row) in table.rows.iter().enumerate() {
-        let mut cells: Vec<String> = row.cells.iter().map(|c| md_cell_text(c, notes)).collect();
+        // 行首跳过的网格列(`gridBefore`)补空单元格;行尾不足补齐到 ncols。
+        let mut cells: Vec<String> = vec![String::new(); row.grid_before as usize];
+        cells.extend(row.cells.iter().map(|c| md_cell_text(c, notes)));
         while cells.len() < ncols {
             cells.push(String::new());
         }
@@ -342,23 +351,33 @@ fn html_blocks(blocks: &[Block], out: &mut String, notes: &Notes) {
 
 /// 把一张表渲染成 HTML `<table>`,正确还原 `colspan`(`gridSpan`)与 `rowspan`(`vMerge`)。
 ///
-/// 纵向合并语义:`restart` 格起始并向下吞并若干 `continue` 格;`continue` 格被吞掉,**不**
-/// 单独输出 `<td>`。合并按**网格列**对齐(用 `gridSpan` 累加出每格的起始网格列号),不是按
-/// 单元格序号,这样横向合并与纵向合并叠加时也对得上。
+/// 纵向合并语义:`restart` 格起始并向下吞并若干**真正的延续格**;延续格被吞掉,**不**单独输出
+/// `<td>`。上方不是 `restart`(或其延续链)的孤立 `continue` 格按普通单元格输出,内容不丢。
+/// 合并按**网格列**对齐(用 `gridBefore` + `gridSpan` 累加出每格的起始网格列号),不是按
+/// 单元格序号,这样横向合并、行首空缺与纵向合并叠加时也对得上;行首空缺(`gridBefore`)用一个
+/// 空单元格(多列用 `colspan`)占位。
 fn push_html_table(table: &Table, out: &mut String, notes: &Notes) {
     let starts = grid_starts(table);
+    let cont = continuations(table, &starts);
     out.push_str("<table>\n");
     for (i, row) in table.rows.iter().enumerate() {
         out.push_str("<tr>\n");
         let tag = if row.is_header { "th" } else { "td" };
+        if row.grid_before > 0 {
+            out.push_str(&format!("<{tag}"));
+            if row.grid_before > 1 {
+                out.push_str(&format!(" colspan=\"{}\"", row.grid_before));
+            }
+            out.push_str(&format!("></{tag}>\n"));
+        }
         for (ci, cell) in row.cells.iter().enumerate() {
             // 被纵向合并吞掉的延续格不单独输出。
-            if cell.v_merge == VMerge::Continue {
+            if cont[i][ci] {
                 continue;
             }
             let colspan = cell.grid_span.max(1) as usize;
             let rowspan = if cell.v_merge == VMerge::Restart {
-                vmerge_rowspan(table, &starts, i, starts[i][ci])
+                vmerge_rowspan(&starts, &cont, i, starts[i][ci])
             } else {
                 1
             };
@@ -381,13 +400,14 @@ fn push_html_table(table: &Table, out: &mut String, notes: &Notes) {
     out.push_str("</table>");
 }
 
-/// 每行各单元格的**起始网格列号**(按 `gridSpan` 累加)。用于把 `vMerge` 延续格对齐到列。
+/// 每行各单元格的**起始网格列号**(从 `gridBefore` 起按 `gridSpan` 累加)。用于把 `vMerge`
+/// 延续格对齐到列。
 fn grid_starts(table: &Table) -> Vec<Vec<usize>> {
     table
         .rows
         .iter()
         .map(|r| {
-            let mut acc = 0usize;
+            let mut acc = r.grid_before as usize;
             let mut v = Vec::with_capacity(r.cells.len());
             for c in &r.cells {
                 v.push(acc);
@@ -398,21 +418,43 @@ fn grid_starts(table: &Table) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// 从 `start_row` 的 `restart` 格(起始网格列 `g`)向下数有多少行在同列是 `continue`,得 `rowspan`。
-fn vmerge_rowspan(table: &Table, starts: &[Vec<usize>], start_row: usize, g: usize) -> usize {
-    let mut span = 1usize;
-    for (row_starts, row) in starts.iter().zip(&table.rows).skip(start_row + 1) {
-        let mut continues = false;
-        for (cell, &start) in row.cells.iter().zip(row_starts) {
-            match start.cmp(&g) {
-                std::cmp::Ordering::Equal => {
-                    continues = cell.v_merge == VMerge::Continue;
-                    break;
+/// 每个单元格是否是**真正的** `vMerge` 延续格:标了 `continue`,且正上方(同起始网格列)的格是
+/// `restart` 或本身已是真延续格。其余 `continue` 格(首行 / 上方是普通格 / 上方是孤立 continue)
+/// 是孤立延续,当普通单元格处理。
+fn continuations(table: &Table, starts: &[Vec<usize>]) -> Vec<Vec<bool>> {
+    let mut cont: Vec<Vec<bool>> = Vec::with_capacity(table.rows.len());
+    for (i, (row, row_starts)) in table.rows.iter().zip(starts).enumerate() {
+        let flags = row
+            .cells
+            .iter()
+            .zip(row_starts)
+            .map(|(cell, &g)| {
+                if cell.v_merge != VMerge::Continue || i == 0 {
+                    return false;
                 }
-                std::cmp::Ordering::Greater => break, // 该列没有对应格。
-                std::cmp::Ordering::Less => {}
-            }
-        }
+                let above = table.rows[i - 1]
+                    .cells
+                    .iter()
+                    .zip(&starts[i - 1])
+                    .position(|(_, &s)| s == g);
+                above.is_some_and(|ai| {
+                    table.rows[i - 1].cells[ai].v_merge == VMerge::Restart || cont[i - 1][ai]
+                })
+            })
+            .collect();
+        cont.push(flags);
+    }
+    cont
+}
+
+/// 从 `start_row` 的 `restart` 格(起始网格列 `g`)向下数有多少行在同列是真延续格,得 `rowspan`。
+fn vmerge_rowspan(starts: &[Vec<usize>], cont: &[Vec<bool>], start_row: usize, g: usize) -> usize {
+    let mut span = 1usize;
+    for (row_starts, row_cont) in starts.iter().zip(cont).skip(start_row + 1) {
+        let continues = row_starts
+            .iter()
+            .position(|&s| s == g)
+            .is_some_and(|ci| row_cont[ci]);
         if continues {
             span += 1;
         } else {
