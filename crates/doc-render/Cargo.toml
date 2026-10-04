@@ -20,3 +20,5 @@ pdf-typeset = { workspace = true }
 # fixture(改名后写临时文件),不新增二进制 fixture。同 git repo + 同 rev,复用已拉取的
 # checkout,不额外增网络开销。
 pdf-fonts.workspace = true
+# 测试里断言页眉页脚查找步数(渲染路径不得退回逐页回溯)。
+doc-core = { workspace = true, features = ["step-counters"] }

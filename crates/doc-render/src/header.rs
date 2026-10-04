@@ -679,6 +679,20 @@ mod tests {
         doc
     }
 
+    /// 渲染路径的页眉页脚查找步数与节数同阶:每页走预计算索引,不得退回逐页向前回溯
+    /// (`header_footer_for_page` 每页回溯 O(节数),2000 节就是数百万步)。
+    #[test]
+    fn render_path_header_lookup_steps_are_linear_in_sections() {
+        use doc_core::model::step_counters::HF_STEPS;
+        let n = 2000;
+        let doc = inherited_header_doc(n, |_, _| {});
+        HF_STEPS.with(|c| c.set(0));
+        let (pages, _) = layout(&doc, &BTreeMap::new());
+        let steps = HF_STEPS.with(|c| c.get());
+        assert_eq!(pages.len(), n);
+        assert!(steps <= 4 * n, "查找步数 {steps} 应 <= 4 x 节数 {n}");
+    }
+
     /// 继承来的同一页眉部件,在版面参数相同的各节之间只映射 / 量高 / 排版一次(按部件 + 几何缓存),
     /// 而不是每节重做;几何不同的节才各自重做。
     #[test]

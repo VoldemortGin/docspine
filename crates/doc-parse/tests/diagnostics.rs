@@ -279,29 +279,44 @@ fn numbering_start_beyond_word_limit_is_reported() {
     );
 }
 
+/// 端到端:诊断出现,**且链确实被截断**(原先只测了计数函数,去掉链长上限后仍全绿)。
 #[test]
 fn overlong_style_chain_is_reported() {
     // 100 层 basedOn 链:深度超过 MAX_STYLE_CHAIN(64)的样式 s64..s99 共 36 个。
+    // 只有最基的 s0 设字号 20 pt(`w:sz` 40 半磅)。
     let mut styles = format!(r#"<w:styles xmlns:w="{W_NS}">"#);
     for i in 0..100 {
         let based = if i > 0 {
             format!(r#"<w:basedOn w:val="s{}"/>"#, i - 1)
         } else {
-            String::new()
+            r#"<w:rPr><w:sz w:val="40"/></w:rPr>"#.to_string()
         };
         styles.push_str(&format!(
             r#"<w:style w:type="paragraph" w:styleId="s{i}">{based}</w:style>"#
         ));
     }
     styles.push_str("</w:styles>");
+    let styled = |id: &str| {
+        format!(r#"<w:p><w:pPr><w:pStyle w:val="{id}"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#)
+    };
     let doc = parse_parts(&[
-        ("word/document.xml", &doc_xml(&p("x"))),
+        (
+            "word/document.xml",
+            &doc_xml(&(styled("s63") + &styled("s99"))),
+        ),
         ("word/styles.xml", &styles),
     ]);
     assert_eq!(
         count_of(&doc, DiagnosticKind::StyleChainTruncated, "word/styles.xml"),
         Some(36)
     );
+    let size = |i: usize| match &doc.body[i] {
+        Block::Paragraph(p) => doc_core::style::resolve_run(&doc, p, &p.runs[0]).size_pt,
+        _ => panic!("paragraph"),
+    };
+    // s63 的链正好 64 层,含 s0:字号 20 pt;s99 的链被截在 64 层,够不到 s0:不是 20 pt。
+    assert_eq!(size(0), 20.0);
+    assert_ne!(size(1), 20.0, "链必须在 MAX_STYLE_CHAIN 处截断");
     assert_eq!(
         DiagnosticKind::StyleChainTruncated.code(),
         "style-chain-truncated"

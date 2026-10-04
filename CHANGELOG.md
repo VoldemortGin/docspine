@@ -175,6 +175,8 @@ change.
   `Document.footnotes()` / `endnotes()`, `kind == "note_ref"` run segments, and
   the previously missing `run["is_math"]`.
 
+- **Regression tests that fail when the DoS guards are reverted** (second review: these guards could be broken while the suite stayed green). Counters now sit where the work happens: note numbering counts actual key comparisons (a linear scan is counted too), `mc:Choice` snapshots count every `FieldFrame` clone, header / footer lookup counts every section visited — including on the PDF render path via the test-only `doc-core` feature `step-counters` — the Start form `<w:footnote>…</w:footnote>` is covered by the note cap test, the style-chain diagnostic test checks that the chain is really cut, and the inline-export linearity test covers multi-run Markdown expansion. Each was checked by temporarily reverting the guard.
+
 - **Scale regression tests** (`crates/doc-parse/tests/scale_regressions.rs`, plus counters inside `style.rs` / `export.rs` / `xml/document.rs` / `header.rs` / `model.rs` unit tests): small synthetic inputs with large expansion (4,000-deep `basedOn` chains, 40,000 footnote references, 100 KB field instructions x thousands of result runs, `mc:Choice` storms over deep field stacks, 1,000 sections inheriting one header) now have count / linearity / boundedness assertions that a wall-clock timeout would not catch; minimal inputs were also added to `fuzz_regressions.rs` and the fuzz seed generator (`fuzz/seed.rs`).
 
 ### Breaking (Rust API, pre-1.0)

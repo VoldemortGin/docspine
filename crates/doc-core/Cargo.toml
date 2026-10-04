@@ -11,3 +11,8 @@ description = "docspine core: structured Word document model + twip/EMU geometry
 
 [dependencies]
 thiserror.workspace = true
+
+[features]
+# 仅测试用:暴露内部步数计数器(`doc_core::model::step_counters`),供下游 crate 的测试断言
+# 渲染路径上的查找步数与节数同阶。正常构建不开。
+step-counters = []

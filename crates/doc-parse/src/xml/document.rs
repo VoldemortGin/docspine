@@ -66,7 +66,8 @@ struct Ctx<'a> {
 
 #[cfg(test)]
 thread_local! {
-    /// 仅测试编译:`mc:Choice` 试解析为回滚而拷贝的字段栈字节数(快照 + 写时复制)。
+    /// 仅测试编译:`mc:Choice` 试解析为回滚而**实际拷贝**的字段栈字节数:快照克隆出的帧指针数组,
+    /// 加上任何 `FieldFrame` 克隆(写时复制或深拷贝,按指令长度 + 64 计)。
     static SNAPSHOT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -81,7 +82,6 @@ struct FieldStack {
 }
 
 /// 一层复杂字段:指令文字(`w:instrText` 拼接,至多 [`MAX_FIELD_INSTR`] 字节)+ 是否已进入结果区。
-#[derive(Clone)]
 struct FieldFrame {
     instr: String,
     /// 指令已因超长被截断(同一字段只记一次诊断)。
@@ -120,12 +120,22 @@ fn push_folded(dst: &mut String, src: &str) -> bool {
     false
 }
 
+/// 帧的克隆(写时复制时才会发生)。测试编译下每次克隆按实际指令长度计入 `SNAPSHOT_BYTES`。
+impl Clone for FieldFrame {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        SNAPSHOT_BYTES.with(|c| c.set(c.get() + self.instr.len() + 64));
+        FieldFrame {
+            instr: self.instr.clone(),
+            truncated: self.truncated,
+            in_result: self.in_result,
+            shared: self.shared.clone(),
+        }
+    }
+}
+
 /// 取帧的可变引用:帧仍被快照共享时写时复制(至多拷贝一帧,指令 <= [`MAX_FIELD_INSTR`] 字节)。
 fn frame_mut(frame: &mut Rc<FieldFrame>) -> &mut FieldFrame {
-    #[cfg(test)]
-    if Rc::strong_count(frame) > 1 {
-        SNAPSHOT_BYTES.with(|c| c.set(c.get() + frame.instr.len() + 64));
-    }
     Rc::make_mut(frame)
 }
 
@@ -1337,9 +1347,10 @@ where
                     let snapshot = Some(ctx.fields.borrow())
                         .filter(|st| st.frames.len() <= MAX_NEST_DEPTH as usize)
                         .map(|st| st.clone());
+                    // 测试编译:快照实际克隆出的帧指针数组(帧本身若被深拷贝,由 `FieldFrame::clone` 计数)。
                     #[cfg(test)]
                     if let Some(sn) = &snapshot {
-                        let bytes = sn.frames.len() * std::mem::size_of::<Rc<FieldFrame>>();
+                        let bytes = sn.frames.capacity() * std::mem::size_of::<Rc<FieldFrame>>();
                         SNAPSHOT_BYTES.with(|c| c.set(c.get() + bytes));
                     }
                     let v = parse(reader, ctx);

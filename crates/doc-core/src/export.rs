@@ -44,13 +44,35 @@ use crate::style::{NumRef, StyleCache};
 
 #[cfg(test)]
 thread_local! {
-    /// 仅测试编译:注编号表的查找探测次数(Vec 线性扫描每比较一个元素计 1,索引查找计 1)。
+    /// 仅测试编译:注编号表里**实际发生的键比较次数**(`NoteKey` 的 `==` / `cmp` 各计 1),
+    /// 不论用的是有序索引还是线性扫描都如实计数。
     static NOTE_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
-fn count_note_probe(n: usize) {
-    NOTE_PROBES.with(|c| c.set(c.get() + n));
+/// 注编号表的键(注 `w:id`)。测试编译下每次比较计入 `NOTE_PROBES`。
+#[derive(Clone, Copy, Debug, Eq)]
+struct NoteKey(i64);
+
+impl PartialEq for NoteKey {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        NOTE_PROBES.with(|c| c.set(c.get() + 1));
+        self.0 == other.0
+    }
+}
+
+impl Ord for NoteKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        #[cfg(test)]
+        NOTE_PROBES.with(|c| c.set(c.get() + 1));
+        self.0.cmp(&other.0)
+    }
+}
+
+impl PartialOrd for NoteKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[cfg(test)]
@@ -1148,26 +1170,22 @@ enum NoteStyle {
 /// 登记与取号都是 O(log n)(不再对 `ids` 线性扫描)。
 #[derive(Default)]
 struct NoteOrder {
-    ids: Vec<i64>,
-    index: BTreeMap<i64, usize>,
+    ids: Vec<NoteKey>,
+    index: BTreeMap<NoteKey, usize>,
 }
 
 impl NoteOrder {
     /// 登记一次引用:首次出现才分配下一个编号。
     fn insert(&mut self, id: i64) {
-        #[cfg(test)]
-        count_note_probe(1);
-        if let std::collections::btree_map::Entry::Vacant(e) = self.index.entry(id) {
-            self.ids.push(id);
+        if let std::collections::btree_map::Entry::Vacant(e) = self.index.entry(NoteKey(id)) {
+            self.ids.push(NoteKey(id));
             e.insert(self.ids.len());
         }
     }
 
     /// 该 id 的编号(1 起);未登记 `None`。
     fn number(&self, id: i64) -> Option<usize> {
-        #[cfg(test)]
-        count_note_probe(1);
-        self.index.get(&id).copied()
+        self.index.get(&NoteKey(id)).copied()
     }
 }
 
@@ -1320,7 +1338,7 @@ impl<'a> Notes<'a> {
                     NoteStyle::Html => label,
                     _ => format!("[{label}]"),
                 };
-                if let Some(blocks) = defined.get(id) {
+                if let Some(blocks) = defined.get(&id.0) {
                     out.push((head, blocks.as_slice()));
                 }
             }
@@ -1496,7 +1514,8 @@ mod tests {
         assert!(to_html(&doc).contains("a\tb<br>c<br>"));
     }
 
-    /// F 个不同脚注引用:编号登记与取号的查找总探测次数与 F 同阶(线性),而不是 F²。
+    /// F 个不同脚注引用:编号登记与取号里实际发生的键比较次数是 O(F log F),而不是线性扫描的 F²
+    /// (计数在键的比较里,改回线性扫描同样会被数到)。
     #[test]
     fn note_numbering_lookups_are_linear() {
         let f = 2000usize;
@@ -1517,7 +1536,11 @@ mod tests {
         let text = to_text(&doc);
         let probes = NOTE_PROBES.with(|c| c.get());
         assert!(text.starts_with("[1][2][3]"), "编号按首次引用顺序");
-        assert!(probes <= 4 * f, "probes {probes} 应 <= 4 * F = {}", 4 * f);
+        let bound = 4 * f * (usize::BITS - f.leading_zeros()) as usize;
+        assert!(
+            probes <= bound,
+            "比较次数 {probes} 应 <= 4 F log2 F = {bound}"
+        );
     }
 
     /// 修复 1:同一段里 N 个 run(普通文字 / 同一尾注的 N 次引用 / 满是 Markdown 特殊字符)时,
@@ -1567,6 +1590,12 @@ mod tests {
                     "{name}/{fmt}: 扫描检查了 {scanned} 字节,输出仅 {} 字节",
                     out.len()
                 );
+                // 多 run 下 Markdown 转义仍至多把每个字符翻倍(原 `markdown_escape_expansion_is_at_most_double`
+                // 只测了单个 run)。
+                if (name, fmt) == ("evil", "markdown") {
+                    let input = n * "[](<>*_`&~\\#-".len();
+                    assert!(out.len() <= 2 * input + 64, "{} vs {input}", out.len());
+                }
             }
         }
     }

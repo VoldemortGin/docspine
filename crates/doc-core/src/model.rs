@@ -158,11 +158,23 @@ pub struct Diagnostic {
     pub count: usize,
 }
 
-#[cfg(test)]
-thread_local! {
-    /// 仅测试编译:页眉页脚有效引用解析时访问的节次数。
-    static HF_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+/// 仅测试用的内部步数计数器(本 crate 的单测,或下游测试开 `step-counters` 特性时编译)。
+#[cfg(any(test, feature = "step-counters"))]
+#[doc(hidden)]
+pub mod step_counters {
+    thread_local! {
+        /// 页眉页脚有效引用解析时访问的节次数([`super::Document::header_footer_index`] 每节计 1,
+        /// [`super::Document::header_footer_for_page`] 回溯时每访问一节计 1)。
+        pub static HF_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(crate) fn hf_step() {
+        HF_STEPS.with(|c| c.set(c.get() + 1));
+    }
 }
+
+#[cfg(test)]
+use step_counters::HF_STEPS;
 
 impl Document {
     /// 某一页实际生效的 `(页眉, 页脚)` 部件键([`Document::header_footers`] 的键;`None` = 无)。
@@ -193,6 +205,8 @@ impl Document {
         );
         let pick = |refs: fn(&Section) -> &[HeaderFooterRef]| {
             self.sections[..=section].iter().rev().find_map(|s| {
+                #[cfg(any(test, feature = "step-counters"))]
+                step_counters::hf_step();
                 refs(s)
                     .iter()
                     .find(|r| r.kind == kind)
@@ -257,8 +271,8 @@ impl Document {
         let mut headers: Vec<[Option<&str>; 3]> = Vec::with_capacity(self.sections.len());
         let mut footers: Vec<[Option<&str>; 3]> = Vec::with_capacity(self.sections.len());
         for sect in &self.sections {
-            #[cfg(test)]
-            HF_STEPS.with(|c| c.set(c.get() + 1));
+            #[cfg(any(test, feature = "step-counters"))]
+            step_counters::hf_step();
             // 本节有某类型的引用则覆盖,否则沿用上一节。
             let h = propagate_refs(&sect.headers, headers.last());
             let f = propagate_refs(&sect.footers, footers.last());
