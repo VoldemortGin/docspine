@@ -138,7 +138,9 @@ cargo +nightly fuzz run render_pdf         -- -max_total_time=120 -rss_limit_mb=
 - 复现 crash:`cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>`;最小化:
   `cargo +nightly fuzz tmin <target> <crash-file>`;`RUST_BACKTRACE=1` 看 panic 位置。
 - 修复流程:在对应 crate 最小改动修掉,并往 `crates/doc-parse/tests/fuzz_regressions.rs`(或所属 crate 的
-  单测)加**现场构造**的回归测试(不提交 crash 二进制)。
+  单测)加**现场构造**的回归测试(不提交 crash 二进制)。「小文件、大展开」类(basedOn 长链 / 海量脚注 / 大字段指令 /
+  `mc:Choice` 快照)的规模回归集中在 `crates/doc-parse/tests/scale_regressions.rs`:断言**有界性 / 线性**(截断计数、共享指针个数、
+  输出长度与输入成线性;内部步数 / 探测 / 快照字节计数器在各模块 `#[cfg(test)]` 单测里),不靠挂钟超时(挡不住二次方回归)。
 - 新增 target:`fuzz/fuzz_targets/<name>.rs` + `fuzz/Cargo.toml` 加 `[[bin]]` + `fuzz.yml` 的 matrix 加名字
   + `fuzz/seed.rs` 补种子;共用的打包帮助函数放 `fuzz/src/lib.rs`。
 - `fuzz/Cargo.lock` 由根 `Cargo.lock` 拷贝而来以钉住依赖版本;根 workspace 依赖(git rev 等)变更后重新拷贝。

@@ -44,6 +44,23 @@ const NUMBERING: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"
   <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
 </w:numbering>"#;
 
+/// basedOn 链(带根上的 numPr)+ 一个环:覆盖样式链截断 / 防环路径。
+const STYLES_CHAIN: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="A"><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+  <w:style w:type="paragraph" w:styleId="B"><w:basedOn w:val="A"/></w:style>
+  <w:style w:type="paragraph" w:styleId="C"><w:basedOn w:val="B"/></w:style>
+  <w:style w:type="paragraph" w:styleId="X"><w:basedOn w:val="Y"/></w:style>
+  <w:style w:type="paragraph" w:styleId="Y"><w:basedOn w:val="X"/></w:style>
+</w:styles>"#;
+
+/// 脚注部件(与 `field_choices_math` 里的引用配套)。
+const NOTES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:id="1"><w:p><w:r><w:t>note</w:t></w:r></w:p></w:footnote>
+  <w:footnote w:id="2"/>
+</w:footnotes>"#;
+
 /// 一个 1x1 PNG 的最小头部字节(够 media 路径用;不是合法图也无妨)。
 const PNG_STUB: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0";
 
@@ -82,6 +99,16 @@ const BODIES: &[(&str, &str)] = &[
 <w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor behindDoc="1"><wp:positionH relativeFrom="page"><wp:posOffset>100</wp:posOffset></wp:positionH><wp:extent cx="500000" cy="500000"/>
 <a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>
 <mc:Fallback><w:pict><v:shape><v:textbox><w:txbxContent><w:p><w:r><w:t>fb</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>"#,
+    ),
+    (
+        "field_choices_math",
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE \* roman </w:instrText></w:r>
+<mc:AlternateContent><mc:Choice Requires="w14"><w:r><w:instrText>zz</w:instrText></w:r></mc:Choice></mc:AlternateContent>
+<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>i</w:t></w:r><w:r><w:t>ii</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>
+<w:r><w:footnoteReference w:id="1"/></w:r></w:p>
+<w:p><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:nary><m:naryPr><m:chr m:val="∑"/></m:naryPr><m:sub><m:r><m:t>i=1</m:t></m:r></m:sub><m:sup><m:r><m:t>n</m:t></m:r></m:sup>
+<m:e><m:d><m:dPr><m:begChr m:val="["/><m:endChr m:val=""/></m:dPr><m:e><m:m><m:mr><m:e><m:r><m:t>a</m:t></m:r></m:e></m:mr></m:m></m:e></m:d></m:e></m:nary></m:oMath>
+<w:r><w:t>[x](javascript:1) &lt;b&gt; # - 1. |</w:t></w:r></w:p>"#,
     ),
     (
         "sections_cols",
@@ -134,7 +161,12 @@ fn main() {
         );
         count += 1;
     }
-    for (kind, name, xml) in [(1u8, "styles", STYLES), (2, "numbering", NUMBERING)] {
+    for (kind, name, xml) in [
+        (1u8, "styles", STYLES),
+        (2, "numbering", NUMBERING),
+        (1, "styles_chain_cycle", STYLES_CHAIN),
+        (4, "footnotes", NOTES),
+    ] {
         write(
             &root.join("parse_parts"),
             &format!("{name}.bin"),

@@ -123,3 +123,75 @@ fn extreme_numbering_start_labels_return() {
         }
     }
 }
+
+// ---- 「小文件、大展开」类(规模回归的最小输入;计数 / 线性断言见 `scale_regressions.rs`):
+// 这里只钉“解析 + 三个导出器在有限时间内返回、不 panic”。
+
+/// basedOn 长链(含成环)× 多段落:样式级编号 / 标题识别每段落沿链走曾是二次方。
+#[test]
+fn long_and_cyclic_based_on_chains_return() {
+    let mut styles = format!(r#"<w:styles xmlns:w="{W_NS}">"#);
+    for i in 0..300 {
+        styles.push_str(&format!(
+            r#"<w:style w:type="paragraph" w:styleId="s{i}"><w:basedOn w:val="s{}"/></w:style>"#,
+            (i + 1) % 300 // 环
+        ));
+    }
+    styles.push_str("</w:styles>");
+    let body =
+        r#"<w:p><w:pPr><w:pStyle w:val="s0"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#.repeat(50);
+    let doc = parse_parts(&[
+        ("word/document.xml", body_doc(&body)),
+        ("word/styles.xml", styles),
+    ])
+    .unwrap()
+    .document;
+    export_all(&doc);
+}
+
+/// 一个字段指令 10 KB、结果 run 数百,外加大量 `mc:Choice`:曾按 run 克隆指令 / 按 Choice 深拷贝字段栈。
+#[test]
+fn big_field_instruction_with_many_results_and_choices_returns() {
+    let instr = "x".repeat(10_000);
+    let xml = body_doc(&format!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instr}</w:instrText></w:r>{}<w:r><w:fldChar w:fldCharType="separate"/></w:r>{}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="w14"/></mc:AlternateContent>"#.repeat(200),
+        r#"<w:r><w:t>a</w:t></w:r>"#.repeat(500)
+    ));
+    let doc = parse_parts(&[("word/document.xml", xml)]).unwrap().document;
+    export_all(&doc);
+}
+
+/// 数千个不同脚注引用:编号登记曾是线性扫描(二次方)。
+#[test]
+fn many_distinct_footnote_references_return() {
+    let n = 2_000;
+    let refs: String = (1..=n)
+        .map(|i| format!(r#"<w:r><w:footnoteReference w:id="{i}"/></w:r>"#))
+        .collect();
+    let notes: String = (1..=n)
+        .map(|i| format!(r#"<w:footnote w:id="{i}"><w:p/></w:footnote>"#))
+        .collect();
+    let doc = parse_parts(&[
+        ("word/document.xml", body_doc(&format!("<w:p>{refs}</w:p>"))),
+        (
+            "word/footnotes.xml",
+            format!(r#"<w:footnotes xmlns:w="{W_NS}">{notes}</w:footnotes>"#),
+        ),
+    ])
+    .unwrap()
+    .document;
+    export_all(&doc);
+}
+
+/// 多节继承同一页眉部件 + 公式结构 + Markdown 特殊字符:一次性覆盖新增的线性化 / 转义路径。
+#[test]
+fn math_structures_and_markdown_specials_return() {
+    let m = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:nary><m:naryPr><m:chr m:val="∑"/></m:naryPr><m:sub><m:r><m:t>i=1</m:t></m:r></m:sub><m:sup><m:r><m:t>n</m:t></m:r></m:sup><m:e><m:d><m:dPr><m:begChr m:val="["/><m:endChr m:val=""/></m:dPr><m:e><m:m><m:mr><m:e><m:r><m:t>a</m:t></m:r></m:e></m:mr></m:m></m:e></m:d></m:e></m:nary></m:oMath>"#;
+    let sections = r#"<w:p><w:pPr><w:sectPr/></w:pPr></w:p>"#.repeat(50);
+    let xml = body_doc(&format!(
+        r#"<w:p>{m}<w:r><w:t>[x](javascript:1) &lt;b&gt; # - 1. |</w:t></w:r></w:p>{sections}"#
+    ));
+    let doc = parse_parts(&[("word/document.xml", xml)]).unwrap().document;
+    export_all(&doc);
+}

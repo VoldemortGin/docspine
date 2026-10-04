@@ -175,6 +175,8 @@ change.
   `Document.footnotes()` / `endnotes()`, `kind == "note_ref"` run segments, and
   the previously missing `run["is_math"]`.
 
+- **Scale regression tests** (`crates/doc-parse/tests/scale_regressions.rs`, plus counters inside `style.rs` / `export.rs` / `xml/document.rs` / `header.rs` / `model.rs` unit tests): small synthetic inputs with large expansion (4,000-deep `basedOn` chains, 40,000 footnote references, 100 KB field instructions x thousands of result runs, `mc:Choice` storms over deep field stacks, 1,000 sections inheriting one header) now have count / linearity / boundedness assertions that a wall-clock timeout would not catch; minimal inputs were also added to `fuzz_regressions.rs` and the fuzz seed generator (`fuzz/seed.rs`).
+
 ### Breaking (Rust API, pre-1.0)
 
 - `Document` gains `diagnostics` and `core_properties`, `ParaProps` gains `num_id` / `num_ilvl`, and `NumLevel` gains `p_style` (struct literals without `..Default::default()` must be updated).
