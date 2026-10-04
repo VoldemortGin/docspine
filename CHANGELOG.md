@@ -64,6 +64,15 @@ change.
   more than one text fragment is parenthesised, e.g. `(a+b)/c`. Other math
   structures keep plain concatenation; still no LaTeX. Iterative walk, structure
   depth capped by `MAX_NEST_DEPTH`.
+- **`to_html` now emits headers, footers, footnotes and endnotes** (it silently
+  dropped them before). Each distinct header/footer part is emitted once as
+  `<header data-type="default|first|even">` (top) / `<footer ...>` (end), empty
+  parts skipped. Note references are `<sup id="fnref-1"><a href="#fn-1">[1]</a></sup>`
+  (endnotes `e1`), numbered by first reference with the same logic as
+  `to_markdown`; repeated references carry the `id` only once; dangling
+  references leave no marker. Referenced notes are listed at the end as
+  `<div class="note" id="fn-1">` with a back-link to `#fnref-1`; unreferenced
+  notes are not emitted.
 - **Headers, footers, footnotes and endnotes enter the model and text exports.**
   `word/header*.xml` / `footer*.xml` are located through the `w:headerReference` /
   `w:footerReference` entries of each `w:sectPr` (types `default` / `first` /
@@ -75,8 +84,7 @@ change.
   footers last, labelled `[Header: default]` / `**Header (default)**`) and number
   notes by first reference (`[1]` / `[e1]` plus a trailing list; Markdown
   `[^1]` / `[^e1]` with `[^1]: ...` definitions). References to missing ids,
-  rels to missing parts and malformed parts degrade without panicking. `to_html`
-  is unchanged. PDF export still does not draw them and emits one
+  rels to missing parts and malformed parts degrade without panicking. PDF export still does not draw them and emits one
   `header-footer-not-rendered` and one `notes-not-rendered` warning; SSIM
   baselines are unchanged. Python: `sections()[i]["headers"|"footers"]`,
   `Document.footnotes()` / `endnotes()`, `kind == "note_ref"` run segments, and

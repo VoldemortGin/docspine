@@ -10,15 +10,19 @@
 //!
 //! 浮动文本框([`crate::model::TextBox`])的内容紧随其锚定段落之后,按同样规则输出。
 //!
-//! 页眉页脚与脚注尾注(`to_text` / `to_markdown`;`to_html` 暂不含):
+//! 页眉页脚与脚注尾注(`to_text` / `to_markdown` / `to_html`):
 //! - 页眉页脚按节引用顺序**去重**后各输出一次,页眉放文首、页脚放文末,带 `[Header: 类型]` /
 //!   `[Footer: 类型]`(Markdown 为加粗标题行)标记;内容为空的部件不输出。
 //! - 脚注 / 尾注按**在正文中首次出现的顺序**编号:纯文本正文 `[n]` / `[en]`、文末 `[n] 内容`;
 //!   Markdown 正文 `[^n]` / `[^en]`、文末 `[^n]: 内容`。引用指向不存在的 id 时不出标记;
 //!   定义了却无人引用的注不输出(与 Word 一致)。
+//! - HTML:页眉 / 页脚是 `<header data-type="default|first|even">` / `<footer ...>`(同样去重、空部件
+//!   不输出);注引用是 `<sup id="fnref-1"><a href="#fn-1">[1]</a></sup>`(尾注 `e1`),重复引用只在首次带
+//!   `id`;文末每条注是 `<div class="note" id="fn-1">`,内含内容块与指回 `#fnref-1` 的回链。
 //!
 //! 容错:空段落跳过、空表跳过、未知样式当普通段落,绝不 panic。
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use crate::model::{Block, Cell, Document, HeaderFooterKind, NoteKind, RunSegment, Table, VMerge};
@@ -196,23 +200,67 @@ fn table_needs_html(table: &Table) -> bool {
 
 /// 全文导出为 HTML 片段:段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带合并)。文本经转义。
 pub fn to_html(doc: &Document) -> String {
-    let notes = Notes::new(doc, NoteStyle::Off);
+    let notes = Notes::new(doc, NoteStyle::Html);
     let mut out = String::new();
+    for (kind, blocks) in header_footer_parts(doc, false) {
+        push_html_header_footer("header", kind, blocks, &notes, &mut out);
+    }
     html_blocks(&doc.body, &mut out, &notes);
+    for (label, blocks) in notes.referenced() {
+        out.push_str(&format!("<div class=\"note\" id=\"fn-{label}\">\n"));
+        out.push_str(&format!("<sup>[{label}]</sup>\n"));
+        html_blocks(blocks, &mut out, &notes);
+        out.push_str(&format!("<a href=\"#fnref-{label}\">&#8617;</a>\n</div>\n"));
+    }
+    for (kind, blocks) in header_footer_parts(doc, true) {
+        push_html_header_footer("footer", kind, blocks, &notes, &mut out);
+    }
     out.trim_end().to_string()
+}
+
+/// 一个页眉 / 页脚部件 -> `<header>` / `<footer>` 容器(`data-type` 标 default/first/even);
+/// 内容为空的部件整体跳过。
+fn push_html_header_footer(
+    tag: &str,
+    kind: HeaderFooterKind,
+    blocks: &[Block],
+    notes: &Notes,
+    out: &mut String,
+) {
+    let mut inner = String::new();
+    html_blocks(blocks, &mut inner, notes);
+    if !inner.is_empty() {
+        out.push_str(&format!(
+            "<{tag} data-type=\"{}\">\n{inner}</{tag}>\n",
+            kind.as_str()
+        ));
+    }
+}
+
+/// 段落 -> HTML 内联文本:文字转义,注引用放原样的 `<sup>` 标记(不能整体转义后再放)。
+/// 折叠规则同 [`TextRun::text`](Tab -> `\t`,断行 -> `<br>`)。
+fn html_para_text(p: &crate::model::Paragraph, notes: &Notes) -> String {
+    let mut out = String::new();
+    for seg in p.runs.iter().flat_map(|r| &r.segments) {
+        match seg {
+            RunSegment::Text(s) => out.push_str(&escape_html(s)),
+            RunSegment::Tab => out.push('\t'),
+            RunSegment::Break(_) => out.push_str("<br>"),
+            RunSegment::NoteRef { kind, id } => out.extend(notes.mark(*kind, *id)),
+        }
+    }
+    out
 }
 
 fn html_blocks(blocks: &[Block], out: &mut String, notes: &Notes) {
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                let t = p.text();
+                let t = html_para_text(p, notes);
                 if !t.is_empty() {
                     match heading_level(p.style.as_deref()) {
-                        Some(level) => {
-                            out.push_str(&format!("<h{level}>{}</h{level}>\n", escape_html(&t)))
-                        }
-                        None => out.push_str(&format!("<p>{}</p>\n", escape_html(&t))),
+                        Some(level) => out.push_str(&format!("<h{level}>{t}</h{level}>\n")),
+                        None => out.push_str(&format!("<p>{t}</p>\n")),
                     }
                 }
                 for tb in p.text_boxes() {
@@ -316,9 +364,9 @@ fn html_cell_content(blocks: &[Block], notes: &Notes) -> String {
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                let t = p.text_with_notes(&|k, id| notes.mark(k, id));
+                let t = html_para_text(p, notes);
                 if !t.is_empty() {
-                    parts.push(escape_html(&t));
+                    parts.push(t);
                 }
                 for tb in p.text_boxes() {
                     let inner = html_cell_content(&tb.blocks, notes);
@@ -377,8 +425,8 @@ fn header_footer_parts(doc: &Document, footer: bool) -> Vec<(HeaderFooterKind, &
 /// 注标记的写法。
 #[derive(Clone, Copy, PartialEq)]
 enum NoteStyle {
-    /// 不出标记(HTML)。
-    Off,
+    /// HTML:`<sup id=\"fnref-1\"><a href=\"#fn-1\">[1]</a></sup>`(只在首次引用带 `id`)。
+    Html,
     /// 纯文本:`[1]` / `[e1]`。
     Text,
     /// Markdown 脚注:`[^1]` / `[^e1]`。
@@ -392,6 +440,8 @@ struct Notes<'a> {
     style: NoteStyle,
     footnotes: Vec<i64>,
     endnotes: Vec<i64>,
+    /// HTML 已输出过 `id` 的引用标签(同一注多次引用时只首次带 `id`,避免重复 id)。
+    emitted: RefCell<BTreeSet<String>>,
 }
 
 impl<'a> Notes<'a> {
@@ -401,10 +451,9 @@ impl<'a> Notes<'a> {
             style,
             footnotes: Vec::new(),
             endnotes: Vec::new(),
+            emitted: RefCell::new(BTreeSet::new()),
         };
-        if style != NoteStyle::Off {
-            notes.collect(&doc.body);
-        }
+        notes.collect(&doc.body);
         notes
     }
 
@@ -449,7 +498,7 @@ impl<'a> Notes<'a> {
         }
     }
 
-    /// 正文里该引用的标记串;悬空引用 / 关闭标记时 `None`。
+    /// 正文里该引用的标记串(HTML 为原样标记,调用方不得再转义);悬空引用时 `None`。
     fn mark(&self, kind: NoteKind, id: i64) -> Option<String> {
         let order = match kind {
             NoteKind::Footnote => &self.footnotes,
@@ -458,7 +507,16 @@ impl<'a> Notes<'a> {
         let n = order.iter().position(|&x| x == id)? + 1;
         let label = Self::label(kind, n);
         match self.style {
-            NoteStyle::Off => None,
+            NoteStyle::Html => {
+                let id = if self.emitted.borrow_mut().insert(label.clone()) {
+                    format!(" id=\"fnref-{label}\"")
+                } else {
+                    String::new()
+                };
+                Some(format!(
+                    "<sup{id}><a href=\"#fn-{label}\">[{label}]</a></sup>"
+                ))
+            }
             NoteStyle::Text => Some(format!("[{label}]")),
             NoteStyle::Markdown => Some(format!("[^{label}]")),
         }
@@ -476,6 +534,7 @@ impl<'a> Notes<'a> {
                 let label = Self::label(kind, i + 1);
                 let head = match self.style {
                     NoteStyle::Markdown => format!("[^{label}]"),
+                    NoteStyle::Html => label,
                     _ => format!("[{label}]"),
                 };
                 if let Some(blocks) = defined.get(id) {

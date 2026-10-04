@@ -3,7 +3,7 @@
 
 use std::io::{Cursor, Write};
 
-use doc_core::export::{to_markdown, to_text};
+use doc_core::export::{to_html, to_markdown, to_text};
 use doc_core::model::{Block, HeaderFooterKind, NoteKind, RunSegment};
 use doc_parse::{parse_bytes, ParsedDoc};
 use zip::write::SimpleFileOptions;
@@ -449,4 +449,140 @@ fn deeply_nested_header_content_no_stack_overflow() {
         &[("word/header1.xml", hdr(&inner))],
     );
     assert!(to_text(&d.document).contains("Body"));
+}
+
+// ------------------------------------------------------------------ to_html
+
+#[test]
+fn html_exports_header_footer_with_semantic_containers() {
+    let body = format!(
+        "{}{}",
+        p("Body text"),
+        sect(
+            r#"<w:headerReference w:type="default" r:id="rIdH1"/>
+               <w:headerReference w:type="first" r:id="rIdH2"/>
+               <w:footerReference w:type="even" r:id="rIdF1"/>"#
+        )
+    );
+    let d = build(
+        &body,
+        &[
+            ("rIdH1", "header", "header1.xml"),
+            ("rIdH2", "header", "header2.xml"),
+            ("rIdF1", "footer", "footer1.xml"),
+        ],
+        &[
+            ("word/header1.xml", hdr(&p("Head &lt;default&gt;"))),
+            ("word/header2.xml", hdr(&p("Head first"))),
+            ("word/footer1.xml", ftr(&p("Foot even"))),
+        ],
+    );
+    let html = to_html(&d.document);
+    assert_eq!(
+        html,
+        "<header data-type=\"default\">\n<p>Head &lt;default&gt;</p>\n</header>\n\
+         <header data-type=\"first\">\n<p>Head first</p>\n</header>\n\
+         <p>Body text</p>\n\
+         <footer data-type=\"even\">\n<p>Foot even</p>\n</footer>"
+    );
+}
+
+#[test]
+fn html_header_shared_by_two_sections_once_and_empty_part_skipped() {
+    let r = r#"<w:headerReference w:type="default" r:id="rIdH"/><w:footerReference w:type="default" r:id="rIdF"/>"#;
+    let body = format!(
+        "{}<w:p><w:pPr>{}</w:pPr></w:p>{}{}",
+        p("one"),
+        sect(r),
+        p("two"),
+        sect(r)
+    );
+    let d = build(
+        &body,
+        &[
+            ("rIdH", "header", "header1.xml"),
+            ("rIdF", "footer", "footer1.xml"),
+        ],
+        &[
+            ("word/header1.xml", hdr(&p("Shared Header"))),
+            ("word/footer1.xml", ftr("<w:p/>")),
+        ],
+    );
+    let html = to_html(&d.document);
+    assert_eq!(html.matches("Shared Header").count(), 1, "{html}");
+    assert!(!html.contains("<footer"), "{html}");
+}
+
+#[test]
+fn html_notes_use_sup_anchors_backlinks_and_first_reference_order() {
+    let body = format!(
+        "<w:p><w:r><w:t>A</w:t></w:r>{}{}{}{}</w:p>",
+        fn_ref(7),
+        fn_ref(3),
+        fn_ref(7),
+        en_ref(1)
+    );
+    let d = build(
+        &body,
+        &[
+            ("rIdFn", "footnotes", "footnotes.xml"),
+            ("rIdEn", "endnotes", "endnotes.xml"),
+        ],
+        &[
+            (
+                "word/footnotes.xml",
+                notes_part(
+                    "footnotes",
+                    "footnote",
+                    &[(3, "three &amp; co"), (7, "seven"), (9, "unreferenced")],
+                ),
+            ),
+            (
+                "word/endnotes.xml",
+                notes_part("endnotes", "endnote", &[(1, "end one")]),
+            ),
+        ],
+    );
+    let html = to_html(&d.document);
+    // 正文:首次引用顺序编号;重复引用沿用同号,但 id 只给首次(避免重复 id)。
+    assert!(
+        html.starts_with(
+            "<p>A<sup id=\"fnref-1\"><a href=\"#fn-1\">[1]</a></sup>\
+             <sup id=\"fnref-2\"><a href=\"#fn-2\">[2]</a></sup>\
+             <sup><a href=\"#fn-1\">[1]</a></sup>\
+             <sup id=\"fnref-e1\"><a href=\"#fn-e1\">[e1]</a></sup></p>\n"
+        ),
+        "{html}"
+    );
+    // 文末注列表带回链 id;内容转义;无人引用的 9 号不输出。
+    assert!(html.contains("id=\"fn-1\""), "{html}");
+    assert!(html.contains("href=\"#fnref-1\""), "{html}");
+    assert!(html.contains("three &amp; co"), "{html}");
+    assert!(html.contains("id=\"fn-e1\"") && html.contains("href=\"#fnref-e1\""));
+    assert!(!html.contains("unreferenced"), "{html}");
+    assert!(html.find("seven").unwrap() < html.find("three").unwrap());
+}
+
+#[test]
+fn html_dangling_note_ref_leaves_no_marker_and_cell_refs_work() {
+    let body = format!(
+        r#"<w:p><w:r><w:t>A</w:t></w:r>{}</w:p><w:tbl><w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r>{}</w:p></w:tc></w:tr></w:tbl>"#,
+        fn_ref(99),
+        fn_ref(1)
+    );
+    let d = build(
+        &body,
+        &[("rIdFn", "footnotes", "footnotes.xml")],
+        &[(
+            "word/footnotes.xml",
+            notes_part("footnotes", "footnote", &[(1, "in cell")]),
+        )],
+    );
+    let html = to_html(&d.document);
+    assert!(html.starts_with("<p>A</p>\n"), "{html}");
+    assert!(
+        html.contains("<td>cell<sup id=\"fnref-1\"><a href=\"#fn-1\">[1]</a></sup></td>"),
+        "{html}"
+    );
+    assert!(html.contains("in cell"), "{html}");
 }
