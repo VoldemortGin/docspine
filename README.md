@@ -32,7 +32,7 @@ all sharing the same `ocrspine` OCR core.
 | Paragraphs: runs, text, style name, alignment, list level | parsed |
 | Run styling: font, size, bold, italic, underline, color | parsed |
 | **Tables: rows, cells, cell paragraphs** | parsed |
-| **Table merges: `gridSpan` (horizontal)** | parsed |
+| **Table merges: `gridSpan` (horizontal)** (clamped to Word's 63-column limit) | parsed |
 | **Table merges: `vMerge` restart / continue (vertical)** | parsed |
 | **Nested tables (a table inside a cell)** | parsed |
 | Cell shading/fill, cell width (dxa), table grid columns | parsed |
@@ -43,7 +43,7 @@ all sharing the same `ocrspine` OCR core.
 | Headers / footers (`word/header*.xml` / `footer*.xml`; `default` / `first` / `even`, tables included): `sections()[i]["headers"|"footers"]` = `[{type, rel_id, blocks}]` (plus `title_pg`, `page_number_start`, `page_number_format` per section, `Document.even_and_odd_headers`, and `run["field"]` = field instruction or `None`); `to_text` / `to_markdown` / `to_html` emit each distinct part once (headers at the top as `[Header: default]` / `<header data-type="default">`, footers at the end); **drawn on every page** in the PDF (`w:titlePg` first page, `w:evenAndOddHeaders` even pages, missing types inherited from earlier sections; body pushed clear of tall headers/footers, `header-footer-overflow` warning when it cannot be; `PAGE` / `NUMPAGES` computed — `PAGE` honours `w:pgNumType` start / format and `\* roman`-style switches, odd/even headers follow the displayed number, `NUMPAGES` stays decimal; other fields use the cached result) | extracted + rendered |
 | Comments (`word/comments.xml`): `comments()` = `[{id, author, date, initials, blocks}]` (missing attributes `None`), anchors are `kind == "comment_ref"` run segments (reference point only, no range); review metadata, so **not** in `to_text` / `to_markdown` / `to_html` and not drawn in PDF | extracted |
 | Footnotes / endnotes (`word/footnotes.xml` / `endnotes.xml`; separator notes skipped): `footnotes()` / `endnotes()` = `[{id, blocks}]`, references are `kind == "note_ref"` run segments; `to_text` marks `[1]` / `[e1]` + trailing list, `to_markdown` uses `[^1]` / `[^e1]` footnote syntax, `to_html` uses `<sup>` anchors with back-linked `<div class="note">` entries; **not drawn** in PDF (`notes-not-rendered` warning) | extracted |
-| Revisions (accept-all semantics): `w:ins` / `w:moveTo` kept, `w:del` / `w:moveFrom` dropped | parsed |
+| Revisions (accept-all semantics): `w:ins` / `w:moveTo` kept, `w:del` / `w:moveFrom` dropped; old properties in `w:*PrChange` / `w:tblGridChange` ignored | parsed |
 | `mc:AlternateContent`: first `mc:Choice` that yields content, else `mc:Fallback` (never both) | parsed |
 | Floating text boxes (`wps:txbx` / VML `v:textbox` → `w:txbxContent`): extracted as `run["text_boxes"]`, emitted right after the anchoring paragraph in `to_text` / `to_markdown` / `to_html`; **not drawn** in PDF (`text-box-not-rendered` warning) | extracted |
 | Special run content: `w:sym` (code point kept as-is, incl. `U+F0xx` symbol-font PUA), `w:softHyphen` → U+00AD (invisible in PDF), `w:noBreakHyphen` → U+2011, `w:ptab` → tab | parsed |
@@ -174,6 +174,7 @@ A daily CI job (`.github/workflows/fuzz.yml`) runs every target; it is not part 
 cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds   # synthesize seeds into fuzz/corpus/ (git-ignored)
 cargo +nightly fuzz run parse_document_xml -- -max_total_time=120 -rss_limit_mb=2048
 cargo +nightly fuzz run parse_docx         -- -max_total_time=120 -rss_limit_mb=2048
+cargo +nightly fuzz run parse_parts        -- -max_total_time=120 -rss_limit_mb=2048
 cargo +nightly fuzz run render_pdf         -- -max_total_time=120 -rss_limit_mb=2048
 ```
 

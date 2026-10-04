@@ -4,5 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = doc_parse::parse_bytes(data);
+    if let Ok(parsed) = doc_parse::parse_bytes(data) {
+        docspine_fuzz::exercise_exports(&parsed.document);
+    }
 });

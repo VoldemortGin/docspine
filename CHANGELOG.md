@@ -159,6 +159,12 @@ change.
 
 ### Breaking (Rust API, pre-1.0)
 
+- `RenderWarning` gains `TableOverBudget` (`table-over-budget`); exhaustive matches
+  on `RenderWarning` must be updated. `doc_core::model` gains the constants
+  `MAX_TABLE_COLS` (63) and `MAX_TABLE_CELLS` (250,000), and `doc_core::numbering`
+  gains `MAX_LIST_NUMBER` (32767). `Table::col_count()` is now capped at 63 and
+  `Cell::grid_span` is clamped to 63 at parse time (Python `grid_span` /
+  `col_count` / `grid_cols` follow).
 - `Document::header_footer_for_page`'s `page_number` is now the **displayed** page
   number as `i64` (was the physical page index as `usize`); `Section` gains
   `page_number_start` and `page_number_format`; `RenderWarning` gains
@@ -179,6 +185,28 @@ change.
 
 ### Fixed
 
+- **`w:tblGridChange` no longer truncates the document.** A tracked column-width /
+  column-insert edit nests an old `w:tblGrid` inside the current one; the walker
+  returned at the first `</w:tblGrid>`, so the leftover end tags closed the table
+  and then the body: every remaining row and all following content was lost, and the
+  old widths leaked into `grid_cols`. The old grid is now skipped as a whole
+  (accept-all-revisions); expanded `<w:gridCol></w:gridCol>` parses like the
+  self-closed form.
+- **Formatting revisions no longer overwrite current properties.** The old values
+  inside `w:pPrChange` / `w:rPrChange` / `w:tcPrChange` / `w:tblPrChange` /
+  `w:trPrChange` (also reached from `styles.xml` and `numbering.xml`) were applied
+  last and won, reverting style, numbering, `gridSpan`, `vMerge`, bold and so on to
+  the pre-revision state. Those containers are now skipped as a whole.
+- **Huge `list` start values could abort or hang.** A `w:start` near `i64::MAX` with a
+  letter or roman `numFmt` hit `repeat(n / 26)` (capacity overflow) or a roughly
+  `n / 1000` loop; the counter's `+ 1` could overflow. Letter / roman formats now
+  fall back to decimal beyond Word's 32767 list limit and the counter saturates. The
+  page-number letter format had the same unbounded repeat and gets the same cap.
+- **Fuzz coverage**: new `parse_parts` target (first byte selects document / styles /
+  numbering / header / footnotes / comments / settings, the rest is that part's XML),
+  and the parsing targets now also run `to_text` / `to_markdown` / `to_html`.
+  Not run locally (needs nightly + cargo-fuzz); minimal trigger inputs for the fixes
+  above are regression tests in `crates/doc-parse/tests/fuzz_regressions.rs`.
 - **Complex-field state no longer leaks out of a rejected `mc:Choice`.** The
   `mc:AlternateContent` try-parse runs each `mc:Choice` until one yields content;
   a Choice that yielded nothing but had already advanced the `w:fldChar` stack
@@ -213,6 +241,13 @@ change.
 
 ### Security
 
+- Table size is now bounded: `gridSpan` and `w:tblGrid` are clamped to Word's 63-column
+  limit at parse time, `Table::col_count()` is capped (saturating sum), and the PDF
+  mapping budgets `columns x rows` per table at 250,000 grid slots (about 4,000 rows at
+  63 columns). Over-budget tables render only their leading rows and emit one
+  `table-over-budget` warning; text / Markdown / HTML export keep every row. Previously
+  a tiny file (`gridSpan="4000000000"`, or 10,000 `gridCol` x 10,000 rows) made
+  `to_pdf` abort on allocation failure.
 - `.docx` zip reads are now bounded by `doc_parse::ZipLimits` (defaults: 10,000 entries, 256 MiB per entry, 1 GiB total decompressed, 10,000:1 compression ratio for entries > 1 MiB — unreachable by deflate's ~1032:1 ceiling, so it only catches bombs using other compression methods — and 1024-byte names). Declared sizes are no longer trusted for allocation (forged headers are caught while streaming), and absolute / drive / `..` entry paths are rejected. Violations raise `DocError::LimitExceeded` (Python: `DocZipError`, message names the limit). New Rust entry points `parse_bytes_with_limits` / `parse_path_with_limits`. Nested tables / content controls / inline run containers deeper than 64 levels are now skipped instead of overflowing the stack.
 
 ## [0.5.1] — 2026-07-30

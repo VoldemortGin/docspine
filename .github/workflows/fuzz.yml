@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse_docx, parse_document_xml, render_pdf]
+        target: [parse_docx, parse_document_xml, parse_parts, render_pdf]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

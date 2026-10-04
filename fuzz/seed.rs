@@ -1,10 +1,11 @@
 //! 生成种子语料(现场构造,不落二进制 fixture;`fuzz/corpus/` 已 .gitignore)。
 //!
 //! 用法(从仓库根):`cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds`
-//! 写入 `fuzz/corpus/{parse_docx,render_pdf,parse_document_xml}/`:
+//! 写入 `fuzz/corpus/{parse_docx,render_pdf,parse_document_xml,parse_parts}/`:
 //! - `parse_document_xml`:裸 `document.xml`;
 //! - `parse_docx`:完整 docx(含 styles / numbering / rels);
-//! - `render_pdf`:同 `parse_docx` 的 docx 种子 + 裸 `document.xml`(见 target 说明)。
+//! - `render_pdf`:同 `parse_docx` 的 docx 种子 + 裸 `document.xml`(见 target 说明);
+//! - `parse_parts`:首字节部件种类(0 document / 1 styles / 2 numbering)+ 该部件 XML。
 
 use std::fs;
 use std::path::Path;
@@ -126,7 +127,19 @@ fn main() {
             &format!("{name}.xml"),
             xml.as_bytes(),
         );
+        write(
+            &root.join("parse_parts"),
+            &format!("{name}.bin"),
+            &[&[0u8][..], xml.as_bytes()].concat(),
+        );
         count += 1;
+    }
+    for (kind, name, xml) in [(1u8, "styles", STYLES), (2, "numbering", NUMBERING)] {
+        write(
+            &root.join("parse_parts"),
+            &format!("{name}.bin"),
+            &[&[kind][..], xml.as_bytes()].concat(),
+        );
     }
     println!("wrote seeds for {count} bodies under {}", root.display());
 }

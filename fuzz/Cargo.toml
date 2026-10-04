@@ -33,6 +33,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "parse_parts"
+path = "fuzz_targets/parse_parts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "render_pdf"
 path = "fuzz_targets/render_pdf.rs"
 test = false

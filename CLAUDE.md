@@ -35,8 +35,9 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   `w:tbl` / `w:sdt` / `w:customXml` / 行内 run 容器(`w:hyperlink`·`w:ins`·`w:moveTo`·`w:fldSimple`·
   `w:smartTag`)/ `mc:AlternateContent` / 文本框 `w:txbxContent` 递归深度上限 `MAX_NEST_DEPTH = 64`,
   更深的子树静默跳过(不报错)。
+  表格网格尺寸也有上限:`gridSpan` 与 `w:tblGrid` 列数解析时钳到 Word 的 `MAX_TABLE_COLS = 63`,`Table::col_count()` 同样封顶(饱和求和);PDF 映射按 `MAX_TABLE_CELLS = 250_000`(列数 × 行数)截行并发 `table-over-budget` 告警(文本 / HTML 导出不受影响)。列表 / 页码编号超过 `MAX_LIST_NUMBER = 32767` 时字母 / 罗马格式回退十进制,计数自增饱和。
 - **正文不静默丢失。** 透明容器(`w:sdt` / `w:customXml` / `w:smartTag` / `w:hyperlink` / `w:fldSimple`)
-  展开;修订按“接受全部”:`w:ins`·`w:moveTo` 保留、`w:del`·`w:moveFrom` 丢弃;复杂字段只留缓存结果
+  展开;修订按“接受全部”:`w:ins`·`w:moveTo` 保留、`w:del`·`w:moveFrom` 丢弃,`w:pPrChange`·`w:rPrChange`·`w:tcPrChange`·`w:tblPrChange`·`w:trPrChange`·`w:sectPrChange`·`w:tblGridChange` 里的修订前旧属性整体跳过;复杂字段只留缓存结果
   (`w:instrText` 不进正文);`mc:AlternateContent` 取第一个产出非空内容的 `mc:Choice`,否则 `mc:Fallback`
   (绝不两份都出;落选 Choice 推进过的复杂字段栈会回滚,字段状态只认选中分支);浮动文本框只抽取(`TextRun.text_boxes`,导出紧随锚定段落),PDF 不画 + 告警;
   行级·单元格级 `w:sdt`/`w:customXml` 透明展开;`m:oMath`/`m:oMathPara` 只抽 `m:t` 文本(分式 / 上下标 / 根号用 `1/2`·`x^2`·`x_i`·`sqrt(x)` 线性记法消歧,`TextRun.is_math`,PDF 按普通文字出 + `math-flattened` 告警)。
@@ -126,12 +127,13 @@ OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \
 cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds       # 现场生成种子到 fuzz/corpus/(已 .gitignore,不落二进制 fixture)
 cargo +nightly fuzz run parse_document_xml -- -max_total_time=120 -rss_limit_mb=2048
 cargo +nightly fuzz run parse_docx         -- -max_total_time=120 -rss_limit_mb=2048
+cargo +nightly fuzz run parse_parts        -- -max_total_time=120 -rss_limit_mb=2048
 cargo +nightly fuzz run render_pdf         -- -max_total_time=120 -rss_limit_mb=2048
 ```
 
 - target:`parse_docx`(任意字节 → `parse_bytes`)、`parse_document_xml`(字节当 `word/document.xml`,
   现场打成最小 zip,直达 XML 层,收益最大)、`render_pdf`(`PK` 开头按 docx,否则当 document.xml;解析成功再
-  `render_pdf`,`DOCSPINE_DETERMINISTIC_FONTS=1` 不扫系统字体)。
+  `render_pdf`,`DOCSPINE_DETERMINISTIC_FONTS=1` 不扫系统字体)。`parse_parts`(首字节选部件种类 document / styles / numbering / header / footnotes / comments / settings,其余字节当该部件 XML,其它部件取最小合法内容;解析后跑导出器 + `render_pdf`)。各解析 target 末尾都跑 `to_text` / `to_markdown` / `to_html`(`fuzz/src/lib.rs::exercise_exports`,另推进编号计数引擎)。
 - 复现 crash:`cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>`;最小化:
   `cargo +nightly fuzz tmin <target> <crash-file>`;`RUST_BACKTRACE=1` 看 panic 位置。
 - 修复流程:在对应 crate 最小改动修掉,并往 `crates/doc-parse/tests/fuzz_regressions.rs`(或所属 crate 的

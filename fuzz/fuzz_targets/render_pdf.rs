@@ -18,6 +18,7 @@ fuzz_target!(|data: &[u8]| {
         doc_parse::parse_bytes(&docspine_fuzz::pack_document_xml(data))
     };
     if let Ok(parsed) = parsed {
+        docspine_fuzz::exercise_exports(&parsed.document);
         let _ = doc_render::render_pdf(
             &parsed.document,
             &parsed.media,
