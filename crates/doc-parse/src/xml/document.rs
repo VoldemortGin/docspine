@@ -4,7 +4,8 @@
 //! - `w:p`   —— 段落(内含带样式的 `w:r` run + 内嵌图片;`w:pPr > w:sectPr` 是节边界)
 //! - `w:tbl` —— 表格(**本轮重点**)
 //! - `w:sdt` —— 结构化文档标签,内容透明展开(封面/目录文字不丢)
-//! - `w:customXml` —— 自定义 XML 标记,内容透明展开(块级与行内同理)
+//! - `w:customXml` —— 自定义 XML 标记,内容透明展开(块级与行内同理;表格里的行级 / 单元格级同理)
+//! - `m:oMath` / `m:oMathPara` —— 公式,只抽 `m:t` 纯文本(见 [`parse_math`])
 //! - `mc:AlternateContent` —— 取第一个产出非空内容的 `mc:Choice`,否则取 `mc:Fallback`
 //!   (块级 / run 容器级 / run 内三层同一策略,见 [`parse_alternate_content`])
 //! - `w:sectPr`(body 末尾)—— 最后一节的页面几何(尺寸/边距/纸向/分栏)
@@ -340,6 +341,8 @@ fn parse_paragraph<R: std::io::BufRead>(
                         para.runs
                             .extend(parse_sdt_runs(reader, ctx).into_iter().filter(has_content));
                     }
+                    // 公式 `m:oMath` / `m:oMathPara`:只抽 `m:t` 纯文本,不做排版。
+                    b"oMath" | b"oMathPara" => para.runs.extend(parse_math(reader, &name)),
                     b"AlternateContent" => {
                         para.runs.extend(
                             parse_alt_content_runs(reader, ctx)
@@ -479,6 +482,7 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
                         runs.extend(parse_run_container(reader, ctx));
                     }
                     b"sdt" => runs.extend(parse_sdt_runs(reader, ctx)),
+                    b"oMath" | b"oMathPara" => runs.extend(parse_math(reader, &name)),
                     b"AlternateContent" => runs.extend(parse_alt_content_runs(reader, ctx)),
                     _ => skip_element(reader),
                 }
@@ -588,6 +592,49 @@ fn break_kind(e: &BytesStart) -> BreakKind {
     }
 }
 
+// ============================================================ 公式 (m:oMath)
+
+/// 解析 `m:oMath` / `m:oMathPara`:按文档顺序抽取其中所有文字元素(`m:t`,亦含 run 内
+/// 偶见的 `w:t`)拼成一个 `is_math` run;分式 / 上下标等结构不还原,只保文字不丢。
+/// `m:oMathPara` 内多个 `m:oMath` 以空格分隔。修订删除 `w:del` / `w:moveFrom` 子树按
+/// “接受修订”丢弃。已消费起始标签;**迭代**遍历(深度计数,不递归),深嵌套不会栈溢出。
+/// 抽不出文字时返回 `None`。
+fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>, container: &[u8]) -> Option<TextRun> {
+    let is_para = container == b"oMathPara";
+    let mut text = String::new();
+    let mut depth = 0usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"del" | b"moveFrom" => skip_element(reader),
+                b"t" => text.push_str(&read_text(reader)),
+                b"oMath" if is_para && !text.is_empty() => {
+                    text.push(' ');
+                    depth += 1;
+                }
+                _ => depth += 1,
+            },
+            Ok(Event::End(_)) => {
+                if depth == 0 {
+                    break; // 容器自身结束。
+                }
+                depth -= 1;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    if text.is_empty() {
+        return None;
+    }
+    let mut run = TextRun::from_text(&text);
+    run.is_math = true;
+    Some(run)
+}
+
 // ============================================================ 结构化文档标签 (w:sdt)
 
 /// 解析**块级** `w:sdt`(结构化文档标签,如封面 / 目录容器):跳过 `w:sdtPr` / `w:sdtEndPr`
@@ -658,6 +705,115 @@ fn parse_custom_xml_blocks<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ct
         return Vec::new();
     };
     parse_block_container(reader, ctx)
+}
+
+/// 解析**行级**容器(`w:sdtContent` / 行级 `w:customXml`)的直接子节点:`w:tr` -> 行,
+/// 嵌套 `w:sdt`·`w:customXml` 递归展开,其余(`w:customXmlPr` 等)跳过。已消费容器起始标签。
+fn parse_row_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"tr" => rows.push(parse_table_row(reader, ctx)),
+                b"sdt" => rows.extend(parse_sdt_rows(reader, ctx)),
+                b"customXml" => rows.extend(parse_custom_xml_rows(reader, ctx)),
+                _ => skip_element(reader),
+            },
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    rows
+}
+
+/// 解析**单元格级**容器(`w:sdtContent` / 单元格级 `w:customXml`)的直接子节点:`w:tc`
+/// -> 单元格,嵌套 `w:sdt`·`w:customXml` 递归展开,其余跳过。已消费容器起始标签。
+fn parse_cell_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
+                b"tc" => cells.push(parse_table_cell(reader, ctx)),
+                b"sdt" => cells.extend(parse_sdt_cells(reader, ctx)),
+                b"customXml" => cells.extend(parse_custom_xml_cells(reader, ctx)),
+                _ => skip_element(reader),
+            },
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    cells
+}
+
+/// 解析 `w:sdt` 的外壳:跳过 `w:sdtPr` / `w:sdtEndPr`,把 `w:sdtContent` 交给 `parse`
+/// 展开。受 [`MAX_NEST_DEPTH`] 约束,超限整棵跳过。已消费 `<w:sdt>` 起始标签。
+fn parse_sdt_with<R: std::io::BufRead, T>(
+    reader: &mut Reader<R>,
+    ctx: &Ctx,
+    parse: fn(&mut Reader<R>, &Ctx) -> Vec<T>,
+) -> Vec<T> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if local_name(e.name().as_ref()) == b"sdtContent" {
+                    out.extend(parse(reader, ctx));
+                } else {
+                    skip_element(reader);
+                }
+            }
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// **行级** `w:sdt`(`w:tbl > w:sdt > w:sdtContent > w:tr`):透明展开其中的行。
+fn parse_sdt_rows<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Row> {
+    parse_sdt_with(reader, ctx, parse_row_container)
+}
+
+/// **单元格级** `w:sdt`(`w:tr > w:sdt > w:sdtContent > w:tc`):透明展开其中的单元格。
+fn parse_sdt_cells<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Cell> {
+    parse_sdt_with(reader, ctx, parse_cell_container)
+}
+
+/// **行级** `w:customXml`:跳过 `w:customXmlPr` 外壳,子行透明展开(可嵌套)。
+fn parse_custom_xml_rows<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Row> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return Vec::new();
+    };
+    parse_row_container(reader, ctx)
+}
+
+/// **单元格级** `w:customXml`:跳过 `w:customXmlPr` 外壳,子单元格透明展开(可嵌套)。
+fn parse_custom_xml_cells<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Cell> {
+    let Some(_guard) = ctx.enter() else {
+        skip_element(reader);
+        return Vec::new();
+    };
+    parse_cell_container(reader, ctx)
 }
 
 // ============================================================ 多选内容 (mc:AlternateContent)
@@ -774,6 +930,8 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option
                     b"tblPr" => parse_tblpr(reader, &mut table),
                     b"tblGrid" => table.grid_cols = parse_tbl_grid(reader),
                     b"tr" => table.rows.push(parse_table_row(reader, ctx)),
+                    b"sdt" => table.rows.extend(parse_sdt_rows(reader, ctx)),
+                    b"customXml" => table.rows.extend(parse_custom_xml_rows(reader, ctx)),
                     _ => skip_element(reader),
                 }
             }
@@ -894,6 +1052,8 @@ fn parse_table_row<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Ro
                 match name.as_slice() {
                     b"trPr" => parse_trpr(reader, &mut row),
                     b"tc" => row.cells.push(parse_table_cell(reader, ctx)),
+                    b"sdt" => row.cells.extend(parse_sdt_cells(reader, ctx)),
+                    b"customXml" => row.cells.extend(parse_custom_xml_cells(reader, ctx)),
                     _ => skip_element(reader),
                 }
             }

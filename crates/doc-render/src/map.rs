@@ -131,6 +131,7 @@ pub(crate) struct MapCtx {
     numbering_warned: bool,
     tab_warned: bool,
     text_box_warned: bool,
+    math_warned: bool,
 }
 
 impl MapCtx {
@@ -152,6 +153,7 @@ impl MapCtx {
             numbering_warned: false,
             tab_warned: false,
             text_box_warned: false,
+            math_warned: false,
         };
         ctx.set_frame(&page_geom(&doc_core::model::Section::default()));
         ctx
@@ -223,6 +225,14 @@ impl MapCtx {
         if !self.text_box_warned {
             self.text_box_warned = true;
             self.list.push(RenderWarning::TextBoxNotRendered);
+        }
+    }
+
+    /// 公式只抽文本、不做排版的一次性降级(map_paragraph 调用)。
+    fn math(&mut self) {
+        if !self.math_warned {
+            self.math_warned = true;
+            self.list.push(RenderWarning::MathFlattened);
         }
     }
 
@@ -353,6 +363,10 @@ fn map_paragraph(
     // 浮动文本框(C-8 外):只抽取不绘制 → 一次性降级告警。
     if para.text_boxes().next().is_some() {
         ctx.text_box();
+    }
+    // 公式(m:oMath)只抽了文字:按普通文字出 → 一次性降级告警。
+    if para.runs.iter().any(|r| r.is_math) {
+        ctx.math();
     }
 
     // 列表标签(C-6):按文档顺序推进计数;numId=0 / 层级无定义 / numFmt=none 不产

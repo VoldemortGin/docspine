@@ -38,7 +38,8 @@ all sharing the same `ocrspine` OCR core.
 | Cell shading/fill, cell width (dxa), table grid columns | parsed |
 | Row height, header rows | parsed |
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent | parsed |
-| Transparent wrappers: `w:sdt`, `w:customXml` (block + inline), `w:smartTag`, `w:hyperlink`, `w:fldSimple` (cached result); complex fields keep the cached result, `w:instrText` never leaks | parsed |
+| Transparent wrappers: `w:sdt`, `w:customXml` (block + inline), `w:smartTag`, `w:hyperlink`, `w:fldSimple` (cached result), including row-level and cell-level `w:sdt` / `w:customXml` inside tables; complex fields keep the cached result, `w:instrText` never leaks | parsed |
+| Math `m:oMath` / `m:oMathPara`: `m:t` text extracted in order as plain text (no layout; PDF draws plain text, `math-flattened` warning) | extracted |
 | Revisions (accept-all semantics): `w:ins` / `w:moveTo` kept, `w:del` / `w:moveFrom` dropped | parsed |
 | `mc:AlternateContent`: first `mc:Choice` that yields content, else `mc:Fallback` (never both) | parsed |
 | Floating text boxes (`wps:txbx` / VML `v:textbox` → `w:txbxContent`): extracted as `run["text_boxes"]`, emitted right after the anchoring paragraph in `to_text` / `to_markdown` / `to_html`; **not drawn** in PDF (`text-box-not-rendered` warning) | extracted |

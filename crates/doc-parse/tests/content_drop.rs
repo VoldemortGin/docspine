@@ -401,3 +401,180 @@ fn nested_text_boxes_beyond_depth_skipped_not_panic() {
     let txt = text_of(&body);
     assert!(!txt.contains("core") && txt.ends_with("after"), "{txt:?}");
 }
+
+// ------------------------------------------------------------------ 行级 / 单元格级 sdt·customXml
+
+fn only_table(parsed: &ParsedDoc) -> &doc_core::model::Table {
+    parsed
+        .document
+        .body
+        .iter()
+        .find_map(|b| match b {
+            Block::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("a table")
+}
+
+fn cell_text(c: &doc_core::model::Cell) -> String {
+    c.blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Paragraph(p) => Some(p.text()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn row_level_sdt_and_custom_xml_rows_are_transparent_and_nest() {
+    let parsed = parse_body(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>
+             <w:tr><w:tc><w:p><w:r><w:t>r1</w:t></w:r></w:p></w:tc></w:tr>
+             <w:sdt><w:sdtPr><w:alias w:val="x"/></w:sdtPr><w:sdtContent>
+               <w:tr><w:tc><w:p><w:r><w:t>r2</w:t></w:r></w:p></w:tc></w:tr>
+               <w:customXml w:element="e"><w:customXmlPr/>
+                 <w:sdt><w:sdtContent>
+                   <w:tr><w:trPr><w:tblHeader/></w:trPr>
+                     <w:tc><w:p><w:r><w:t>r3</w:t></w:r></w:p></w:tc></w:tr>
+                 </w:sdtContent></w:sdt>
+               </w:customXml>
+             </w:sdtContent></w:sdt>
+             <w:tr><w:tc><w:p><w:r><w:t>r4</w:t></w:r></w:p></w:tc></w:tr>
+           </w:tbl>"#,
+    );
+    let t = only_table(&parsed);
+    let rows: Vec<String> = t.rows.iter().map(|r| cell_text(&r.cells[0])).collect();
+    assert_eq!(rows, ["r1", "r2", "r3", "r4"]);
+    assert!(t.rows[2].is_header);
+    assert_eq!(to_text(&parsed.document).lines().count(), 4);
+}
+
+#[test]
+fn cell_level_sdt_and_custom_xml_cells_keep_merges_and_order() {
+    let parsed = parse_body(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>
+             <w:tr>
+               <w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+               <w:sdt><w:sdtPr/><w:sdtContent>
+                 <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc>
+               </w:sdtContent></w:sdt>
+             </w:tr>
+             <w:tr>
+               <w:customXml w:element="c"><w:sdt><w:sdtContent>
+                 <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc>
+               </w:sdtContent></w:sdt></w:customXml>
+               <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>d</w:t></w:r></w:p></w:tc>
+             </w:tr>
+             <w:tr>
+               <w:sdt><w:sdtContent>
+                 <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>
+               </w:sdtContent></w:sdt>
+               <w:tc><w:p><w:r><w:t>e</w:t></w:r></w:p></w:tc>
+               <w:tc><w:p><w:r><w:t>f</w:t></w:r></w:p></w:tc>
+             </w:tr>
+           </w:tbl>"#,
+    );
+    let t = only_table(&parsed);
+    assert_eq!(t.rows[0].cells.len(), 2);
+    assert_eq!(cell_text(&t.rows[0].cells[1]), "b");
+    assert_eq!(t.rows[0].cells[1].grid_span, 2);
+    assert_eq!(t.rows[1].cells.len(), 2);
+    assert_eq!(t.rows[1].cells[0].v_merge, doc_core::model::VMerge::Restart);
+    assert_eq!(t.rows[1].cells[1].grid_span, 2);
+    assert_eq!(t.rows[2].cells.len(), 3);
+    assert_eq!(
+        t.rows[2].cells[0].v_merge,
+        doc_core::model::VMerge::Continue
+    );
+    assert_eq!(cell_text(&t.rows[2].cells[2]), "f");
+}
+
+#[test]
+fn nested_row_cell_sdt_beyond_depth_skipped_not_panic() {
+    let levels = 3_000;
+    let rows = format!(
+        "{}<w:tr><w:tc><w:p><w:r><w:t>deep row</w:t></w:r></w:p></w:tc></w:tr>{}",
+        "<w:sdt><w:sdtContent><w:customXml>".repeat(levels),
+        "</w:customXml></w:sdtContent></w:sdt>".repeat(levels)
+    );
+    let cells = format!(
+        "{}<w:tc><w:p><w:r><w:t>deep cell</w:t></w:r></w:p></w:tc>{}",
+        "<w:sdt><w:sdtContent><w:customXml>".repeat(levels),
+        "</w:customXml></w:sdtContent></w:sdt>".repeat(levels)
+    );
+    let body = format!(
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>keep</w:t></w:r></w:p></w:tc></w:tr>{rows}\
+         <w:tr>{cells}<w:tc><w:p><w:r><w:t>tail</w:t></w:r></w:p></w:tc></w:tr></w:tbl>\
+         <w:p><w:r><w:t>after</w:t></w:r></w:p>"
+    );
+    let txt = text_of(&body);
+    assert!(!txt.contains("deep"), "{txt:?}");
+    assert!(
+        txt.contains("keep") && txt.contains("tail") && txt.ends_with("after"),
+        "{txt:?}"
+    );
+}
+
+// ------------------------------------------------------------------ m:oMath / m:oMathPara
+
+const M_NS: &str = r#"xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math""#;
+
+#[test]
+fn inline_omath_text_extracted_in_document_order() {
+    let parsed = parse_body(&format!(
+        r#"<w:p {M_NS}><w:r><w:t>Let </w:t></w:r>
+             <m:oMath>
+               <m:r><m:t>x</m:t></m:r>
+               <m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f>
+               <m:sSup><m:e><m:r><m:t>y</m:t></m:r></m:e><m:sup><m:r><m:t>3</m:t></m:r></m:sup></m:sSup>
+             </m:oMath>
+             <w:r><w:t> end</w:t></w:r></w:p>"#
+    ));
+    let txt = to_text(&parsed.document);
+    assert_eq!(txt, "Let x12y3 end");
+    assert!(to_markdown(&parsed.document).contains("x12y3"));
+}
+
+#[test]
+fn omath_para_and_math_inside_containers_are_kept() {
+    let txt = text_of(&format!(
+        r#"<w:p {M_NS}><w:r><w:t>a</w:t></w:r>
+             <m:oMathPara><m:oMath><m:r><m:t>E=mc</m:t></m:r></m:oMath>
+               <m:oMath><m:r><m:t>F=ma</m:t></m:r></m:oMath></m:oMathPara>
+           </w:p>
+           <w:p {M_NS}><w:hyperlink w:anchor="k"><m:oMath><m:r><m:t>h</m:t></m:r></m:oMath></w:hyperlink>
+             <w:sdt><w:sdtContent><m:oMath><m:r><m:t>s</m:t></m:r></m:oMath></w:sdtContent></w:sdt></w:p>
+           <w:p {M_NS}><m:oMath><w:del w:id="1"><m:r><m:t>gone</m:t></m:r></w:del>
+             <m:r><m:t>kept</m:t></m:r></m:oMath></w:p>"#
+    ));
+    assert_in_order(&txt, &["aE=mc F=ma", "hs", "kept"]);
+    assert!(!txt.contains("gone"), "{txt:?}");
+}
+
+#[test]
+fn omath_runs_are_flagged_as_math() {
+    let parsed = parse_body(&format!(
+        r#"<w:p {M_NS}><w:r><w:t>t</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p>"#
+    ));
+    let Block::Paragraph(p) = &parsed.document.body[0] else {
+        panic!("paragraph")
+    };
+    assert_eq!(
+        p.runs.iter().map(|r| r.is_math).collect::<Vec<_>>(),
+        [false, true]
+    );
+}
+
+#[test]
+fn deeply_nested_omath_no_stack_overflow() {
+    let levels = 5_000;
+    let body = format!(
+        "<w:p {M_NS}><m:oMath>{}<m:r><m:t>deepmath</m:t></m:r>{}</m:oMath></w:p>\
+         <w:p><w:r><w:t>after</w:t></w:r></w:p>",
+        "<m:e>".repeat(levels),
+        "</m:e>".repeat(levels)
+    );
+    let txt = text_of(&body);
+    assert!(txt.ends_with("after"), "{txt:?}");
+}

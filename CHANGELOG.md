@@ -49,6 +49,16 @@ change.
   a daily `fuzz.yml` workflow (300 s per target, artifacts uploaded on crash).
   `fuzz/` is excluded from the workspace so the main gates are unaffected.
 
+- **Row-level and cell-level `w:sdt` / `w:customXml` are expanded transparently**
+  (`w:tbl > w:sdt > w:sdtContent > w:tr`, `w:tr > w:sdt > w:sdtContent > w:tc`):
+  the wrapped rows/cells enter the table model as if unwrapped, so
+  `gridSpan` / `vMerge` and column indices stay correct. Shares the existing
+  `MAX_NEST_DEPTH` cap.
+- **Math text is no longer lost**: the `m:t` text of `m:oMath` / `m:oMathPara`
+  is extracted in document order as a plain-text run (`TextRun.is_math`) and flows
+  into the paragraph text, `to_text` and `to_markdown`. No math layout or LaTeX;
+  PDF export draws it as plain text and emits one `math-flattened` warning.
+
 ### Fixed
 
 - **Parsing no longer silently drops content**: `w:moveTo` (kept; `w:moveFrom`

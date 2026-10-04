@@ -50,6 +50,9 @@ pub enum RenderWarning {
     /// 浮动文本框(`wps:txbx` / VML `v:textbox` 的 `w:txbxContent`)只做抽取(进
     /// `to_text` / `to_markdown` / `to_html`),PDF **不绘制**(v1 声明降级;正文照常)。
     TextBoxNotRendered,
+    /// 公式(`m:oMath` / `m:oMathPara`)只抽取 `m:t` 纯文本:PDF 按普通文字出,不做
+    /// 公式排版(分式 / 上下标 / 根号等结构丢失;v1 声明降级;文字不丢)。
+    MathFlattened,
 }
 
 impl RenderWarning {
@@ -82,6 +85,7 @@ impl RenderWarning {
             RenderWarning::RowTooTall => "row-too-tall",
             RenderWarning::CustomTabStopsIgnored => "custom-tab-stops-ignored",
             RenderWarning::TextBoxNotRendered => "text-box-not-rendered",
+            RenderWarning::MathFlattened => "math-flattened",
         }
     }
 }
@@ -162,6 +166,13 @@ impl fmt::Display for RenderWarning {
                     f,
                     "floating text boxes are extracted to text/markdown/html but not \
                      drawn in the PDF in this version"
+                )
+            }
+            RenderWarning::MathFlattened => {
+                write!(
+                    f,
+                    "equations (m:oMath) are rendered as plain text only; math layout \
+                     (fractions, scripts, radicals) is not reproduced in this version"
                 )
             }
         }

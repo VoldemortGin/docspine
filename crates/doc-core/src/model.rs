@@ -188,6 +188,9 @@ pub struct TextRun {
     /// `w:txbxContent`)。**只做抽取**:导出侧紧随所在段落之后输出其内容;
     /// PDF 渲染不画(一次性降级告警)。
     pub text_boxes: Vec<TextBox>,
+    /// 该 run 是公式(`m:oMath`)的纯文本抽取:只保 `m:t` 文字,不含公式排版;
+    /// PDF 渲染按普通文字出(一次性降级告警)。
+    pub is_math: bool,
 }
 
 /// 一个浮动文本框(`w:txbxContent`)的内容:段落与表格的块序列。

@@ -241,6 +241,37 @@ mod tests {
         assert_eq!(n, 1);
     }
 
+    /// 公式 run(`is_math`)按普通文字渲染不 panic,`math-flattened` 只报一次。
+    #[test]
+    fn math_runs_warn_once() {
+        let mut m = TextRun::from_text("x12");
+        m.is_math = true;
+        let doc = doc_of(vec![
+            DocBlock::Paragraph(Paragraph {
+                runs: vec![m.clone()],
+                ..Paragraph::default()
+            }),
+            DocBlock::Paragraph(Paragraph {
+                runs: vec![m],
+                ..Paragraph::default()
+            }),
+        ]);
+        let res = render_with(
+            deterministic(),
+            &doc,
+            &BTreeMap::new(),
+            &RenderOptions::default(),
+        )
+        .expect("render");
+        assert_eq!(count_pages(&res.pdf), 1);
+        let n = res
+            .warnings
+            .iter()
+            .filter(|w| w.kind() == "math-flattened")
+            .count();
+        assert_eq!(n, 1);
+    }
+
     /// 节界起新页 + 段内 `w:br@page` 起新页:1 + 1 + 1 = 3 页。
     #[test]
     fn sections_and_explicit_page_breaks_paginate() {
