@@ -45,6 +45,8 @@ change.
 
 ### Added
 
+- **`w:altChunk` is now surfaced**: its content is still not imported, but `Document.alt_chunk_count` (Python `doc.alt_chunk_count`) counts them and PDF export emits one `alt-chunk-skipped` warning, so callers know content is missing.
+
 - **Picture alt text**: `Picture.alt` (Rust) / `pic["alt"]` (Python) from `wp:docPr@descr`, falling back to `@title` (VML: `v:shape@alt` / `v:imagedata@o:title`).
 
 - **PDF export draws headers and footers on every page.** The effective part per
@@ -165,6 +167,8 @@ change.
 
 ### Breaking (Rust API, pre-1.0)
 
+- `Document` gains `alt_chunk_count`, `Picture` gains `alt`, `ParaProps` gains `outline_lvl`, and `RenderWarning` gains `AltChunkSkipped` (`alt-chunk-skipped`). Struct literals without `..Default::default()` and exhaustive matches on `RenderWarning` must be updated.
+
 - `RenderWarning` gains `TableOverBudget` (`table-over-budget`); exhaustive matches
   on `RenderWarning` must be updated. `doc_core::model` gains the constants
   `MAX_TABLE_COLS` (63) and `MAX_TABLE_CELLS` (250,000), and `doc_core::numbering`
@@ -190,6 +194,8 @@ change.
   cached result.
 
 ### Fixed
+
+- **`w:ruby` base text is no longer dropped**: the `w:rubyBase` runs now join the paragraph text in place (Japanese / pinyin-annotated Chinese documents lost whole phrases); the `w:rt` reading is intentionally not emitted (no duplicated text, no model field). **`w:dir` / `w:bdo`** (bidirectional text containers) are now run containers like `w:hyperlink` / `w:smartTag`, so Arabic / Hebrew runs inside them are kept.
 
 - **Formula structures inside `m:oMathPara > m:oMath` (and inside `m:d` / `m:nary` / `m:func` / `m:e`) are linearized**: the inner `m:oMath` and other transparent wrappers used to hide `m:f` / `m:sSup` / `m:sSub` / `m:rad`, so a display equation such as `1/2` came out as `12`. Wrappers are now transparent; two `m:oMath` in one `m:oMathPara` are still joined by a space.
 

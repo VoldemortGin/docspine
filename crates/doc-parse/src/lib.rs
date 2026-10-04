@@ -73,7 +73,8 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     let rels_xml = pkg.document_rels_str();
 
     // 3) 走 w:body -> 块序列(段落 + 表格,表格是重点)+ 节序列(sectPr 页面几何)。
-    let (body, mut sections) = xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index);
+    let (body, mut sections, alt_chunk_count) =
+        xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index);
 
     // 3b) 页眉页脚:节里只有 r:id 引用,经主文档 rels 定位 `word/header*.xml` /
     //     `word/footer*.xml`;内容复用块级解析。指向同一部件的多个 r:id 归一成第一个,
@@ -148,6 +149,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             footnotes,
             endnotes,
             comments,
+            alt_chunk_count,
         },
         media,
     })

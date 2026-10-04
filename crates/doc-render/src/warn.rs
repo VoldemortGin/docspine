@@ -65,6 +65,9 @@ pub enum RenderWarning {
     /// 表格的 `列数 × 行数` 超过网格预算([`doc_core::model::MAX_TABLE_CELLS`]):只映射预算内的
     /// 前若干行,其余行不进 PDF(防恶意超大表分配爆炸;文本 / HTML 导出不受影响)。
     TableOverBudget,
+    /// 文档含 `w:altChunk`(外部内容块导入:内嵌 HTML / RTF / 另一份 docx):其内容不解析,
+    /// 既不进 PDF 也不进任何文本导出(该部分内容缺失;`Document::alt_chunk_count` 给个数)。
+    AltChunkSkipped,
 }
 
 impl RenderWarning {
@@ -102,6 +105,7 @@ impl RenderWarning {
             RenderWarning::NotesNotRendered => "notes-not-rendered",
             RenderWarning::PageNumFormatUnsupported => "page-number-format-unsupported",
             RenderWarning::TableOverBudget => "table-over-budget",
+            RenderWarning::AltChunkSkipped => "alt-chunk-skipped",
         }
     }
 }
@@ -217,6 +221,13 @@ impl fmt::Display for RenderWarning {
                     f,
                     "a table exceeds the grid-cell budget; only its leading rows are \
                      rendered in the PDF"
+                )
+            }
+            RenderWarning::AltChunkSkipped => {
+                write!(
+                    f,
+                    "the document embeds external content blocks (w:altChunk) which are not \
+                     imported; that content is missing from the output"
                 )
             }
         }

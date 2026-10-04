@@ -444,6 +444,13 @@ impl PyDocument {
         self.inner.even_and_odd_headers
     }
 
+    /// 正文里 `w:altChunk`(外部内容块导入)的个数:其内容不解析、不进任何导出,
+    /// 大于 0 表示文档有内容没被导入(`to_pdf` 另发 `alt-chunk-skipped` 警告)。
+    #[getter]
+    fn alt_chunk_count(&self) -> usize {
+        self.inner.alt_chunk_count
+    }
+
     /// 顶层正文块,作为 `list[dict]`(段落 / 表格)。
     fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);

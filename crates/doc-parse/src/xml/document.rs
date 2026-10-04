@@ -54,6 +54,8 @@ struct Ctx<'a> {
     media_index: &'a BTreeMap<String, usize>,
     depth: std::cell::Cell<u32>,
     fields: std::cell::RefCell<FieldStack>,
+    /// 遇到的 `w:altChunk` 个数(内容不解析,只计数;见 `Document::alt_chunk_count`)。
+    alt_chunks: std::cell::Cell<usize>,
 }
 
 /// 复杂字段(`w:fldChar` begin / separate / end)的嵌套栈。
@@ -98,6 +100,11 @@ impl Drop for DepthGuard<'_> {
 }
 
 impl Ctx<'_> {
+    /// 记一个 `w:altChunk`(外部内容块,不解析)。
+    fn count_alt_chunk(&self) {
+        self.alt_chunks.set(self.alt_chunks.get().saturating_add(1));
+    }
+
     /// 进入一层递归容器。超过 [`MAX_NEST_DEPTH`] 时返回 `None`,调用方应
     /// [`skip_element`] 整体跳过该子树。
     fn enter(&self) -> Option<DepthGuard<'_>> {
@@ -112,19 +119,20 @@ impl Ctx<'_> {
 
 /// 解析 `word/document.xml`。`rels_xml` 是主文档 `.rels` 文本(把图片 `r:embed/r:id`
 /// 映射到 media 名);`media_index` 是 `裸文件名 -> 字节长度`,用于回填 `image_bytes_len`。
-/// 返回 `(正文块序列, 节序列)`;节序列保证非空(无任何 `w:sectPr` 时补 Word 默认节)。
+/// 返回 `(正文块序列, 节序列, altChunk 个数)`;节序列保证非空(无任何 `w:sectPr` 时补 Word 默认节)。
 /// 递归容器嵌套超过 [`MAX_NEST_DEPTH`] 的子树被跳过。
 pub fn parse(
     xml: &str,
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
-) -> (Vec<Block>, Vec<Section>) {
+) -> (Vec<Block>, Vec<Section>, usize) {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
     let ctx = Ctx {
         rels: &rels,
         media_index,
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
+        alt_chunks: Default::default(),
     };
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -135,7 +143,8 @@ pub fn parse(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 if local_name(e.name().as_ref()) == b"body" {
-                    return parse_body(&mut reader, &ctx);
+                    let (blocks, sections) = parse_body(&mut reader, &ctx);
+                    return (blocks, sections, ctx.alt_chunks.get());
                 }
             }
             Ok(Event::Eof) => break,
@@ -144,7 +153,7 @@ pub fn parse(
         }
         buf.clear();
     }
-    (Vec::new(), vec![Section::default()])
+    (Vec::new(), vec![Section::default()], 0)
 }
 
 /// 解析页眉 / 页脚部件(`w:hdr` / `w:ftr`):根元素的直接子块,与正文同一套块级解析
@@ -161,6 +170,7 @@ pub fn parse_hdr_ftr(
         media_index,
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
+        alt_chunks: Default::default(),
     };
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -185,6 +195,7 @@ pub fn parse_notes(
         media_index,
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
+        alt_chunks: Default::default(),
     };
     let mut notes = BTreeMap::new();
     let mut reader = Reader::from_str(xml);
@@ -239,6 +250,7 @@ pub fn parse_comments(
         media_index,
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
+        alt_chunks: Default::default(),
     };
     let mut comments = BTreeMap::new();
     let mut reader = Reader::from_str(xml);
@@ -327,6 +339,10 @@ fn parse_body<R: std::io::BufRead>(
                     b"sdt" => blocks.extend(parse_sdt_blocks(reader, ctx)),
                     b"customXml" => blocks.extend(parse_custom_xml_blocks(reader, ctx)),
                     b"AlternateContent" => blocks.extend(parse_alt_content_blocks(reader, ctx)),
+                    b"altChunk" => {
+                        ctx.count_alt_chunk();
+                        skip_element(reader);
+                    }
                     // body 末尾的 sectPr:最后一节的页面几何。
                     b"sectPr" => trailing = Some(parse_sectpr(reader)),
                     _ => skip_element(reader),
@@ -336,6 +352,7 @@ fn parse_body<R: std::io::BufRead>(
                 b"sectPr" => trailing = Some(Section::default()),
                 // 自闭合 <w:p/>:空段落(Word 对空段的常见写法),占一个块(渲染占一行)。
                 b"p" => blocks.push(Block::Paragraph(Paragraph::default())),
+                b"altChunk" => ctx.count_alt_chunk(),
                 _ => {}
             },
             Ok(Event::End(_)) => break, // body 结束。
@@ -385,14 +402,20 @@ fn parse_block_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx)
                     b"sdt" => blocks.extend(parse_sdt_blocks(reader, ctx)),
                     b"customXml" => blocks.extend(parse_custom_xml_blocks(reader, ctx)),
                     b"AlternateContent" => blocks.extend(parse_alt_content_blocks(reader, ctx)),
+                    b"altChunk" => {
+                        ctx.count_alt_chunk();
+                        skip_element(reader);
+                    }
                     // 其它直接子元素(tcPr / customXmlPr 等)整体跳过。
                     _ => skip_element(reader),
                 }
             }
             Ok(Event::Empty(e)) => {
                 // 自闭合 <w:p/>:空段落照收(占一行)。
-                if local_name(e.name().as_ref()) == b"p" {
-                    blocks.push(Block::Paragraph(Paragraph::default()));
+                match local_name(e.name().as_ref()) {
+                    b"p" => blocks.push(Block::Paragraph(Paragraph::default())),
+                    b"altChunk" => ctx.count_alt_chunk(),
+                    _ => {}
                 }
             }
             Ok(Event::End(_)) => break, // 容器结束。
@@ -533,7 +556,7 @@ fn parse_paragraph<R: std::io::BufRead>(
                     }
                     // 修订插入 `w:ins` / 修订移动目标 `w:moveTo` / 字段 `w:fldSimple`(缓存的
                     // 字段结果,run 盖上字段指令)/ 智能标记 `w:smartTag` / 行内 `w:customXml`
-                    // 也是 run 容器:展开其中的 run。`w:ins`·`w:moveTo` 按“接受修订”语义保留正文。
+                    // 与双向文本 `w:dir` / `w:bdo` 也是 run 容器:展开其中的 run。`w:ins`·`w:moveTo` 按“接受修订”语义保留正文。
                     b"fldSimple" => {
                         para.runs.extend(
                             parse_fld_simple(reader, &e, ctx)
@@ -541,7 +564,7 @@ fn parse_paragraph<R: std::io::BufRead>(
                                 .filter(has_content),
                         );
                     }
-                    b"ins" | b"moveTo" | b"smartTag" | b"customXml" => {
+                    b"ins" | b"moveTo" | b"smartTag" | b"customXml" | b"dir" | b"bdo" => {
                         para.runs.extend(
                             parse_run_container(reader, ctx)
                                 .into_iter()
@@ -698,7 +721,7 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
                         }
                     }
                     b"fldSimple" => runs.extend(parse_fld_simple(reader, &e, ctx)),
-                    b"ins" | b"moveTo" | b"smartTag" | b"customXml" => {
+                    b"ins" | b"moveTo" | b"smartTag" | b"customXml" | b"dir" | b"bdo" => {
                         runs.extend(parse_run_container(reader, ctx));
                     }
                     b"sdt" => runs.extend(parse_sdt_runs(reader, ctx)),
@@ -840,6 +863,7 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
                             run.pictures.push(pic);
                         }
                     }
+                    b"ruby" => parse_ruby(reader, ctx, &mut run),
                     // run 内的 AlternateContent(如 wps 形状 / VML 回退):选中分支的内容
                     // 并入本 run(分段 / 图片 / 文本框)。
                     b"AlternateContent" => {
@@ -877,6 +901,38 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
         run.field = ctx.fields.borrow().visible_instr();
     }
     run
+}
+
+/// 解析 `w:ruby`(注音 / 拼音指南)。已消费起始标签。只取基字 `w:rubyBase` 里的 run 并入当前
+/// run(分段 / 图片 / 文本框,按序);注音 `w:rt`(与 `w:rubyPr`)不进正文——避免“漢かん”式重复,
+/// 模型里没有自然位置放它,不加字段。基字里的 run 经 [`parse_run_container`],深度受守卫约束。
+fn parse_ruby<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx, run: &mut TextRun) {
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if local_name(e.name().as_ref()) == b"rubyBase" {
+                    for base in parse_run_container(reader, ctx) {
+                        for seg in base.segments {
+                            match seg {
+                                RunSegment::Text(t) => run.push_text(&t),
+                                other => run.segments.push(other),
+                            }
+                        }
+                        run.pictures.extend(base.pictures);
+                        run.text_boxes.extend(base.text_boxes);
+                    }
+                } else {
+                    skip_element(reader);
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// 自闭合 run 内容元素 -> 分段:`w:tab`/`w:ptab` -> 制表、`w:br`/`w:cr` -> 断,
@@ -1693,13 +1749,19 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> C
                     b"AlternateContent" => {
                         cell.blocks.extend(parse_alt_content_blocks(reader, ctx));
                     }
+                    b"altChunk" => {
+                        ctx.count_alt_chunk();
+                        skip_element(reader);
+                    }
                     _ => skip_element(reader),
                 }
             }
             Ok(Event::Empty(e)) => {
                 // 自闭合 <w:p/>:空段落照收(单元格常见,渲染占一行)。
-                if local_name(e.name().as_ref()) == b"p" {
-                    cell.blocks.push(Block::Paragraph(Paragraph::default()));
+                match local_name(e.name().as_ref()) {
+                    b"p" => cell.blocks.push(Block::Paragraph(Paragraph::default())),
+                    b"altChunk" => ctx.count_alt_chunk(),
+                    _ => {}
                 }
             }
             Ok(Event::End(_)) => break,

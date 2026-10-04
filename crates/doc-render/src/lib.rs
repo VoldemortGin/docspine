@@ -392,6 +392,28 @@ mod tests {
         assert_eq!(n, 1);
     }
 
+    /// 文档含 `w:altChunk`(`alt_chunk_count > 0`)时发一次 `alt-chunk-skipped`;没有则不发。
+    #[test]
+    fn alt_chunk_warns_once() {
+        let mut doc = doc_of(vec![DocBlock::Paragraph(Paragraph::default())]);
+        let warned = |doc: &Document| {
+            render_with(
+                deterministic(),
+                doc,
+                &BTreeMap::new(),
+                &RenderOptions::default(),
+            )
+            .expect("render")
+            .warnings
+            .iter()
+            .filter(|w| w.kind() == "alt-chunk-skipped")
+            .count()
+        };
+        assert_eq!(warned(&doc), 0);
+        doc.alt_chunk_count = 3;
+        assert_eq!(warned(&doc), 1);
+    }
+
     /// 页眉页脚现在照画(原 `header_footer_warns_once_and_is_not_drawn` 断言“告警一次且
     /// 不画”,行为改变后改写):渲染不 panic、页数不变,页眉 / 页脚文字进了页面 ops,
     /// 不再发任何 `header-footer-*` 告警;只有空页眉同样不告警。

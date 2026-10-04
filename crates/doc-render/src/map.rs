@@ -290,6 +290,10 @@ pub(crate) fn map_document_with_media(
     for sw in doc.styles.validate() {
         ctx.list.push(RenderWarning::Style(sw));
     }
+    // altChunk(外部内容块)不解析:内容缺失,告诉调用方(只报一次)。
+    if doc.alt_chunk_count > 0 {
+        ctx.list.push(RenderWarning::AltChunkSkipped);
+    }
 
     let mut sections = Vec::new();
     let mut start = 0usize;

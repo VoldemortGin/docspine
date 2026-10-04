@@ -56,6 +56,10 @@ pub struct Document {
     /// 默认**不进** `to_text` / `to_markdown` / `to_html`;正文里的锚点见
     /// [`RunSegment::CommentRef`]。
     pub comments: BTreeMap<i64, Comment>,
+    /// 正文里 `w:altChunk`(外部内容块导入:内嵌的 HTML / RTF / 另一份 docx 等)的个数。
+    /// 其内容**不解析**、不进任何导出,所以文档里这部分内容缺失;计数让调用方知道有内容没被
+    /// 导入(PDF 导出另有 `alt-chunk-skipped` 告警)。只计主文档部件,页眉页脚 / 注内的不计。
+    pub alt_chunk_count: usize,
 }
 
 impl Document {

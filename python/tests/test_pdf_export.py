@@ -981,3 +981,19 @@ def test_header_footer_drawn_on_every_page_with_live_page_numbers():
         # 页脚在页底:"Page" 的词框落在下边距(72pt)之内。
         page_word = next(w for w in d[i].get_text_words() if w[4] == "Page")
         assert page_word[1] > d[i].rect.height - 72.0
+
+
+def test_alt_chunk_is_counted_and_warned_once():
+    """w:altChunk 不导入:alt_chunk_count 可见,to_pdf 只发一次 alt-chunk-skipped 降级,正文照常。"""
+    data = _body(
+        '<w:p><w:r><w:t>before</w:t></w:r></w:p><w:altChunk r:id="rId9"/>'
+        '<w:p><w:r><w:t>after</w:t></w:r></w:p><w:altChunk r:id="rId10"/>'
+    )
+    doc = docspine.open_bytes(data)
+    assert doc.alt_chunk_count == 2
+    assert doc.to_text() == "before\nafter"
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        doc.to_pdf()
+    msgs = [str(w.message) for w in ws if "w:altChunk" in str(w.message)]
+    assert len(msgs) == 1, [str(w.message) for w in ws]
