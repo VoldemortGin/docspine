@@ -653,17 +653,17 @@ fn omath_scripts_and_radicals_are_disambiguated() {
 }
 
 #[test]
-fn omath_other_structures_keep_plain_concatenation() {
-    // 未处理的结构(上下标并存 / 定界符)保持纯拼接;结构外的文字与顺序不变。
+fn omath_unrecognized_structures_keep_plain_concatenation() {
+    // 不认识的结构(这里是 `m:xyz` 外壳)仍按文档顺序纯拼接;结构外的文字与顺序不变。
+    // (原先这条把 `m:d` / `m:sSubSup` 也当“其它结构”拼成 `abcde`,那正是被审查指出的错误输出:
+    // 定界符括号与上下标记号丢失,见 `omath_delimiters_*` / `omath_subsup_*`。)
     let txt = math_text(&format!(
-        "{}<m:d><m:e>{}</m:e></m:d><m:sSubSup><m:e>{}</m:e><m:sub>{}</m:sub><m:sup>{}</m:sup></m:sSubSup>",
+        "{}<m:xyz><m:e>{}</m:e>{}</m:xyz>",
         mr("a"),
         mr("b"),
         mr("c"),
-        mr("d"),
-        mr("e")
     ));
-    assert_eq!(txt, "abcde");
+    assert_eq!(txt, "abc");
 }
 
 #[test]
@@ -743,23 +743,24 @@ fn omath_structures_inside_transparent_containers_are_linearized() {
         mr("1"),
         mr("2")
     );
-    // 定界符 m:d > m:e > m:f。
-    assert_eq!(math_text(&format!("<m:d><m:e>{frac}</m:e></m:d>")), "1/2");
-    // 大运算符 m:nary > m:e > m:f(其 m:sub / m:sup 文字照常保留)。
+    // 定界符 m:d > m:e > m:f:括号来自 `m:d` 的缺省 `(` `)`(原先输出 `1/2`,括号被丢)。
+    assert_eq!(math_text(&format!("<m:d><m:e>{frac}</m:e></m:d>")), "(1/2)");
+    // 大运算符 m:nary > m:e > m:f:缺省运算符 ∫,下限 `_i`,被积式前一个空格
+    // (原先输出 `i1/2`,运算符被丢、下限与被积式粘连)。
     assert_eq!(
         math_text(&format!(
             "<m:nary><m:naryPr/><m:sub>{}</m:sub><m:e>{frac}</m:e></m:nary>",
             mr("i")
         )),
-        "i1/2"
+        "∫_i 1/2"
     );
-    // 函数 m:func > m:fName + m:e > m:f。
+    // 函数 m:func > m:fName + m:e > m:f:自变量非原子,加括号(原先输出 `sin1/2`,读作 sin1 除以 2)。
     assert_eq!(
         math_text(&format!(
             "<m:func><m:fName>{}</m:fName><m:e>{frac}</m:e></m:func>",
             mr("sin")
         )),
-        "sin1/2"
+        "sin(1/2)"
     );
     // 结构槽位里再套定界符再套上标:sSup > e > d > e > sSup。
     let inner = format!(
@@ -774,10 +775,275 @@ fn omath_structures_inside_transparent_containers_are_linearized() {
         )),
         "(y^3)^2"
     );
-    // 同一 m:d 内多个结构并列。
+    // 同一 m:d 内多个结构并列:用缺省分隔符 `|` 连接并加括号(原先输出 `1/21/2`,两个分式粘连)。
     assert_eq!(
         math_text(&format!("<m:d><m:e>{frac}</m:e><m:e>{frac}</m:e></m:d>")),
-        "1/21/2"
+        "(1/2|1/2)"
+    );
+}
+
+// ---- 公式线性化:括号看槽位的线性化结果(不是 m:t 片段数)、m:d / m:nary 等结构不丢记号
+
+fn sup(base: &str, exp: &str) -> String {
+    format!("<m:sSup><m:e>{base}</m:e><m:sup>{exp}</m:sup></m:sSup>")
+}
+
+fn frac(num: &str, den: &str) -> String {
+    format!("<m:f><m:num>{num}</m:num><m:den>{den}</m:den></m:f>")
+}
+
+/// 审查错误 1:分子是**单个** `m:t` 写着 `a+b`,原先输出 `a+b/c`。
+#[test]
+fn omath_single_run_compound_numerator_is_parenthesized() {
+    assert_eq!(math_text(&frac(&mr("a+b"), &mr("c"))), "(a+b)/c");
+    assert_eq!(math_text(&frac(&mr("a"), &mr("c+d"))), "a/(c+d)");
+}
+
+/// 审查错误 2:上标是单个 `m:t` 的 `n+1`,原先输出 `x^n+1`。
+#[test]
+fn omath_single_run_compound_exponent_is_parenthesized() {
+    assert_eq!(math_text(&sup(&mr("x"), &mr("n+1"))), "x^(n+1)");
+    let sub = format!(
+        "<m:sSub><m:e>{}</m:e><m:sub>{}</m:sub></m:sSub>",
+        mr("a"),
+        mr("i+1")
+    );
+    assert_eq!(math_text(&sub), "a_(i+1)");
+}
+
+/// 审查错误 3:`m:d` 的括号在 `m:dPr` 属性里,原先被丢:`2(x+1)` 输出 `2x+1`。
+#[test]
+fn omath_delimiters_use_dpr_attributes_with_defaults() {
+    let d = |pr: &str, es: &[&str]| {
+        let es: String = es.iter().map(|e| format!("<m:e>{}</m:e>", mr(e))).collect();
+        format!("<m:d>{pr}{es}</m:d>")
+    };
+    assert_eq!(math_text(&(mr("2") + &d("", &["x+1"]))), "2(x+1)");
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:begChr m:val="["/><m:endChr m:val="]"/></m:dPr>"#,
+            &["a"]
+        )),
+        "[a]"
+    );
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:begChr m:val="{"/><m:endChr m:val="}"/></m:dPr>"#,
+            &["a", "b"]
+        )),
+        "{a|b}"
+    );
+    // 自定义分隔符。
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:sepChr m:val=","/></m:dPr>"#,
+            &["a", "b", "c"]
+        )),
+        "(a,b,c)"
+    );
+    // 显式空串 = 该侧无括号;起止标签写法同样识别。
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:begChr m:val=""/><m:endChr m:val=""></m:endChr></m:dPr>"#,
+            &["a"]
+        )),
+        "a"
+    );
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:begChr m:val="|"/><m:endChr m:val="|"/></m:dPr>"#,
+            &["x"]
+        )),
+        "|x|"
+    );
+}
+
+/// 审查错误 4:`m:nary` 运算符在 `m:naryPr > m:chr`(缺省 ∫),原先被丢,求和输出 `i=1nx_i`。
+#[test]
+fn omath_nary_keeps_operator_and_bounds() {
+    let xi = format!(
+        "<m:sSub><m:e>{}</m:e><m:sub>{}</m:sub></m:sSub>",
+        mr("x"),
+        mr("i")
+    );
+    let nary = |pr: &str, sub: &str, sup: &str, e: &str| {
+        format!("<m:nary>{pr}<m:sub>{sub}</m:sub><m:sup>{sup}</m:sup><m:e>{e}</m:e></m:nary>")
+    };
+    let sum_pr = r#"<m:naryPr><m:chr m:val="∑"/></m:naryPr>"#;
+    assert_eq!(
+        math_text(&nary(sum_pr, &mr("i=1"), &mr("n"), &xi)),
+        "∑_(i=1)^n x_i"
+    );
+    // 缺省 ∫;上下限为空则省略对应部分;被积式为空不留尾空格。
+    assert_eq!(
+        math_text(&nary("", &mr("0"), &mr("1"), &mr("f"))),
+        "∫_0^1 f"
+    );
+    assert_eq!(math_text(&nary("", "", "", &mr("f"))), "∫ f");
+    assert_eq!(math_text(&nary(sum_pr, &mr("k"), "", "")), "∑_k");
+    // 起止标签写法的 m:chr 同样识别。
+    assert_eq!(
+        math_text(&nary(
+            r#"<m:naryPr><m:chr m:val="∏"></m:chr></m:naryPr>"#,
+            "",
+            &mr("n"),
+            &mr("a")
+        )),
+        "∏^n a"
+    );
+}
+
+/// 审查错误 4(续):`m:sSubSup` 原先拼成 `xi2`。
+#[test]
+fn omath_subsup_keeps_script_markers() {
+    let ss = |e: &str, sub: &str, sup: &str| {
+        format!("<m:sSubSup><m:e>{e}</m:e><m:sub>{sub}</m:sub><m:sup>{sup}</m:sup></m:sSubSup>")
+    };
+    assert_eq!(math_text(&ss(&mr("x"), &mr("i"), &mr("2"))), "x_i^2");
+    assert_eq!(math_text(&ss(&mr("x"), &mr("i+1"), &mr("2"))), "x_(i+1)^2");
+}
+
+#[test]
+fn omath_prescripts_limits_functions_matrix() {
+    // m:sPre:前置上下标。
+    let pre = format!(
+        "<m:sPre><m:sub>{}</m:sub><m:sup>{}</m:sup><m:e>{}</m:e></m:sPre>",
+        mr("6"),
+        mr("14"),
+        mr("C")
+    );
+    assert_eq!(math_text(&pre), "_6^14 C");
+    // m:limLow / m:limUpp。
+    let lim = format!(
+        "<m:limLow><m:e>{}</m:e><m:lim>{}</m:lim></m:limLow>",
+        mr("lim"),
+        mr("x→0")
+    );
+    assert_eq!(math_text(&lim), "lim_(x→0)");
+    let upp = format!(
+        "<m:limUpp><m:e>{}</m:e><m:lim>{}</m:lim></m:limUpp>",
+        mr("x"),
+        mr("n")
+    );
+    assert_eq!(math_text(&upp), "x^n");
+    // m:func:自变量原子用空格,非原子加括号,函数名不丢。
+    let func = |arg: &str| {
+        format!(
+            "<m:func><m:fName>{}</m:fName><m:e>{arg}</m:e></m:func>",
+            mr("sin")
+        )
+    };
+    assert_eq!(math_text(&func(&mr("x"))), "sin x");
+    assert_eq!(math_text(&func(&mr("x+1"))), "sin(x+1)");
+    // m:acc / m:bar。
+    let acc = |pr: &str| format!("<m:acc>{pr}<m:e>{}</m:e></m:acc>", mr("x"));
+    assert_eq!(
+        math_text(&acc(r#"<m:accPr><m:chr m:val="¯"/></m:accPr>"#)),
+        "x¯"
+    );
+    assert_eq!(math_text(&acc("")), "x\u{302}");
+    let bar = |pos: &str| {
+        format!(
+            r#"<m:bar><m:barPr><m:pos m:val="{pos}"/></m:barPr><m:e>{}</m:e></m:bar>"#,
+            mr("x")
+        )
+    };
+    assert_eq!(math_text(&bar("top")), "overline(x)");
+    assert_eq!(math_text(&bar("bot")), "underline(x)");
+    // m:m 矩阵:行用 `;`、列用 `,`,整体方括号。
+    let mx = |rows: &[&[&str]]| {
+        let rows: String = rows
+            .iter()
+            .map(|r| {
+                let cells: String = r.iter().map(|c| format!("<m:e>{}</m:e>", mr(c))).collect();
+                format!("<m:mr>{cells}</m:mr>")
+            })
+            .collect();
+        format!("<m:m>{rows}</m:m>")
+    };
+    assert_eq!(math_text(&mx(&[&["a", "b"], &["c", "d"]])), "[a,b;c,d]");
+    assert_eq!(math_text(&mx(&[&["1"]])), "[1]");
+}
+
+/// 不认识的结构(`m:eqArr` 等多槽)保持按文档顺序拼接,但子结构之间加一个空格,免得相邻数字粘连。
+#[test]
+fn omath_unrecognized_multislot_structures_separate_children_with_space() {
+    let eq = format!(
+        "<m:eqArr><m:e>{}</m:e><m:e>{}</m:e></m:eqArr>",
+        mr("1"),
+        mr("2")
+    );
+    assert_eq!(math_text(&eq), "1 2");
+    let boxed = format!("<m:box><m:e>{}</m:e></m:box>", mr("ab"));
+    assert_eq!(math_text(&boxed), "ab");
+}
+
+/// 嵌套:分式里的上标、根号里的分式、上标里的分式。
+#[test]
+fn omath_nested_structures_follow_atom_rule() {
+    // (x^2+1)/y:分子是复合文字(含上标结构)——分子结果 `x^2+1` 非原子,加括号。
+    let num = sup(&mr("x"), &mr("2")) + &mr("+1");
+    assert_eq!(math_text(&frac(&num, &mr("y"))), "(x^2+1)/y");
+    // 分式里的上标 `x^2` 单独作分子:`x^2` 非原子 -> `(x^2)/y`。
+    assert_eq!(
+        math_text(&frac(&sup(&mr("x"), &mr("2")), &mr("y"))),
+        "(x^2)/y"
+    );
+    // 根号里的分式:sqrt(1/2)。
+    let rad = format!(
+        "<m:rad><m:deg/><m:e>{}</m:e></m:rad>",
+        frac(&mr("1"), &mr("2"))
+    );
+    assert_eq!(math_text(&rad), "sqrt(1/2)");
+    // 上标里的分式:x^(1/2)。
+    assert_eq!(
+        math_text(&sup(&mr("x"), &frac(&mr("1"), &mr("2")))),
+        "x^(1/2)"
+    );
+}
+
+/// 原子判定边界:`2x` / `x1` / `3.14` / `(a)` 是原子(不加括号);`-1` / `a b` / `(a)(b)` 不是;空槽位不加括号。
+#[test]
+fn omath_atom_boundaries() {
+    let s = |t: &str| math_text(&sup(&mr("x"), &mr(t)));
+    assert_eq!(s("2x"), "x^2x");
+    assert_eq!(s("x1"), "x^x1");
+    assert_eq!(s("3.14"), "x^3.14");
+    assert_eq!(s("(a)"), "x^(a)");
+    assert_eq!(s("-1"), "x^(-1)");
+    assert_eq!(s("(a)(b)"), "x^((a)(b))");
+    assert_eq!(s("a b"), "x^(a b)");
+    assert_eq!(s("α2"), "x^α2");
+    assert_eq!(s("汉字"), "x^汉字");
+    // 空槽位:不加括号(沿用 `x^` 的缺省输出)。
+    assert_eq!(
+        math_text("<m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup/></m:sSup>"),
+        "x^"
+    );
+}
+
+/// 已被括号完整包住才算原子:`(a)+(b)` 首尾括号不配对,仍要加括号。
+#[test]
+fn omath_atom_requires_matching_outer_brackets() {
+    assert_eq!(math_text(&sup(&mr("x"), &mr("(a)+(b)"))), "x^((a)+(b))");
+    assert_eq!(math_text(&sup(&mr("x"), &mr("[a]"))), "x^[a]");
+}
+
+/// 深嵌套新结构仍是迭代实现,不栈溢出(受 `MAX_NEST_DEPTH` 约束)。
+#[test]
+fn deeply_nested_new_math_structures_no_stack_overflow() {
+    let levels = 5_000;
+    let body = format!(
+        "<w:p {M_NS}><m:oMath>{}{}{}</m:oMath></w:p><w:p><w:r><w:t>after</w:t></w:r></w:p>",
+        "<m:d><m:e><m:nary><m:e>".repeat(levels),
+        mr("deep"),
+        "</m:e></m:nary></m:e></m:d>".repeat(levels)
+    );
+    let txt = text_of(&body);
+    assert!(
+        txt.contains("deep") && txt.ends_with("after"),
+        "{}",
+        txt.len()
     );
 }
 

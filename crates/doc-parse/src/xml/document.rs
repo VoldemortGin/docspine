@@ -1097,7 +1097,7 @@ fn break_kind(e: &BytesStart) -> BreakKind {
 
 // ============================================================ 公式 (m:oMath)
 
-/// 公式里需要线性化的结构(其余结构保持文字纯拼接)。
+/// 公式里需要线性化的结构(其余元素是透明外壳,文字纯拼接)。
 #[derive(Clone, Copy, PartialEq)]
 enum MathStruct {
     /// `m:f` 分式(`m:num` / `m:den`)-> `分子/分母`。
@@ -1106,8 +1106,32 @@ enum MathStruct {
     Sup,
     /// `m:sSub` 下标(`m:e` / `m:sub`)-> `底_下`。
     Sub,
+    /// `m:sSubSup`(`m:e` / `m:sub` / `m:sup`)-> `底_下^上`。
+    SubSup,
+    /// `m:sPre` 前置上下标(`m:sub` / `m:sup` / `m:e`)-> `_下^上 底`。
+    Pre,
     /// `m:rad` 根号(`m:deg` / `m:e`)-> `sqrt(x)`;带次数时 `root(次,x)`。
     Rad,
+    /// `m:d` 定界符(多个 `m:e`;`m:dPr` 的 `begChr` / `endChr` / `sepChr`)-> `(a|b)`。
+    Delim,
+    /// `m:nary` 大运算符(`m:sub` / `m:sup` / `m:e`;`m:naryPr > m:chr`)-> `∑_(下)^(上) 被积式`。
+    Nary,
+    /// `m:func` 函数(`m:fName` / `m:e`)-> `sin x` / `sin(x+1)`。
+    Func,
+    /// `m:limLow`(`m:e` / `m:lim`)-> `底_(极限)`;`m:limUpp` -> `底^(极限)`。
+    LimLow,
+    LimUpp,
+    /// `m:acc` 重音符(`m:e`;`m:accPr > m:chr`,缺省 U+0302)-> `底` + 重音符。
+    Acc,
+    /// `m:bar` 上 / 下划线(`m:e`;`m:barPr > m:pos`)-> `overline(x)` / `underline(x)`。
+    Bar,
+    /// `m:m` 矩阵(多个 `m:mr`)-> `[a,b;c,d]`。
+    Matrix,
+    /// `m:mr` 矩阵的一行(多个 `m:e`)-> `a,b`;本身又是 `m:m` 的一个槽位。
+    MatRow,
+    /// 其它多槽结构(`m:eqArr` / `m:box` / `m:borderBox` / `m:phant` / `m:groupChr`):
+    /// 各 `m:e` 按文档顺序拼接,但之间加一个空格,免得相邻数字粘连。
+    Generic,
 }
 
 /// 结构内的槽位元素。
@@ -1119,6 +1143,21 @@ enum MathSlot {
     Sup,
     Sub,
     Deg,
+    Lim,
+    FName,
+    Row,
+    Cell,
+}
+
+/// 结构属性(`m:*Pr` 里的 `m:val`):定界符 / 运算符 / 重音符字符、`m:bar` 位置。
+/// `None` = 未出现(取缺省);`Some("")` = 显式空串。
+#[derive(Default)]
+struct MathProps {
+    beg: Option<String>,
+    end: Option<String>,
+    sep: Option<String>,
+    chr: Option<String>,
+    pos: Option<String>,
 }
 
 /// 公式遍历栈上的一帧:容器 / 结构 / 槽位各自攒一份文字。其余嵌套元素不开帧,只在帧内
@@ -1129,10 +1168,10 @@ struct MathFrame {
     /// 本帧若是槽位,它是哪个槽。
     slot: Option<MathSlot>,
     text: String,
-    /// 本帧内 `m:t` 文字片段数(复合子项记 2),决定线性化时是否加括号。
-    frags: usize,
-    /// 结构帧:已收齐的槽位 `(槽, 文字, 片段数)`。
-    slots: Vec<(MathSlot, String, usize)>,
+    /// 结构帧:已收齐的槽位 `(槽, 线性化文字)`(同名槽可重复,如 `m:d` 的多个 `m:e`)。
+    slots: Vec<(MathSlot, String)>,
+    /// 结构帧:`m:*Pr` 里读到的属性。
+    props: MathProps,
     /// 帧内未开帧的嵌套元素深度。
     other_depth: usize,
 }
@@ -1143,8 +1182,8 @@ impl MathFrame {
             kind,
             slot,
             text: String::new(),
-            frags: 0,
             slots: Vec::new(),
+            props: MathProps::default(),
             other_depth: 0,
         }
     }
@@ -1156,83 +1195,235 @@ fn math_struct_of(name: &[u8]) -> Option<MathStruct> {
         b"f" => Some(MathStruct::Frac),
         b"sSup" => Some(MathStruct::Sup),
         b"sSub" => Some(MathStruct::Sub),
+        b"sSubSup" => Some(MathStruct::SubSup),
+        b"sPre" => Some(MathStruct::Pre),
         b"rad" => Some(MathStruct::Rad),
+        b"d" => Some(MathStruct::Delim),
+        b"nary" => Some(MathStruct::Nary),
+        b"func" => Some(MathStruct::Func),
+        b"limLow" => Some(MathStruct::LimLow),
+        b"limUpp" => Some(MathStruct::LimUpp),
+        b"acc" => Some(MathStruct::Acc),
+        b"bar" => Some(MathStruct::Bar),
+        b"m" => Some(MathStruct::Matrix),
+        b"eqArr" | b"box" | b"borderBox" | b"phant" | b"groupChr" => Some(MathStruct::Generic),
         _ => None,
     }
 }
 
 /// 槽位元素本地名 -> 在给定结构里的槽位(不属于该结构的名字不算槽位)。
-fn math_slot_of(kind: MathStruct, name: &[u8]) -> Option<MathSlot> {
-    match (kind, name) {
-        (MathStruct::Frac, b"num") => Some(MathSlot::Num),
-        (MathStruct::Frac, b"den") => Some(MathSlot::Den),
-        (MathStruct::Sup, b"e") | (MathStruct::Sub, b"e") | (MathStruct::Rad, b"e") => {
-            Some(MathSlot::Base)
-        }
-        (MathStruct::Sup, b"sup") => Some(MathSlot::Sup),
-        (MathStruct::Sub, b"sub") => Some(MathSlot::Sub),
-        (MathStruct::Rad, b"deg") => Some(MathSlot::Deg),
-        _ => None,
-    }
+/// 第二项:槽位本身又是结构(只有矩阵的行 `m:mr`)。
+fn math_slot_of(kind: MathStruct, name: &[u8]) -> Option<(MathSlot, Option<MathStruct>)> {
+    use MathSlot as S;
+    use MathStruct as K;
+    let slot = match (kind, name) {
+        (K::Frac, b"num") => S::Num,
+        (K::Frac, b"den") => S::Den,
+        (
+            K::Sup
+            | K::Sub
+            | K::SubSup
+            | K::Pre
+            | K::Rad
+            | K::Delim
+            | K::Nary
+            | K::Func
+            | K::LimLow
+            | K::LimUpp
+            | K::Acc
+            | K::Bar
+            | K::Generic,
+            b"e",
+        ) => S::Base,
+        (K::Sup | K::SubSup | K::Pre | K::Nary, b"sup") => S::Sup,
+        (K::Sub | K::SubSup | K::Pre | K::Nary, b"sub") => S::Sub,
+        (K::Rad, b"deg") => S::Deg,
+        (K::Func, b"fName") => S::FName,
+        (K::LimLow | K::LimUpp, b"lim") => S::Lim,
+        (K::Matrix, b"mr") => return Some((S::Row, Some(K::MatRow))),
+        (K::MatRow, b"e") => S::Cell,
+        _ => return None,
+    };
+    Some((slot, None))
 }
 
-/// 多于一个文字片段(或复合子项)时用括号包起来。
-fn math_wrap(text: &str, frags: usize) -> String {
-    if frags > 1 {
-        format!("({text})")
-    } else {
+/// 线性化文字是不是「原子」(拼进 `^` / `_` / `/` 时无需括号):空串、纯字母数字(含 Unicode
+/// 字母数字与小数点),或已被一对匹配的括号(`()` `[]` `{}`)完整包住。
+fn math_is_atom(text: &str) -> bool {
+    if text.chars().all(|c| c.is_alphanumeric() || c == '.') {
+        return true;
+    }
+    // 首尾必须是同一对括号,且中途不能提前回到 0 层(`(a)+(b)` 不算)。
+    let mut stack: Vec<char> = Vec::new();
+    let last = text.chars().count() - 1;
+    for (i, c) in text.chars().enumerate() {
+        match c {
+            '(' => stack.push(')'),
+            '[' => stack.push(']'),
+            '{' => stack.push('}'),
+            ')' | ']' | '}' => {
+                if stack.pop() != Some(c) {
+                    return false;
+                }
+                if stack.is_empty() && i != last {
+                    return false;
+                }
+            }
+            _ if stack.is_empty() => return false, // 括号之外有别的字符。
+            _ => {}
+        }
+    }
+    stack.is_empty() && matches!(text.chars().next(), Some('(' | '[' | '{'))
+}
+
+/// 非原子的槽位线性化结果加括号。
+fn math_wrap(text: &str) -> String {
+    if math_is_atom(text) {
         text.to_string()
+    } else {
+        format!("({text})")
     }
 }
 
 /// 把一个结构帧收拢成线性记法文本;所有槽位都为空时返回空串。
-fn math_linearize(kind: MathStruct, slots: &[(MathSlot, String, usize)]) -> String {
-    if slots.iter().all(|(_, t, _)| t.is_empty()) {
+fn math_linearize(kind: MathStruct, slots: &[(MathSlot, String)], props: &MathProps) -> String {
+    if slots.iter().all(|(_, t)| t.is_empty()) {
         return String::new();
     }
     let slot = |want: MathSlot| {
         slots
             .iter()
-            .find(|(s, _, _)| *s == want)
-            .map(|(_, t, n)| (t.as_str(), *n))
-            .unwrap_or(("", 0))
+            .find(|(s, _)| *s == want)
+            .map_or("", |(_, t)| t.as_str())
     };
-    let wrapped = |want: MathSlot| {
-        let (t, n) = slot(want);
-        math_wrap(t, n)
+    let wrapped = |want: MathSlot| math_wrap(slot(want));
+    let all = |want: MathSlot| -> Vec<&str> {
+        slots
+            .iter()
+            .filter(|(s, _)| *s == want)
+            .map(|(_, t)| t.as_str())
+            .collect()
     };
+    let chr = |default: &str| props.chr.clone().unwrap_or_else(|| default.to_string());
     match kind {
         MathStruct::Frac => format!("{}/{}", wrapped(MathSlot::Num), wrapped(MathSlot::Den)),
         MathStruct::Sup => format!("{}^{}", wrapped(MathSlot::Base), wrapped(MathSlot::Sup)),
         MathStruct::Sub => format!("{}_{}", wrapped(MathSlot::Base), wrapped(MathSlot::Sub)),
-        MathStruct::Rad => {
-            let (base, _) = slot(MathSlot::Base);
-            match slot(MathSlot::Deg) {
-                ("", _) => format!("sqrt({base})"),
-                (deg, _) => format!("root({deg},{base})"),
+        MathStruct::SubSup => format!(
+            "{}_{}^{}",
+            wrapped(MathSlot::Base),
+            wrapped(MathSlot::Sub),
+            wrapped(MathSlot::Sup)
+        ),
+        MathStruct::Pre => {
+            let mut out = String::new();
+            if !slot(MathSlot::Sub).is_empty() {
+                out.push_str(&format!("_{}", wrapped(MathSlot::Sub)));
+            }
+            if !slot(MathSlot::Sup).is_empty() {
+                out.push_str(&format!("^{}", wrapped(MathSlot::Sup)));
+            }
+            if !out.is_empty() && !slot(MathSlot::Base).is_empty() {
+                out.push(' ');
+            }
+            out + slot(MathSlot::Base)
+        }
+        MathStruct::Rad => match slot(MathSlot::Deg) {
+            "" => format!("sqrt({})", slot(MathSlot::Base)),
+            deg => format!("root({deg},{})", slot(MathSlot::Base)),
+        },
+        MathStruct::Delim => format!(
+            "{}{}{}",
+            props.beg.as_deref().unwrap_or("("),
+            all(MathSlot::Base).join(props.sep.as_deref().unwrap_or("|")),
+            props.end.as_deref().unwrap_or(")")
+        ),
+        MathStruct::Nary => {
+            let mut out = chr("∫");
+            if !slot(MathSlot::Sub).is_empty() {
+                out.push_str(&format!("_{}", wrapped(MathSlot::Sub)));
+            }
+            if !slot(MathSlot::Sup).is_empty() {
+                out.push_str(&format!("^{}", wrapped(MathSlot::Sup)));
+            }
+            if !slot(MathSlot::Base).is_empty() {
+                out.push(' ');
+                out.push_str(slot(MathSlot::Base));
+            }
+            out
+        }
+        MathStruct::Func => {
+            let (name, arg) = (slot(MathSlot::FName), slot(MathSlot::Base));
+            if arg.is_empty() {
+                name.to_string()
+            } else if name.is_empty() {
+                arg.to_string()
+            } else if math_is_atom(arg) {
+                format!("{name} {arg}")
+            } else {
+                format!("{name}({arg})")
             }
         }
+        MathStruct::LimLow => format!("{}_{}", wrapped(MathSlot::Base), wrapped(MathSlot::Lim)),
+        MathStruct::LimUpp => format!("{}^{}", wrapped(MathSlot::Base), wrapped(MathSlot::Lim)),
+        MathStruct::Acc => format!("{}{}", wrapped(MathSlot::Base), chr("\u{302}")),
+        MathStruct::Bar => {
+            let word = if props.pos.as_deref() == Some("top") {
+                "overline"
+            } else {
+                "underline"
+            };
+            format!("{word}({})", slot(MathSlot::Base))
+        }
+        MathStruct::Matrix => format!("[{}]", all(MathSlot::Row).join(";")),
+        MathStruct::MatRow => all(MathSlot::Cell).join(","),
+        MathStruct::Generic => all(MathSlot::Base)
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
-/// 把结束的帧并入父帧:槽位 -> 父结构的槽表;结构 -> 线性化文字(作复合项,记 2 片段)。
-fn math_merge(parent: &mut MathFrame, done: MathFrame) {
-    if let (Some(slot), true) = (done.slot, parent.kind.is_some()) {
-        parent.slots.push((slot, done.text, done.frags));
-    } else if let Some(kind) = done.kind {
-        let out = math_linearize(kind, &done.slots);
-        if !out.is_empty() {
-            parent.text.push_str(&out);
-            parent.frags += 2;
-        }
+/// 把结束的帧并入父帧:结构先线性化成文字;槽位 -> 父结构的槽表;其余结构 -> 并入父帧文字。
+fn math_merge(parent: &mut MathFrame, mut done: MathFrame) {
+    if let Some(kind) = done.kind {
+        done.text = math_linearize(kind, &done.slots, &done.props);
+    }
+    match (done.slot, parent.kind.is_some()) {
+        (Some(slot), true) => parent.slots.push((slot, done.text)),
+        _ => parent.text.push_str(&done.text),
+    }
+}
+
+/// 记下 `m:*Pr` 里的 `m:val` 属性(`begChr` / `endChr` / `sepChr` / `chr` / `pos`):
+/// 只在结构帧的属性子树内(`other_depth >= 1`)生效,先出现者为准。
+fn math_capture_prop(top: &mut MathFrame, name: &[u8], e: &BytesStart) {
+    if top.kind.is_none() || top.other_depth == 0 {
+        return;
+    }
+    let slot = match name {
+        b"begChr" => &mut top.props.beg,
+        b"endChr" => &mut top.props.end,
+        b"sepChr" => &mut top.props.sep,
+        b"chr" => &mut top.props.chr,
+        b"pos" => &mut top.props.pos,
+        _ => return,
+    };
+    if slot.is_none() {
+        *slot = Some(attr_of(e, b"val").unwrap_or_default());
     }
 }
 
 /// 解析 `m:oMath` / `m:oMathPara`:按文档顺序抽取其中所有文字元素(`m:t`,亦含 run 内
-/// 偶见的 `w:t`)拼成一个 `is_math` run。仅四种结构按最朴素的线性记法消歧,免得相邻
-/// 数字被拼错(1/2 不再成 `12`、x² 不再成 `x2`):分式 `分子/分母`、上标 `x^2`、下标
-/// `x_i`、根号 `sqrt(x)`(带次数 `root(3,x)`);某一项含多于一个文字片段(或本身是复合
-/// 结构)时加括号,如 `(a+b)/c`。其它结构(定界符 / 求和 / 矩阵等)仍纯拼接,不做 LaTeX。
+/// 偶见的 `w:t`)拼成一个 `is_math` run。结构按线性记法消歧,免得相邻数字被拼错(1/2 不再成
+/// `12`、x² 不再成 `x2`):分式 `分子/分母`、上标 `x^2`、下标 `x_i`、上下标 `x_i^2`、前置上下标
+/// `_6^14 C`、根号 `sqrt(x)`(带次数 `root(3,x)`)、定界符 `m:d` 按 `m:dPr` 的 `begChr` /
+/// `endChr` / `sepChr`(缺省 `(` `)` `|`)、大运算符 `∑_(i=1)^n x_i`(运算符取 `m:chr`,缺省 `∫`)、
+/// 函数 `sin x` / `sin(x+1)`、极限 `lim_(x→0)`、重音符 / 上下划线、矩阵 `[a,b;c,d]`;
+/// `m:eqArr` / `m:box` 等其它多槽结构各子项之间加一个空格。**括号规则看槽位线性化后的文字**:
+/// 不是「原子」(纯字母数字,或已被一对匹配括号完整包住)就加括号,与 `m:t` 片段数无关,
+/// 所以单个 `m:t` 写着 `a+b` 作分子也得 `(a+b)/c`。其余元素是透明外壳,其内文字 / 结构照常处理。
 /// `m:oMathPara` 内多个 `m:oMath` 以空格分隔。修订删除 `w:del` / `w:moveFrom` 子树按
 /// “接受修订”丢弃。已消费起始标签;**迭代**遍历(显式栈,不递归),结构帧深度受
 /// [`MAX_NEST_DEPTH`] 约束(更深的结构退化为纯拼接),深嵌套不会栈溢出。
@@ -1249,24 +1440,27 @@ fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>, container: &[u8]) -> 
                 let name = name.as_slice();
                 // 栈永不为空(根帧只在容器结束时才处理),下面的 last_mut 都成立。
                 let Some(top) = stack.last_mut() else { break };
+                math_capture_prop(top, name, &e);
                 match name {
                     b"del" | b"moveFrom" => skip_element(reader),
                     b"t" => {
                         let t = read_text(reader);
-                        if !t.is_empty() {
-                            top.text.push_str(&t);
-                            top.frags += 1;
-                        }
+                        top.text.push_str(&t);
                     }
                     _ if top.other_depth == 0 && top.kind.is_some() => {
                         // 结构帧的直接子元素:认得的槽位开新帧,其余当普通嵌套。
                         match top.kind.and_then(|k| math_slot_of(k, name)) {
-                            Some(slot) => stack.push(MathFrame::new(None, Some(slot))),
+                            Some((slot, kind)) => {
+                                if kind.is_some() {
+                                    struct_depth += 1;
+                                }
+                                stack.push(MathFrame::new(kind, Some(slot)));
+                            }
                             None => top.other_depth += 1,
                         }
                     }
                     // 容器 / 槽位帧(`kind` 为 `None`)里不论隔了几层透明外壳(`m:oMath` /
-                    // `m:d` / `m:e` / `m:nary` / `m:func` 等)都认结构;外壳只记 `other_depth`。
+                    // `m:e` 等)都认结构;外壳只记 `other_depth`。
                     _ if top.kind.is_none() && struct_depth < MAX_NEST_DEPTH => {
                         match math_struct_of(name) {
                             Some(kind) => {
@@ -1287,6 +1481,12 @@ fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>, container: &[u8]) -> 
                         }
                         top.other_depth += 1;
                     }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if let Some(top) = stack.last_mut() {
+                    math_capture_prop(top, &name, &e);
                 }
             }
             Ok(Event::End(_)) => {
