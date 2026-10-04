@@ -74,6 +74,14 @@ change.
   `to_markdown` / `to_html` (the export functions have no options struct, so no
   switch was added), not drawn in PDF, and never appear in warnings. Python:
   `Document.comments()` and `kind == "comment_ref"` run segments.
+- **Images inside headers, footers and notes are pinned by tests to resolve
+  through their own part's rels.** Each part (`word/_rels/header1.xml.rels`, ...)
+  can reuse `rId1` for a different media file than `document.xml.rels`; the parser
+  already resolves `r:embed` with the owning part's rels into a scope-independent
+  `media_name` (no parse bug was found). The only trap was `Document.image_bytes(rel_id)`
+  in Python, which indexes body pictures only: for pictures from headers / footers /
+  notes use the picture dict's `media`. Documented on `image_bytes` and covered by
+  `part_scoped_images.rs` and a pytest (header and body both `rId1`, different bytes).
 - **`to_html` now emits headers, footers, footnotes and endnotes** (it silently
   dropped them before). Each distinct header/footer part is emitted once as
   `<header data-type="default|first|even">` (top) / `<footer ...>` (end), empty

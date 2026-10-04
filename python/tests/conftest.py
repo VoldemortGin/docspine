@@ -118,8 +118,8 @@ _DOCUMENT = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:document>"""
 
 
-def _png_1x1() -> bytes:
-    """造一个最小的合法 1x1 PNG(纯 zlib + 手写块,不依赖 Pillow)。"""
+def _png_1x1(rgb: tuple[int, int, int] = (255, 255, 255)) -> bytes:
+    """造一个最小的合法 1x1 PNG(纯 zlib + 手写块,不依赖 Pillow);``rgb`` 指定那一个像素的颜色。"""
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         return (
@@ -131,7 +131,7 @@ def _png_1x1() -> bytes:
 
     sig = b"\x89PNG\r\n\x1a\n"
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)  # 1x1, 8-bit, truecolor
-    raw = b"\x00\xff\xff\xff"  # one filtered scanline: filter 0 + white pixel
+    raw = b"\x00" + bytes(rgb)  # one filtered scanline: filter 0 + one RGB pixel(缺省白色)
     idat = zlib.compress(raw)
     return sig + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 

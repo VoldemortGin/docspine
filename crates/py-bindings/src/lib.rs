@@ -538,7 +538,9 @@ impl PyDocument {
     }
 
     /// 取一张内嵌图片的原始字节:`name` 可以是 `word/media/` 裸文件名(图片 dict 的 `media`),
-    /// 也可以是图片 dict 的 `rel_id`。查不到返回 `None`。配合 `ocr_image` 即可“解析 docx ->
+    /// 也可以是**正文**图片 dict 的 `rel_id`。页眉 / 页脚 / 注部件各有自己的 rels,其 `rel_id`
+    /// 可能与正文撞号,所以这些部件里的图片请用 `media`(解析期已按所在部件自己的 rels
+    /// 解成不依赖部件作用域的裸文件名)。查不到返回 `None`。配合 `ocr_image` 即可“解析 docx ->
     /// 取出内嵌图片字节 -> OCR”端到端跑通。
     fn image_bytes<'py>(&self, py: Python<'py>, name: &str) -> Option<Bound<'py, PyBytes>> {
         // 1) 先按 media 裸文件名直接查。

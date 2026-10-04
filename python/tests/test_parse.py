@@ -8,7 +8,7 @@ import zipfile
 import pytest
 
 import docspine
-from conftest import _DOC_HEADER, build_docx
+from conftest import _DOC_HEADER, _png_1x1, build_docx
 
 
 def test_open_path_basic(minimal_docx_path):
@@ -566,6 +566,51 @@ def test_comments_empty_without_part_and_malformed_part_does_not_raise(minimal_d
         {},
     )
     assert docspine.open_bytes(docx).to_text() == "x"
+
+
+def test_part_scoped_image_rel_ids_resolve_to_their_own_bytes():
+    """页眉与正文都用 rId1 却指向不同图片:各自的 ``media`` 取到各自的字节;
+    ``rel_id`` 反查只对正文有效(部件作用域内的 rel_id 在别的部件里含义不同)。"""
+    body_png, head_png = _png_1x1((255, 0, 0)), _png_1x1((0, 0, 255))
+    assert body_png != head_png
+
+    def pic(rid: str) -> str:
+        return (
+            f'<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><a:graphic><a:graphicData>'
+            f'<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            f'<pic:blipFill><a:blip r:embed="{rid}"/></pic:blipFill></pic:pic>'
+            f"</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+        )
+
+    body = (
+        f"<w:body><w:p>{pic('rId1')}</w:p>"
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr></w:body>'
+    )
+    docx = _with_parts(
+        build_docx(_DOC_HEADER + body + "</w:document>"),
+        {
+            "word/header1.xml": (
+                f'<w:hdr {_W_NS} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/'
+                f'wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                f"<w:p>{pic('rId1')}</w:p></w:hdr>"
+            ),
+            "word/_rels/header1.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                f'<Relationship Id="rId1" Type="{_REL_BASE}/image" Target="media/head.png"/></Relationships>'
+            ),
+            "word/media/body.png": body_png,
+            "word/media/head.png": head_png,
+        },
+        {"rIdH": ("header", "header1.xml"), "rId1": ("image", "media/body.png")},
+    )
+    doc = docspine.open_bytes(docx)
+    body_pic = doc.paragraphs()[0]["runs"][0]["pictures"][0]
+    head_pic = doc.sections()[0]["headers"][0]["blocks"][0]["runs"][0]["pictures"][0]
+    assert body_pic["rel_id"] == head_pic["rel_id"] == "rId1"
+    assert (body_pic["media"], head_pic["media"]) == ("body.png", "head.png")
+    assert doc.image_bytes(body_pic["media"]) == body_png
+    assert doc.image_bytes(head_pic["media"]) == head_png
+    assert doc.image_bytes(body_pic["rel_id"]) == body_png  # rel_id 反查按正文作用域
 
 
 def test_math_run_exposes_is_math_flag():
