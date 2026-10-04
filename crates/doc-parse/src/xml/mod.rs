@@ -153,6 +153,21 @@ pub fn on_off_val(e: &BytesStart) -> bool {
     }
 }
 
+/// 是否为格式修订容器(`w:pPrChange` / `w:rPrChange` / `w:tcPrChange` / `w:tblPrChange` /
+/// `w:trPrChange` / `w:sectPrChange`)。其内装的是**修订前**的旧属性,按“接受全部修订”
+/// 各属性 walker 遇到它必须 [`skip_element`] 整体跳过,否则旧值会后写胜出覆盖现值。
+pub fn is_prop_change(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"pPrChange"
+            | b"rPrChange"
+            | b"tcPrChange"
+            | b"tblPrChange"
+            | b"trPrChange"
+            | b"sectPrChange"
+    )
+}
+
 /// 跳过当前已打开元素的全部内容,直到其匹配的结束标签。已消费该元素的起始标签。
 /// 通过深度计数处理同名嵌套。各部件 walker 共用。
 pub fn skip_element<R: std::io::BufRead>(reader: &mut Reader<R>) {

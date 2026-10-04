@@ -19,7 +19,7 @@ use doc_core::style::{
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
-use super::{attr_of, local_name, on_off_val, skip_element};
+use super::{attr_of, is_prop_change, local_name, on_off_val, skip_element};
 
 /// 解析一个 `w:rPr` 片段。已消费 `<w:rPr>` 起始标签,消费到其匹配的结束标签为止。
 pub fn parse_rpr<R: std::io::BufRead>(reader: &mut Reader<R>) -> RunProps {
@@ -29,6 +29,10 @@ pub fn parse_rpr<R: std::io::BufRead>(reader: &mut Reader<R>) -> RunProps {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(e)) => apply_rpr_prop(&e, &mut props),
+            // 修订前的旧 rPr(w:rPrChange)整体跳过,不得覆盖现值。
+            Ok(Event::Start(e)) if is_prop_change(local_name(e.name().as_ref())) => {
+                skip_element(reader)
+            }
             Ok(Event::Start(e)) => {
                 apply_rpr_prop(&e, &mut props);
                 depth += 1;
@@ -163,6 +167,8 @@ pub fn parse_ppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> ParaProps {
                 b"pBdr" => parse_pbdr(reader, &mut props),
                 // 段落标记符的 run 属性:内含同名异义元素(如字符间距 w:spacing),整体跳过。
                 b"rPr" => skip_element(reader),
+                // 修订前的旧 pPr(w:pPrChange)整体跳过,不得覆盖现值。
+                n if is_prop_change(n) => skip_element(reader),
                 _ => {
                     apply_ppr_prop(&e, &mut props);
                     depth += 1;
@@ -368,6 +374,8 @@ pub fn parse_style_tblpr<R: std::io::BufRead>(reader: &mut Reader<R>) -> TablePr
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"tblBorders" => props.borders = parse_tbl_borders(reader),
                 b"tblCellMar" => props.cell_margins = parse_cell_margins(reader),
+                // 修订前的旧 tblPr(w:tblPrChange)整体跳过,不得覆盖现值。
+                n if is_prop_change(n) => skip_element(reader),
                 _ => depth += 1,
             },
             Ok(Event::End(_)) => {

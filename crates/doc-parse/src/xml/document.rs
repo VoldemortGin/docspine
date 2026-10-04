@@ -37,8 +37,8 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 use super::{
-    attr_of, attr_string, local_name, media_name_from_target, on_off_val, parse_rels, props,
-    skip_element, Relationship,
+    attr_of, attr_string, is_prop_change, local_name, media_name_from_target, on_off_val,
+    parse_rels, props, skip_element, Relationship,
 };
 
 /// 递归容器(`w:tbl` / 块级与行内 `w:sdt`·`w:customXml` / `w:hyperlink`·`w:ins`·`w:moveTo`·
@@ -612,6 +612,8 @@ fn parse_ppr<R: std::io::BufRead>(reader: &mut Reader<R>, para: &mut Paragraph) 
                 b"sectPr" => sect = Some(parse_sectpr(reader)),
                 b"pBdr" => props::parse_pbdr(reader, &mut para.ppr),
                 b"rPr" => skip_element(reader),
+                // 修订前的旧 pPr(w:pPrChange)整体跳过,不得覆盖现值。
+                n if is_prop_change(n) => skip_element(reader),
                 _ => {
                     apply_ppr_prop(&e, para);
                     props::apply_ppr_prop(&e, &mut para.ppr);
@@ -1495,6 +1497,8 @@ fn parse_tblpr<R: std::io::BufRead>(reader: &mut Reader<R>, table: &mut Table) {
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"tblBorders" => table.borders = props::parse_tbl_borders(reader),
                 b"tblCellMar" => table.cell_margins = props::parse_cell_margins(reader),
+                // 修订前的旧 tblPr(w:tblPrChange)整体跳过,不得覆盖现值。
+                n if is_prop_change(n) => skip_element(reader),
                 _ => {
                     apply_tblpr_prop(&e, table);
                     depth += 1;
@@ -1621,6 +1625,10 @@ fn parse_trpr<R: std::io::BufRead>(reader: &mut Reader<R>, row: &mut Row) {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(e)) => apply_trpr_prop(&e, row),
+            // 修订前的旧 trPr(w:trPrChange)整体跳过,不得覆盖现值。
+            Ok(Event::Start(e)) if is_prop_change(local_name(e.name().as_ref())) => {
+                skip_element(reader)
+            }
             Ok(Event::Start(e)) => {
                 apply_trpr_prop(&e, row);
                 depth += 1;
@@ -1714,6 +1722,8 @@ fn parse_tcpr<R: std::io::BufRead>(reader: &mut Reader<R>, cell: &mut Cell) {
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"tcBorders" => cell.borders = props::parse_tc_borders(reader),
                 b"tcMar" => cell.margins = props::parse_cell_margins(reader),
+                // 修订前的旧 tcPr(w:tcPrChange)整体跳过,不得覆盖现值。
+                n if is_prop_change(n) => skip_element(reader),
                 _ => {
                     apply_tcpr_prop(&e, cell);
                     depth += 1;
