@@ -3,7 +3,7 @@
 
 use std::io::{Cursor, Write};
 
-use doc_core::model::{Block, Diagnostic, DiagnosticKind, MAX_NOTES};
+use doc_core::model::{Block, Diagnostic, DiagnosticKind, MAX_NOTES, MAX_SECTIONS};
 use doc_core::Document;
 use doc_parse::parse_bytes;
 use zip::write::SimpleFileOptions;
@@ -340,6 +340,34 @@ fn notes_beyond_cap_are_dropped_and_reported() {
         Some(3)
     );
     assert_eq!(DiagnosticKind::NotesTruncated.code(), "notes-truncated");
+}
+
+#[test]
+fn sections_beyond_cap_merge_into_the_last_one_and_are_reported() {
+    // MAX_SECTIONS + 5 个段落级 sectPr,再加带特殊页宽的文档级 sectPr(最后一节)。
+    let n = MAX_SECTIONS + 5;
+    let mut body = String::new();
+    for _ in 0..n {
+        body.push_str("<w:p><w:pPr><w:sectPr/></w:pPr></w:p>");
+    }
+    body.push_str(&p("tail"));
+    body.push_str(r#"<w:sectPr><w:pgSz w:w="12345" w:h="15840"/></w:sectPr>"#);
+    let doc = simple(&body);
+    assert_eq!(doc.sections.len(), MAX_SECTIONS);
+    // 被并入的是中间的节:最后一节仍是带特殊页宽的文档级 sectPr,正文不丢。
+    assert_eq!(doc.sections.last().map(|s| s.page_width), Some(12345));
+    assert_eq!(
+        count_of(&doc, DiagnosticKind::SectionsTruncated, "word/document.xml"),
+        Some(6)
+    );
+    assert!(doc
+        .body
+        .iter()
+        .any(|b| matches!(b, Block::Paragraph(p) if p.runs.iter().any(|r| r.text() == "tail"))));
+    assert_eq!(
+        DiagnosticKind::SectionsTruncated.code(),
+        "sections-truncated"
+    );
 }
 
 #[test]

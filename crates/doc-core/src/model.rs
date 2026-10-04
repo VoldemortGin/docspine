@@ -125,6 +125,8 @@ pub enum DiagnosticKind {
     NotesTruncated,
     /// 某个字段指令超过 [`MAX_FIELD_INSTR`] 被截断(计数 = 被截断的字段数)。
     FieldInstrTruncated,
+    /// 节数超过 [`MAX_SECTIONS`],中间多余的节被并入最后一节(计数 = 被并入的节数)。
+    SectionsTruncated,
 }
 
 impl DiagnosticKind {
@@ -141,6 +143,7 @@ impl DiagnosticKind {
             DiagnosticKind::StyleChainTruncated => "style-chain-truncated",
             DiagnosticKind::NotesTruncated => "notes-truncated",
             DiagnosticKind::FieldInstrTruncated => "field-instr-truncated",
+            DiagnosticKind::SectionsTruncated => "sections-truncated",
         }
     }
 }
@@ -152,6 +155,12 @@ pub struct Diagnostic {
     pub kind: DiagnosticKind,
     pub part: String,
     pub count: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 仅测试编译:页眉页脚有效引用解析时访问的节次数。
+    static HF_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl Document {
@@ -175,13 +184,12 @@ impl Document {
         let Some(sect) = self.sections.get(section) else {
             return (None, None);
         };
-        let kind = if sect.title_pg && page_in_section == 0 {
-            HeaderFooterKind::First
-        } else if self.even_and_odd_headers && page_number.rem_euclid(2) == 0 {
-            HeaderFooterKind::Even
-        } else {
-            HeaderFooterKind::Default
-        };
+        let kind = page_kind(
+            sect.title_pg,
+            self.even_and_odd_headers,
+            page_in_section,
+            page_number,
+        );
         let pick = |refs: fn(&Section) -> &[HeaderFooterRef]| {
             self.sections[..=section].iter().rev().find_map(|s| {
                 refs(s)
@@ -191,6 +199,102 @@ impl Document {
             })
         };
         (pick(|s| &s.headers), pick(|s| &s.footers))
+    }
+}
+
+/// 某页用哪一类页眉 / 页脚(首页 > 偶数页 > 通用;规则见 [`Document::header_footer_for_page`])。
+fn page_kind(
+    title_pg: bool,
+    even_and_odd_headers: bool,
+    page_in_section: usize,
+    page_number: i64,
+) -> HeaderFooterKind {
+    if title_pg && page_in_section == 0 {
+        HeaderFooterKind::First
+    } else if even_and_odd_headers && page_number.rem_euclid(2) == 0 {
+        HeaderFooterKind::Even
+    } else {
+        HeaderFooterKind::Default
+    }
+}
+
+/// 逐节预计算的有效页眉 / 页脚引用:按节前缀传播一次(本节没有某类型的引用就沿用上一节的),
+/// 之后每页的查询是 O(1),而不是 [`Document::header_footer_for_page`] 那样每页向前回溯 O(节数)。
+/// 语义与它完全一致(见单测的逐页等价校验)。
+pub struct HeaderFooterIndex<'a> {
+    /// 每节、按 `[default, first, even]` 排的有效部件键。
+    headers: Vec<[Option<&'a str>; 3]>,
+    footers: Vec<[Option<&'a str>; 3]>,
+    title_pg: Vec<bool>,
+    even_and_odd_headers: bool,
+}
+
+fn kind_slot(kind: HeaderFooterKind) -> usize {
+    match kind {
+        HeaderFooterKind::Default => 0,
+        HeaderFooterKind::First => 1,
+        HeaderFooterKind::Even => 2,
+    }
+}
+
+/// 在上一节的有效引用 `prev` 上叠加本节 `refs`:有某类型的引用就覆盖,否则沿用。
+/// 同类型多个引用取最先出现的(与逐节 `find` 一致,故从后往前覆盖)。
+fn propagate_refs<'a>(
+    refs: &'a [HeaderFooterRef],
+    prev: Option<&[Option<&'a str>; 3]>,
+) -> [Option<&'a str>; 3] {
+    let mut eff = prev.copied().unwrap_or([None; 3]);
+    for r in refs.iter().rev() {
+        eff[kind_slot(r.kind)] = Some(r.rel_id.as_str());
+    }
+    eff
+}
+
+impl Document {
+    /// 预计算每节的有效页眉 / 页脚引用(O(节数 x 引用数),只做一次)。
+    pub fn header_footer_index(&self) -> HeaderFooterIndex<'_> {
+        let mut headers: Vec<[Option<&str>; 3]> = Vec::with_capacity(self.sections.len());
+        let mut footers: Vec<[Option<&str>; 3]> = Vec::with_capacity(self.sections.len());
+        for sect in &self.sections {
+            #[cfg(test)]
+            HF_STEPS.with(|c| c.set(c.get() + 1));
+            // 本节有某类型的引用则覆盖,否则沿用上一节。
+            let h = propagate_refs(&sect.headers, headers.last());
+            let f = propagate_refs(&sect.footers, footers.last());
+            headers.push(h);
+            footers.push(f);
+        }
+        HeaderFooterIndex {
+            headers,
+            footers,
+            title_pg: self.sections.iter().map(|s| s.title_pg).collect(),
+            even_and_odd_headers: self.even_and_odd_headers,
+        }
+    }
+}
+
+impl<'a> HeaderFooterIndex<'a> {
+    /// 同 [`Document::header_footer_for_page`],O(1)。
+    pub fn for_page(
+        &self,
+        section: usize,
+        page_in_section: usize,
+        page_number: i64,
+    ) -> (Option<&'a str>, Option<&'a str>) {
+        let (Some(h), Some(f), Some(&title_pg)) = (
+            self.headers.get(section),
+            self.footers.get(section),
+            self.title_pg.get(section),
+        ) else {
+            return (None, None);
+        };
+        let slot = kind_slot(page_kind(
+            title_pg,
+            self.even_and_odd_headers,
+            page_in_section,
+            page_number,
+        ));
+        (h[slot], f[slot])
     }
 }
 
@@ -579,6 +683,11 @@ pub const MAX_TABLE_CELLS: usize = 250_000;
 /// 真实指令至多几百字节(`HYPERLINK` 受 URL 上限约 2 KB 约束);4 KiB 已是最长合法写法的两倍,
 /// 同时把「指令长度 × 结果 run 数」之类的放大钉死在常数上。
 pub const MAX_FIELD_INSTR: usize = 4096;
+
+/// 节数上限。每节至少一页、各自带页眉页脚引用,排版 / 页眉页脚开销随节数线性增长;取值依据:
+/// 合并邮件式文档(每收件人一节)也不过几千节,10 000 留足余量,而几百字节 / 节的合成文件
+/// 不会把渲染拖到不可控。超出时中间的节并入最后一节(它携带文档级 `sectPr`),计 `sections-truncated`。
+pub const MAX_SECTIONS: usize = 10_000;
 
 /// 单个脚注 / 尾注 / 批注部件最多收录的条目数。超出的条目丢弃并记 `notes-truncated` 诊断。
 /// 取值依据:真实长文档(法律文书 / 学术专著)脚注至多几千条,10 万留足 20 倍以上余量;
@@ -1031,5 +1140,92 @@ mod header_footer_rule_tests {
         let d = doc_of(vec![full_section("a")], true);
         assert_eq!(d.header_footer_for_page(0, 0, 0).0, Some("h-a-even"));
         assert_eq!(d.header_footer_for_page(0, 0, 1).0, Some("h-a-default"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `sections` 个节,只有第 0 节引用页眉 / 页脚,其余全部继承。
+    fn inherit_doc(sections: usize) -> Document {
+        let r = |id: &str| {
+            vec![HeaderFooterRef {
+                kind: HeaderFooterKind::Default,
+                rel_id: id.into(),
+            }]
+        };
+        Document {
+            sections: (0..sections)
+                .map(|i| Section {
+                    headers: if i == 0 { r("h") } else { vec![] },
+                    footers: if i == 0 { r("f") } else { vec![] },
+                    ..Section::default()
+                })
+                .collect(),
+            ..Document::default()
+        }
+    }
+
+    /// 预计算索引:构建只访问每节一次,之后每页查询 O(1);总访问节数与「节数」同阶、与页数无关
+    /// (修复前逐页向前回溯,`pages x sections`)。
+    #[test]
+    fn index_lookup_steps_are_linear_in_sections() {
+        let (sections, pages) = (500usize, 2000usize);
+        let doc = inherit_doc(sections);
+        HF_STEPS.with(|c| c.set(0));
+        let index = doc.header_footer_index();
+        for k in 0..pages {
+            assert_eq!(
+                index.for_page(sections - 1, k, k as i64 + 1),
+                (Some("h"), Some("f"))
+            );
+        }
+        let steps = HF_STEPS.with(|c| c.get());
+        assert!(steps <= sections, "steps {steps} 应 <= 节数 {sections}");
+    }
+
+    /// 与逐页回溯的 `header_footer_for_page` 逐页等价:首页 / 偶数页 / 同类型多引用 / 继承 / 越界。
+    #[test]
+    fn index_matches_per_page_lookup() {
+        let r = |kind, id: &str| HeaderFooterRef {
+            kind,
+            rel_id: id.into(),
+        };
+        use HeaderFooterKind::{Default as D, Even as E, First as F};
+        let mut doc = Document {
+            sections: vec![
+                Section {
+                    headers: vec![r(D, "h0"), r(F, "h0f"), r(D, "h0-dup")],
+                    footers: vec![r(E, "f0e")],
+                    title_pg: true,
+                    ..Section::default()
+                },
+                Section::default(),
+                Section {
+                    headers: vec![r(E, "h2e")],
+                    footers: vec![r(D, "f2"), r(F, "f2f")],
+                    title_pg: true,
+                    ..Section::default()
+                },
+                Section::default(),
+            ],
+            ..Document::default()
+        };
+        for even in [false, true] {
+            doc.even_and_odd_headers = even;
+            let index = doc.header_footer_index();
+            for section in 0..6 {
+                for k in 0..4 {
+                    for number in -2..5 {
+                        assert_eq!(
+                            index.for_page(section, k, number),
+                            doc.header_footer_for_page(section, k, number),
+                            "section {section} k {k} number {number} even {even}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

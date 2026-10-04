@@ -16,7 +16,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use doc_core::model::{Block, Diagnostic, DiagnosticKind, Document, Section};
+use doc_core::model::{Block, Diagnostic, DiagnosticKind, Document, Section, MAX_SECTIONS};
 use doc_core::numbering::MAX_LIST_NUMBER;
 use doc_core::{DocError, Result};
 
@@ -81,6 +81,20 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         parse_part(&mut diags, pkg.main_part(), &doc_xml, |stats| {
             xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index, stats)
         });
+
+    // 节数封顶:超出的中间节并入最后一节(它带文档级 sectPr),正文一字不丢。
+    let over = sections.len().saturating_sub(MAX_SECTIONS);
+    if over > 0 {
+        let last = sections.pop();
+        sections.truncate(MAX_SECTIONS - 1);
+        sections.extend(last);
+        add_diag(
+            &mut diags,
+            DiagnosticKind::SectionsTruncated,
+            pkg.main_part(),
+            over,
+        );
+    }
 
     // 3b) 页眉页脚:节里只有 r:id 引用,经主文档 rels 定位 `word/header*.xml` /
     //     `word/footer*.xml`;内容复用块级解析。指向同一部件的多个 r:id 归一成第一个,

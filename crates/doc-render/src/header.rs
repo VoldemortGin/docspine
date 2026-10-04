@@ -16,29 +16,57 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use doc_core::geom::twips_to_points;
-use doc_core::model::{Block as DocBlock, Document, RunSegment, Section};
+use doc_core::model::{Block as DocBlock, Document, HeaderFooterIndex, RunSegment, Section};
 use doc_core::{format_page_number, PageNumFormat};
 use pdf_typeset::{ImageSpec, Op, PageGeom, PageOps, Rect, TextBoxSpec, Typesetter, VAnchor};
 
 use crate::map::PartMapper;
 use crate::warn::RenderWarning;
 
+#[cfg(test)]
+thread_local! {
+    /// 仅测试编译:部件被映射 + 量高的次数(`measure_section`)与被排版的次数(`part_ops`)。
+    static MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// 页眉页脚避让后正文区高度的下限(磅;原正文区更矮时取原高)。
 const MIN_BODY_PT: f64 = 72.0;
+
+/// 页面几何的比较键(各字段的位模式):同一部件在几何相同的节里映射 / 量高 / 排版的结果相同,
+/// 缓存按它去重,而不是按节序号(继承来的同一部件不必每节重做)。
+type GeomSig = [u64; 6];
+
+fn geom_sig(g: &PageGeom) -> GeomSig {
+    [
+        g.width,
+        g.height,
+        g.margin_top,
+        g.margin_right,
+        g.margin_bottom,
+        g.margin_left,
+    ]
+    .map(f64::to_bits)
+}
+
+/// 排版缓存键:`(部件键, 页面几何, 页眉 / 页脚距, 是否页脚)`——部件排版结果的全部输入。
+type LayoutKey = (String, GeomSig, u64, bool);
 
 /// 一次渲染的页眉页脚状态:部件高度(先量)、排版缓存与图片 id 归一(后画)。
 pub(crate) struct HeaderFooters<'a> {
     doc: &'a Document,
+    /// 每节有效页眉页脚引用的预计算(前缀传播一次,逐页查询 O(1))。
+    index: HeaderFooterIndex<'a>,
     media: &'a BTreeMap<String, Vec<u8>>,
     mapper: PartMapper,
     /// 每节的基础几何(节序号为下标;未避让)。
     geoms: Vec<PageGeom>,
-    /// `(节序号, 部件键)` → 内容高(磅,按缓存结果量)。
-    heights: BTreeMap<(usize, String), f64>,
-    /// 不含页码字段的部件:`(节序号, 部件键)` → 排好的 ops(跨页复用)。
-    cache: BTreeMap<(usize, String), Vec<Op>>,
-    /// `(节序号, 部件键)` → 首次排版的图片 id 序列(逐页重排时归一,PDF 只嵌一次)。
-    image_ids: BTreeMap<(usize, String), Vec<usize>>,
+    /// `(部件键, 几何)` → 内容高(磅,按缓存结果量)。
+    heights: BTreeMap<(String, GeomSig), f64>,
+    /// 不含页码字段的部件:排版键 → 排好的 ops(跨页 / 跨节复用)。
+    cache: BTreeMap<LayoutKey, Vec<Op>>,
+    /// 排版键 → 首次排版的图片 id 序列(逐页重排时归一,PDF 只嵌一次)。
+    image_ids: BTreeMap<LayoutKey, Vec<usize>>,
     warnings: Vec<RenderWarning>,
     overflow_warned: bool,
 }
@@ -47,6 +75,7 @@ impl<'a> HeaderFooters<'a> {
     pub(crate) fn new(doc: &'a Document, media: &'a BTreeMap<String, Vec<u8>>) -> Self {
         HeaderFooters {
             doc,
+            index: doc.header_footer_index(),
             media,
             mapper: PartMapper::new(),
             geoms: Vec::new(),
@@ -66,17 +95,24 @@ impl<'a> HeaderFooters<'a> {
         let mut keys = BTreeSet::new();
         // 页码奇偶两种、首页 / 非首页两种,共四种组合(与 `w:start` 取值无关)。
         for (k, n) in [(0, 1), (0, 2), (1, 1), (1, 2)] {
-            let (h, f) = doc.header_footer_for_page(si, k, n);
+            let (h, f) = self.index.for_page(si, k, n);
             keys.extend(h.into_iter().chain(f));
         }
         let width = (geom.width - geom.margin_left - geom.margin_right).max(1.0);
+        let sig = geom_sig(&geom);
         for key in keys {
+            // 继承来的同一部件在几何相同的节里只量一次。
+            if self.heights.contains_key(&(key.to_string(), sig)) {
+                continue;
+            }
             let Some(blocks) = doc.header_footers.get(key).filter(|b| has_content(b)) else {
                 continue;
             };
+            #[cfg(test)]
+            MEASURES.with(|c| c.set(c.get() + 1));
             let (mapped, _) = self.mapper.map(doc, blocks, &geom, self.media);
             let height = ts.measure_blocks(&mapped, width, true).height;
-            self.heights.insert((si, key.to_string()), height);
+            self.heights.insert((key.to_string(), sig), height);
         }
     }
 
@@ -92,9 +128,10 @@ impl<'a> HeaderFooters<'a> {
         let Some(sect) = doc.sections.get(si) else {
             return base;
         };
-        let (h, f) = doc.header_footer_for_page(si, k, page_number);
+        let (h, f) = self.index.for_page(si, k, page_number);
+        let sig = geom_sig(&base);
         let height_of = |key: Option<&str>| {
-            key.and_then(|key| self.heights.get(&(si, key.to_string())).copied())
+            key.and_then(|key| self.heights.get(&(key.to_string(), sig)).copied())
         };
         let mut g = base;
         if let (true, Some(hh)) = (sect.margins.top >= 0, height_of(h)) {
@@ -124,10 +161,9 @@ impl<'a> HeaderFooters<'a> {
         placement: &[(usize, usize)],
         numbers: &[i64],
     ) {
-        let doc = self.doc;
         let total = pages.len();
         for ((page, &(si, k)), &number) in pages.iter_mut().zip(placement).zip(numbers) {
-            let (h, f) = doc.header_footer_for_page(si, k, number);
+            let (h, f) = self.index.for_page(si, k, number);
             let mut ops = Vec::new();
             for (key, footer) in [(h, false), (f, true)] {
                 if let Some(key) = key {
@@ -163,7 +199,12 @@ impl<'a> HeaderFooters<'a> {
         ) else {
             return Vec::new();
         };
-        let cache_key = (si, key.to_string());
+        let dist = if footer {
+            footer_dist(sect)
+        } else {
+            header_dist(sect)
+        };
+        let cache_key: LayoutKey = (key.to_string(), geom_sig(&geom), dist.to_bits(), footer);
         let dynamic = uses_page_fields(blocks);
         if !dynamic {
             if let Some(ops) = self.cache.get(&cache_key) {
@@ -191,6 +232,8 @@ impl<'a> HeaderFooters<'a> {
         if footer {
             spec.v_anchor = VAnchor::Bottom;
         }
+        #[cfg(test)]
+        LAYOUTS.with(|c| c.set(c.get() + 1));
         let flow = ts.layout_text_box(&spec);
         // 部件里的锚定图:衬底的画在部件内容之前,其余之后。
         let mut ops = Vec::new();
@@ -373,6 +416,7 @@ mod tests {
     use doc_core::PageNumFormat;
     use pdf_typeset::{FontResolver, Op, PageOps, Typesetter};
 
+    use super::{LAYOUTS, MEASURES};
     use crate::{layout_document, render_with, RenderOptions};
 
     /// 合法的 1×1 RGB PNG(引擎可解码)。
@@ -606,6 +650,58 @@ mod tests {
         let (pages, _) = layout(&doc, &BTreeMap::new());
         let heads: Vec<String> = pages.iter().map(header_text).collect();
         assert_eq!(heads, ["ODDH", "ODDH", "ODDH", "ODDH"]);
+    }
+
+    fn counts() -> (usize, usize) {
+        (MEASURES.with(|c| c.get()), LAYOUTS.with(|c| c.get()))
+    }
+
+    /// `n` 个节,只有第 0 节引用页眉 `h`,其余全部继承;每节一段正文。`tweak(i, &mut Section)` 调整第 i 节。
+    fn inherited_header_doc(n: usize, tweak: impl Fn(usize, &mut Section)) -> Document {
+        let mut doc = Document {
+            body: (0..n).map(|i| para(&format!("S{i}"))).collect(),
+            sections: (0..n)
+                .map(|i| {
+                    let mut s = Section {
+                        end_block: i + 1,
+                        ..Section::default()
+                    };
+                    if i == 0 {
+                        s.headers = vec![r(HeaderFooterKind::Default, "h")];
+                    }
+                    tweak(i, &mut s);
+                    s
+                })
+                .collect(),
+            ..Document::default()
+        };
+        doc.header_footers.insert("h".into(), vec![para("HEAD")]);
+        doc
+    }
+
+    /// 继承来的同一页眉部件,在版面参数相同的各节之间只映射 / 量高 / 排版一次(按部件 + 几何缓存),
+    /// 而不是每节重做;几何不同的节才各自重做。
+    #[test]
+    fn inherited_header_is_measured_and_laid_out_once_per_geometry() {
+        let doc = inherited_header_doc(300, |_, _| {});
+        MEASURES.with(|c| c.set(0));
+        LAYOUTS.with(|c| c.set(0));
+        let (pages, _) = layout(&doc, &BTreeMap::new());
+        assert_eq!(pages.len(), 300);
+        assert!(pages.iter().all(|p| header_text(p) == "HEAD"));
+        assert_eq!(counts(), (1, 1), "(量高次数, 排版次数)");
+
+        // 偶数节左页边距不同 -> 两种几何,各量一次、各排一次。
+        let doc = inherited_header_doc(300, |i, s| {
+            if i % 2 == 1 {
+                s.margins.left = 2000;
+            }
+        });
+        MEASURES.with(|c| c.set(0));
+        LAYOUTS.with(|c| c.set(0));
+        let (pages, _) = layout(&doc, &BTreeMap::new());
+        assert!(pages.iter().all(|p| header_text(p) == "HEAD"));
+        assert_eq!(counts(), (2, 2));
     }
 
     /// 两节各自的页眉;第三节无引用 → 继承第二节。

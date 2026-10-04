@@ -600,6 +600,13 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
         let url = target.and_then(safe_url);
         let linked = url.is_some() && mode != Mode::Text;
         // 链接文字紧跟在 `[` 之后,不在行首;否则看本行迄今是否只有空白。
+        // HTML 链接:注标记不能嵌在 `<a>` 里,遇到时先闭合再重新打开(见 `run_inline`)。
+        let reopen = (linked && mode == Mode::Html)
+            .then(|| {
+                url.as_deref()
+                    .map(|u| format!("<a href=\"{}\">", escape_html(u)))
+            })
+            .flatten();
         let mut group = String::new();
         for r in &p.runs[i..end] {
             let line_start = if group.is_empty() {
@@ -607,12 +614,17 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
             } else {
                 !linked && line_blank_so_far(&group)
             };
-            group.push_str(&run_inline(r, notes, mode, line_start));
+            group.push_str(&run_inline(r, notes, mode, line_start, reopen.as_deref()));
         }
         match url {
             Some(url) if linked && !group.is_empty() => match mode {
                 Mode::Markdown => out.push_str(&format!("[{group}]({})", md_url(&url))),
-                _ => out.push_str(&format!("<a href=\"{}\">{group}</a>", escape_html(&url))),
+                _ => {
+                    let open = format!("<a href=\"{}\">", escape_html(&url));
+                    // 链接首 / 尾的注标记会留下空 `<a>`(转义后的文字里不会出现字面 `<a `),去掉。
+                    let anchored = format!("{open}{group}</a>");
+                    out.push_str(&anchored.replace(&format!("{open}</a>"), ""));
+                }
             },
             _ => out.push_str(&group),
         }
@@ -622,8 +634,15 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
 }
 
 /// 一个 run 的行内内容(文字分段 + 图片)。`line_start`:本 run 的开头是否在行首
-/// (Markdown 的块级标记转义用)。
-fn run_inline(run: &TextRun, notes: &Notes, mode: Mode, line_start: bool) -> String {
+/// (Markdown 的块级标记转义用)。`reopen`:run 位于 HTML 超链接内时该链接的开标签;注标记自带
+/// `<a>`,嵌在链接里非法,所以先 `</a>`、输出标记、再 `reopen`(文字顺序不变)。
+fn run_inline(
+    run: &TextRun,
+    notes: &Notes,
+    mode: Mode,
+    line_start: bool,
+    reopen: Option<&str>,
+) -> String {
     let mut out = String::new();
     for seg in &run.segments {
         match seg {
@@ -641,7 +660,14 @@ fn run_inline(run: &TextRun, notes: &Notes, mode: Mode, line_start: bool) -> Str
             },
             RunSegment::Tab => out.push('\t'),
             RunSegment::Break(_) => out.push_str(if mode == Mode::Html { "<br>" } else { "\n" }),
-            RunSegment::NoteRef { kind, id } => out.extend(notes.mark(*kind, *id)),
+            RunSegment::NoteRef { kind, id } => {
+                if let Some(mark) = notes.mark(*kind, *id) {
+                    match reopen {
+                        Some(open) => out.push_str(&format!("</a>{mark}{open}")),
+                        None => out.push_str(&mark),
+                    }
+                }
+            }
             RunSegment::CommentRef { .. } => {}
         }
     }
@@ -1190,6 +1216,54 @@ mod tests {
         let probes = NOTE_PROBES.with(|c| c.get());
         assert!(text.starts_with("[1][2][3]"), "编号按首次引用顺序");
         assert!(probes <= 4 * f, "probes {probes} 应 <= 4 * F = {}", 4 * f);
+    }
+
+    /// HTML:超链接内的脚注引用不能生成嵌套 `<a>`(非法):在该位置先闭合外层链接、输出注标记、
+    /// 再重新打开链接,文字顺序不变;位于链接首 / 尾的注标记不留空 `<a>`。
+    #[test]
+    fn html_note_ref_inside_hyperlink_does_not_nest_anchors() {
+        let url = Some("http://x.example/".to_string());
+        let text = |t: &str| TextRun {
+            link_target: url.clone(),
+            ..TextRun::from_text(t)
+        };
+        let note = |id: i64| TextRun {
+            segments: vec![crate::model::RunSegment::NoteRef {
+                kind: NoteKind::Footnote,
+                id,
+            }],
+            link_target: url.clone(),
+            ..Default::default()
+        };
+        let mut doc = Document {
+            body: vec![Block::Paragraph(Paragraph {
+                runs: vec![note(1), text("a"), note(2), text("b"), note(3)],
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        for id in 1..=3 {
+            doc.footnotes
+                .insert(id, vec![Block::Paragraph(para("n", None))]);
+        }
+        let html = to_html(&doc);
+        let body = html.split("<div class=\"note\"").next().unwrap().trim_end();
+        let sup = |n: u32| format!("<sup id=\"fnref-{n}\"><a href=\"#fn-{n}\">[{n}]</a></sup>");
+        let a = |t: &str| format!("<a href=\"http://x.example/\">{t}</a>");
+        assert_eq!(
+            body,
+            format!("<p>{}{}{}{}{}</p>", sup(1), a("a"), sup(2), a("b"), sup(3))
+        );
+        // 任何时刻最多打开一个 `<a`。
+        let mut open = 0i32;
+        for tok in body.split('<').skip(1) {
+            if tok.starts_with("a ") {
+                open += 1;
+                assert!(open <= 1, "嵌套 <a>:{body}");
+            } else if tok.starts_with("/a>") {
+                open -= 1;
+            }
+        }
     }
 
     #[test]
