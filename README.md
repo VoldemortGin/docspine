@@ -94,7 +94,7 @@ source instead, see below.
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python maturin pytest "pdfspine>=0.8,<0.12" ocrspine-models
+uv pip install --python .venv/bin/python maturin pytest "pdfspine>=0.8,<0.13" ocrspine-models
 VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/maturin develop --release --locked --uv
 ```
 

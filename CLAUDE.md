@@ -102,7 +102,7 @@ crates/
 
 ```bash
 uv venv .venv
-VIRTUAL_ENV="$(pwd)/.venv" uv pip install maturin pytest "pdfspine>=0.8,<0.12"   # pdfspine = test extra,缺它 PDF 测试静默 skip
+VIRTUAL_ENV="$(pwd)/.venv" uv pip install maturin pytest "pdfspine>=0.8,<0.13"   # pdfspine = test extra,缺它 PDF 测试静默 skip
 cargo test -p doc-core -p doc-parse                 # 纯解析单测,秒级
 cargo test -p doc-ocr -p doc-render                 # OCR 几何重建 + PDF 渲染单测(首次编译 ocrspine/pdf-typeset 较慢)
 OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \

@@ -35,6 +35,9 @@ change.
 - **PDF export: superscript/subscript render with a real baseline shift** via
   pdf-typeset `ResolvedScriptPlacement` (glyph ×0.65, +0.33em / −0.11em; nominal
   size kept as line strut) instead of size-only shrinking.
+- **Test extra allows pdfspine 0.12**: `pdfspine>=0.8,<0.13` (was `<0.12`) in
+  `pyproject.toml`, README and CLAUDE.md, after the full pytest suite (81 passed,
+  SSIM gate included) ran green against pdfspine 0.12.0. Cargo git revs unchanged.
 
 ### Added
 
