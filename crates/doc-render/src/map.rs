@@ -31,8 +31,9 @@ use doc_core::model::{
 };
 use doc_core::numbering::ListCounters;
 use doc_core::style::{
-    resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, EffectiveLineSpacing,
-    EffectiveParaProps, EffectiveRunProps, Justification, ParaBorders, VertAlign,
+    resolve_numbering, resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table,
+    EffectiveLineSpacing, EffectiveParaProps, EffectiveRunProps, Justification, NumRef,
+    ParaBorders, VertAlign,
 };
 use pdf_typeset::{
     Align, Block, BorderEdge, CellBorders, CharacterSpacing, ColumnWidth, ImageSpec, LineSpacing,
@@ -427,11 +428,10 @@ fn map_paragraph(
 
     // 列表标签(C-6):按文档顺序推进计数;numId=0 / 层级无定义 / numFmt=none 不产
     // 标签(缩进仍经层级 pPr 级联生效);numStyleLink 间接 v1 不解 → 一次性告警。
-    if let Some(num_id) = para.num_id {
+    if let Some(NumRef { num_id, ilvl }) = resolve_numbering(doc, para) {
         if doc.numbering.uses_num_style_link(num_id) {
             ctx.numbering_indirection();
         }
-        let ilvl = para.list_level.unwrap_or(0);
         if let Some(text) = ctx.counters.advance(&doc.numbering, num_id, ilvl) {
             // Word 列表版式:标签画在首行缩进位(left − hanging),正文**含首行**对齐
             // left。引擎把标签右对齐到首行文本起点前 gutter 处——因此清零负首行缩进
@@ -1702,6 +1702,51 @@ mod tests {
             panic!("expected a paragraph");
         };
         assert_eq!(props.indent_left, 72.0, "二级缩进 1440 twip");
+    }
+
+    /// 样式级编号(`style > pPr > numPr`,级别由 `lvl@pStyle` 反向关联)与导出共用同一解析:
+    /// 标题样式的段落无需自带 `numPr` 也画出章节号,层级缩进随之生效。
+    #[test]
+    fn style_level_numbering_draws_label_in_pdf_mapping() {
+        use doc_core::style::{ParaProps, Style};
+        let mut doc = doc_with_body(vec![
+            DocBlock::Paragraph(Paragraph {
+                style: Some("Sub".into()),
+                ..para_with_text("styled")
+            }),
+            DocBlock::Paragraph(para_with_text("plain")),
+        ]);
+        install_numbering(&mut doc);
+        // numbering 第 1 层(ilvl 1,`%2.` 小写字母)链接到样式 Sub;样式只写 numId。
+        doc.numbering
+            .abstracts
+            .get_mut(&0)
+            .and_then(|a| a.levels.get_mut(&1))
+            .expect("lvl 1")
+            .p_style = Some("Sub".into());
+        doc.styles.styles.insert(
+            "Sub".into(),
+            Style {
+                ppr: ParaProps {
+                    num_id: Some(1),
+                    ..ParaProps::default()
+                },
+                ..Style::default()
+            },
+        );
+        let blocks = &map_document(&doc).sections[0].blocks;
+        let Block::Paragraph(props, _) = &blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        assert_eq!(props.list.as_ref().map(|l| l.text.as_str()), Some("a."));
+        assert_eq!(
+            props.indent_left, 72.0,
+            "二级层缩进 1440 twip 随样式编号生效"
+        );
+        let Block::Paragraph(plain, _) = &blocks[1] else {
+            panic!("expected a paragraph");
+        };
+        assert!(plain.list.is_none());
     }
 
     /// 段内换页把列表段切成多片:标签只画在首片。

@@ -162,6 +162,7 @@ fn apply_lvl_prop(e: &BytesStart, level: &mut NumLevel) {
             }
         }
         b"lvlText" => level.lvl_text = attr_of(e, b"val").or(level.lvl_text.take()),
+        b"pStyle" => level.p_style = attr_of(e, b"val").or(level.p_style.take()),
         b"lvlJc" => {
             if let Some(j) = attr_of(e, b"val").and_then(|s| Justification::from_attr(&s)) {
                 level.jc = Some(j);

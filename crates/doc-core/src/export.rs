@@ -40,7 +40,7 @@ use crate::model::{
     VMerge,
 };
 use crate::numbering::{ListCounters, NumFmt};
-use crate::style::resolve_heading_level;
+use crate::style::{resolve_heading_level, resolve_numbering, NumRef};
 
 // ============================================================ 纯文本
 
@@ -799,8 +799,10 @@ impl<'a> Notes<'a> {
 
     /// 推进并取该段落的列表标签(必须每个段落恰好调用一次,空段也要推进计数);非列表段 `None`。
     fn list_item(&self, p: &Paragraph) -> Option<ListItem> {
-        let num_id = p.num_id?;
-        let level = p.list_level.unwrap_or(0);
+        let NumRef {
+            num_id,
+            ilvl: level,
+        } = resolve_numbering(self.doc, p)?;
         let label = self
             .counters
             .borrow_mut()

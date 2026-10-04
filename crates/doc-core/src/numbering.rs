@@ -67,6 +67,9 @@ pub struct NumLevel {
     pub fmt: NumFmt,
     /// 标签模板(`w:lvlText@w:val`,如 `"%1."` / `"%1.%2"` / 圆点字面)。
     pub lvl_text: Option<String>,
+    /// 链接的段落样式(`w:pStyle@w:val`):使用该样式的段落即落在本层
+    /// (标题样式链接多级列表的反向关联,见 [`NumberingTable::level_for_style`])。
+    pub p_style: Option<String>,
     /// 编号对齐(`w:lvlJc@w:val`;v1 仅刻画,渲染侧标签一律右对齐到正文起点)。
     pub jc: Option<Justification>,
     /// 层级段落属性(`w:lvl > w:pPr`,主要是 `w:ind` 缩进)。级联位置:样式层之下、
@@ -131,6 +134,17 @@ impl NumberingTable {
             }
         }
         self.abstracts.get(&num.abstract_id)?.levels.get(&ilvl)
+    }
+
+    /// 样式 `style_id` 在编号 `num_id` 里链接到的层级(`w:lvl > w:pStyle`;只看 abstractNum 的层,
+    /// 多层同链接取最小 `ilvl`);没有链接 `None`。
+    pub fn level_for_style(&self, num_id: u32, style_id: &str) -> Option<u32> {
+        let num = self.nums.get(&num_id)?;
+        let abs = self.abstracts.get(&num.abstract_id)?;
+        abs.levels
+            .iter()
+            .find(|(_, l)| l.p_style.as_deref() == Some(style_id))
+            .map(|(ilvl, _)| *ilvl)
     }
 
     /// 一层的有效起值:`startOverride` > `w:start` > 1。

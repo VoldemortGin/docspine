@@ -623,6 +623,11 @@ pub struct ParaProps {
     /// 大纲级别(`w:outlineLvl@w:val`,0–8 = 1–9 级标题,9 = 正文)。标题识别用,见
     /// [`resolve_heading_level`];渲染不消费。
     pub outline_lvl: Option<u8>,
+    /// 编号实例(`w:numPr > w:numId@w:val`)。样式里的 `numPr` 靠它参与级联;
+    /// 有效编号见 [`resolve_numbering`](段落自身的 `Paragraph.num_id` 优先)。
+    pub num_id: Option<u32>,
+    /// 编号级别(`w:numPr > w:ilvl@w:val`),同上。
+    pub num_ilvl: Option<u32>,
 }
 
 impl ParaProps {
@@ -1026,6 +1031,62 @@ pub fn resolve_heading_level(doc: &Document, para: &Paragraph) -> Option<u8> {
     by_name.or_else(|| para.style.as_deref().and_then(heading_level_from_name))
 }
 
+/// 段落的有效编号:编号实例 + 级别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumRef {
+    /// 编号实例 id(`w:numId`,非 0)。
+    pub num_id: u32,
+    /// 级别(`w:ilvl`,0 起)。
+    pub ilvl: u32,
+}
+
+/// 段落的**有效编号**(PDF 映射与三种导出共用的唯一入口)。优先级:
+/// 1. 段落自身 `numPr`:`numId=0` 是显式取消(胜过样式),否则用它(`ilvl` 缺省 0);
+/// 2. 否则沿样式 `basedOn` 链**就近**取 `numPr.numId`(无 `pStyle` 时用缺省段落样式),
+///    派生样式写 `numId=0` 即取消继承;
+/// 3. 样式来源的级别:段落自身只写了 `ilvl` 则用它;否则**先**看 `numbering.xml` 里
+///    `lvl@pStyle` 链接到该样式(沿链就近)的层 —— ECMA-376 §17.9.23:样式含编号定义时,
+///    `numPr` 里的级别被忽略,级别由 `lvl@pStyle` 决定(与 Word 一致);无链接才用样式
+///    `numPr.ilvl`,再缺省 0。
+///
+/// basedOn 成环、悬空引用都会截断,有限步终止;`numId` 未登记时仍返回(由调用方按 `None` 标签处理)。
+pub fn resolve_numbering(doc: &Document, para: &Paragraph) -> Option<NumRef> {
+    if let Some(num_id) = para.num_id {
+        return (num_id != 0).then(|| NumRef {
+            num_id,
+            ilvl: para.list_level.unwrap_or(0),
+        });
+    }
+    let st = &doc.styles;
+    // 就近优先(段落样式在前,其 basedOn 祖先在后),带 styleId 供反向关联。
+    let mut chain: Vec<(&str, &Style)> = Vec::new();
+    let mut cur = para.style.as_deref().or(st.default_para_style.as_deref());
+    while let Some(sid) = cur {
+        if chain.iter().any(|(id, _)| *id == sid) {
+            break; // basedOn 成环:截断。
+        }
+        let Some(style) = st.styles.get(sid) else {
+            break; // 悬空引用:截断。
+        };
+        chain.push((sid, style));
+        cur = style.based_on.as_deref();
+    }
+    let num_id = chain.iter().find_map(|(_, s)| s.ppr.num_id)?;
+    if num_id == 0 {
+        return None;
+    }
+    let ilvl = para
+        .list_level
+        .or_else(|| {
+            chain
+                .iter()
+                .find_map(|(id, _)| doc.numbering.level_for_style(num_id, id))
+        })
+        .or_else(|| chain.iter().find_map(|(_, s)| s.ppr.num_ilvl))
+        .unwrap_or(0);
+    Some(NumRef { num_id, ilvl })
+}
+
 /// 沿 `basedOn` 走出一条样式链,**根(最基)在前**。visited-set 防环:重访即截断,
 /// 有限步终止(环告警见 [`StyleTable::validate`]);未知 id 处链截断。
 fn style_chain<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<&'a Style> {
@@ -1198,8 +1259,8 @@ fn resolve_para_props(
     for s in &chain {
         merged.overlay_values(&s.ppr);
     }
-    if let Some(num_id) = para.num_id {
-        if let Some(level) = doc.numbering.level(num_id, para.list_level.unwrap_or(0)) {
+    if let Some(n) = resolve_numbering(doc, para) {
+        if let Some(level) = doc.numbering.level(n.num_id, n.ilvl) {
             merged.overlay_values(&level.ppr);
         }
     }

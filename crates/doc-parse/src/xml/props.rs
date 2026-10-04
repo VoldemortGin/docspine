@@ -193,6 +193,9 @@ pub fn parse_ppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> ParaProps {
 /// 见 [`parse_ppr`] / [`parse_pbdr`])。document.rs 的直接 pPr walker 也复用本函数。
 pub fn apply_ppr_prop(e: &BytesStart, p: &mut ParaProps) {
     match local_name(e.name().as_ref()) {
+        // `w:numPr` 的子元素:样式里的编号靠它级联(见 `doc_core::style::resolve_numbering`)。
+        b"numId" => p.num_id = attr_of(e, b"val").and_then(|s| s.parse().ok()),
+        b"ilvl" => p.num_ilvl = attr_of(e, b"val").and_then(|s| s.parse().ok()),
         b"jc" => {
             if let Some(j) = attr_of(e, b"val").and_then(|s| Justification::from_attr(&s)) {
                 p.jc = Some(j);
