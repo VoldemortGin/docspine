@@ -1,5 +1,7 @@
 //! 页码格式(`w:pgNumType@w:fmt`)与页码文字化:纯函数,无 IO。
 
+use crate::numbering::MAX_LIST_NUMBER;
+
 /// 页码格式(`w:pgNumType@w:fmt`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageNumFormat {
@@ -32,7 +34,7 @@ impl PageNumFormat {
     }
 }
 
-/// 把页码 `n` 按 `fmt` 文字化。罗马数字只覆盖 1..=3999、字母格式只覆盖 n >= 1,
+/// 把页码 `n` 按 `fmt` 文字化。罗马数字只覆盖 1..=3999、字母格式只覆盖 1..=32767,
 /// 范围外降级为阿拉伯数字;`Other` 一律阿拉伯数字。
 pub fn format_page_number(n: i64, fmt: PageNumFormat) -> String {
     let text = match fmt {
@@ -76,9 +78,10 @@ fn roman(n: i64) -> Option<String> {
     Some(out)
 }
 
-/// 小写字母页码(Word 规则):1..=26 → a..z,27..=52 → aa..zz,53.. → aaa…(同一字母重复),n >= 1。
+/// 小写字母页码(Word 规则):1..=26 → a..z,27..=52 → aa..zz,53.. → aaa…(同一字母重复),
+/// 1 <= n <= [`MAX_LIST_NUMBER`](32767,Word 上限;更大的 n 会按 n/26 重复分配,退回阿拉伯数字)。
 fn letters(n: i64) -> Option<String> {
-    if n < 1 {
+    if !(1..=MAX_LIST_NUMBER).contains(&n) {
         return None;
     }
     let idx = (n - 1) % 26;
@@ -149,6 +152,16 @@ mod tests {
     fn letters_out_of_range_degrade_to_arabic() {
         assert_eq!(f(0, PageNumFormat::LowerLetter), "0");
         assert_eq!(f(-1, PageNumFormat::UpperLetter), "-1");
+    }
+
+    /// 页码起值可达 u32 上限:字母格式不得按 n/26 重复分配(上限 32767,超出回退十进制)。
+    #[test]
+    fn huge_letter_page_numbers_degrade_to_arabic() {
+        assert_eq!(f(32_767, PageNumFormat::LowerLetter).len(), 1261);
+        for n in [32_768, 4_294_967_295, i64::MAX] {
+            assert_eq!(f(n, PageNumFormat::LowerLetter), n.to_string());
+            assert_eq!(f(n, PageNumFormat::UpperLetter), n.to_string());
+        }
     }
 
     #[test]

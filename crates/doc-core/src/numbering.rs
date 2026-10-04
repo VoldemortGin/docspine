@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::page_number::{format_page_number, PageNumFormat};
 use crate::style::{Justification, ParaProps, RunProps};
 
 /// 编号格式(`w:numFmt@w:val` 的常用子集;未知值按 decimal 容错)。
@@ -181,7 +182,7 @@ impl ListCounters {
         let level = table.level(num_id, ilvl)?;
         let per = self.counts.entry(num_id).or_default();
         let n = match per.get(&ilvl) {
-            Some(v) => v + 1,
+            Some(v) => v.saturating_add(1),
             None => table.start(num_id, ilvl),
         };
         per.insert(ilvl, n);
@@ -275,21 +276,25 @@ pub fn format_number(fmt: NumFmt, n: i64) -> String {
     }
 }
 
+/// Word 列表 / 页码编号的上限(32767):`numFmt` 为字母 / 罗马时,超出(含 `w:start` 给的极端起值)
+/// 回退十进制,避免按 `n / 26` 重复分配或按 `n / 1000` 循环。
+pub const MAX_LIST_NUMBER: i64 = 32_767;
+
 /// 字母编号(Word 语义:1..26 = a..z;超过 26 **重复同字母**,27 = aa、28 = bb)。
-/// 非正数无字母形,按十进制兜底。
+/// 与页码字母格式同一实现([`format_page_number`]);非正数 / 超上限按十进制兜底。
 fn letter(n: i64, upper: bool) -> String {
-    if n < 1 {
-        return n.to_string();
-    }
-    let idx = ((n - 1) % 26) as u8;
-    let reps = ((n - 1) / 26 + 1) as usize;
-    let ch = (if upper { b'A' } else { b'a' } + idx) as char;
-    ch.to_string().repeat(reps)
+    let fmt = if upper {
+        PageNumFormat::UpperLetter
+    } else {
+        PageNumFormat::LowerLetter
+    };
+    format_page_number(n, fmt)
 }
 
-/// 罗马数字(标准减法记法)。非正数无罗马形,按十进制兜底。
+/// 罗马数字(标准减法记法)。非正数 / 超过 [`MAX_LIST_NUMBER`] 无罗马形,按十进制兜底。
+/// (页码罗马只覆盖 1..=3999,与列表的 32767 上限不同,故不与 `page_number` 共用。)
 fn roman(n: i64, upper: bool) -> String {
-    if n < 1 {
+    if !(1..=MAX_LIST_NUMBER).contains(&n) {
         return n.to_string();
     }
     const PAIRS: [(i64, &str); 13] = [
@@ -488,6 +493,77 @@ mod tests {
         assert_eq!(format_number(NumFmt::UpperRoman, 9), "IX");
         assert_eq!(format_number(NumFmt::LowerRoman, 0), "0");
         assert_eq!(format_number(NumFmt::UpperLetter, -3), "-3");
+    }
+
+    /// 极端起值:超过 Word 列表编号上限(32767)的字母 / 罗马格式回退十进制,立即返回
+    /// (曾 `repeat(n/26)` capacity overflow、罗马循环 n/1000 次近似死循环)。
+    #[test]
+    fn huge_numbers_fall_back_to_decimal_immediately() {
+        let t0 = std::time::Instant::now();
+        for n in [
+            32_768,
+            1_000_000_000_000,
+            9_000_000_000_000_000_000,
+            i64::MAX,
+        ] {
+            for fmt in [
+                NumFmt::LowerLetter,
+                NumFmt::UpperLetter,
+                NumFmt::LowerRoman,
+                NumFmt::UpperRoman,
+            ] {
+                assert_eq!(format_number(fmt, n), n.to_string(), "{fmt:?} {n}");
+            }
+        }
+        assert!(t0.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// 32767 边界:仍是字母 / 罗马形;32768 起回退十进制。0 与负数一律十进制。
+    #[test]
+    fn list_number_limit_boundary() {
+        assert_eq!(format_number(NumFmt::LowerLetter, 32_767).len(), 1261);
+        assert_eq!(format_number(NumFmt::LowerRoman, 32_767).len(), 32 + 8);
+        assert_eq!(format_number(NumFmt::UpperRoman, 32_767).len(), 32 + 8);
+        assert_eq!(format_number(NumFmt::LowerLetter, 32_768), "32768");
+        assert_eq!(format_number(NumFmt::LowerRoman, 32_768), "32768");
+        for fmt in [NumFmt::LowerLetter, NumFmt::UpperRoman] {
+            assert_eq!(format_number(fmt, 0), "0");
+            assert_eq!(format_number(fmt, -7), "-7");
+            assert_eq!(format_number(fmt, i64::MIN), i64::MIN.to_string());
+        }
+    }
+
+    /// 计数自增到 i64::MAX 不溢出(debug 下 `v + 1` 会 panic),此后停在上限。
+    #[test]
+    fn counter_saturates_at_i64_max() {
+        let mut t = table_with_levels(vec![(0, lvl(NumFmt::Decimal, "%1."))], &[1]);
+        t.nums.get_mut(&1).unwrap().overrides.insert(
+            0,
+            LevelOverride {
+                start_override: Some(i64::MAX - 1),
+                ..LevelOverride::default()
+            },
+        );
+        let mut c = ListCounters::new();
+        let labels: Vec<_> = (0..3)
+            .map(|_| c.advance(&t, 1, 0).expect("label"))
+            .collect();
+        let max = i64::MAX.to_string();
+        assert_eq!(labels[0], format!("{}.", i64::MAX - 1));
+        assert_eq!(labels[1], format!("{max}."));
+        assert_eq!(labels[2], format!("{max}."));
+    }
+
+    /// 极端起值经 `w:start` 配字母 / 罗马格式走完整 advance 路径同样立即返回。
+    #[test]
+    fn extreme_start_value_in_advance_does_not_hang() {
+        for fmt in [NumFmt::LowerLetter, NumFmt::UpperRoman] {
+            let mut lv = lvl(fmt, "%1.");
+            lv.start = Some(9_000_000_000_000_000_000);
+            let t = table_with_levels(vec![(0, lv)], &[1]);
+            let mut c = ListCounters::new();
+            assert_eq!(c.advance(&t, 1, 0).as_deref(), Some("9000000000000000000."));
+        }
     }
 
     /// `%%` 转义与越界 `%` 容错;未开始的祖先层用起值。
