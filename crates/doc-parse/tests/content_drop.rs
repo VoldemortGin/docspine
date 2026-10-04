@@ -532,8 +532,10 @@ fn inline_omath_text_extracted_in_document_order() {
              <w:r><w:t> end</w:t></w:r></w:p>"#
     ));
     let txt = to_text(&parsed.document);
-    assert_eq!(txt, "Let x1/2y^3 end");
-    assert!(to_markdown(&parsed.document).contains("x1/2y^3"));
+    // 复审:原期望 `x1/2y^3` 本身是错的(读成 x1 除以 2y³)。x 与分式、分式与 y^3 之间是乘法:
+    // 分式整体加括号、结构与相邻项之间一个空格。
+    assert_eq!(txt, "Let x (1/2) y^3 end");
+    assert!(to_markdown(&parsed.document).contains("x \\(1/2\\) y^3"));
 }
 
 #[test]
@@ -746,13 +748,14 @@ fn omath_structures_inside_transparent_containers_are_linearized() {
     // 定界符 m:d > m:e > m:f:括号来自 `m:d` 的缺省 `(` `)`(原先输出 `1/2`,括号被丢)。
     assert_eq!(math_text(&format!("<m:d><m:e>{frac}</m:e></m:d>")), "(1/2)");
     // 大运算符 m:nary > m:e > m:f:缺省运算符 ∫,下限 `_i`,被积式前一个空格
-    // (原先输出 `i1/2`,运算符被丢、下限与被积式粘连)。
+    // (原先输出 `i1/2`,运算符被丢、下限与被积式粘连)。被积式 `1/2` 不是原子,加括号
+    // (第二轮复审:被作用式非原子一律加括号,免得后续内容的归属不明)。
     assert_eq!(
         math_text(&format!(
             "<m:nary><m:naryPr/><m:sub>{}</m:sub><m:e>{frac}</m:e></m:nary>",
             mr("i")
         )),
-        "∫_i 1/2"
+        "∫_i (1/2)"
     );
     // 函数 m:func > m:fName + m:e > m:f:自变量非原子,加括号(原先输出 `sin1/2`,读作 sin1 除以 2)。
     assert_eq!(
@@ -912,7 +915,8 @@ fn omath_prescripts_limits_functions_matrix() {
         mr("14"),
         mr("C")
     );
-    assert_eq!(math_text(&pre), "_6^14 C");
+    // 前置上下标整体包在括号里紧贴底数(原 `_6^14 C` 的空格会让上下标看起来属于前项)。
+    assert_eq!(math_text(&pre), "(_6^14)C");
     // m:limLow / m:limUpp。
     let lim = format!(
         "<m:limLow><m:e>{}</m:e><m:lim>{}</m:lim></m:limLow>",
@@ -1002,19 +1006,22 @@ fn omath_nested_structures_follow_atom_rule() {
     );
 }
 
-/// 原子判定边界:`2x` / `x1` / `3.14` / `(a)` 是原子(不加括号);`-1` / `a b` / `(a)(b)` 不是;空槽位不加括号。
+/// 原子判定边界:单字母 / 数字串(`3.14`)/ 被匹配括号完整包住(`(a)`)是原子(不加括号);
+/// `2x` / `x1` / `α2` / `汉字`(多字符)、`-1` / `a b` / `(a)(b)` 不是;空槽位不加括号。
+/// (第二轮复审:原先把纯字母数字串都当原子,`x^2x` 读不出是 x^(2x) 还是 x²·x。)
 #[test]
 fn omath_atom_boundaries() {
     let s = |t: &str| math_text(&sup(&mr("x"), &mr(t)));
-    assert_eq!(s("2x"), "x^2x");
-    assert_eq!(s("x1"), "x^x1");
+    assert_eq!(s("2x"), "x^(2x)");
+    assert_eq!(s("x1"), "x^(x1)");
     assert_eq!(s("3.14"), "x^3.14");
     assert_eq!(s("(a)"), "x^(a)");
     assert_eq!(s("-1"), "x^(-1)");
     assert_eq!(s("(a)(b)"), "x^((a)(b))");
     assert_eq!(s("a b"), "x^(a b)");
-    assert_eq!(s("α2"), "x^α2");
-    assert_eq!(s("汉字"), "x^汉字");
+    assert_eq!(s("α2"), "x^(α2)");
+    assert_eq!(s("汉字"), "x^(汉字)");
+    assert_eq!(s("α"), "x^α");
     // 空槽位:不加括号(沿用 `x^` 的缺省输出)。
     assert_eq!(
         math_text("<m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup/></m:sSup>"),
@@ -1062,4 +1069,140 @@ fn deeply_nested_math_structures_no_stack_overflow() {
         "{}",
         txt.len()
     );
+}
+
+// ---- 公式线性化(复审第二轮):结构与相邻项的衔接、原子判定收窄。
+// 读法约定(见 `xml/math.rs` 模块文档):原子 = 单字母 / 数字串 / 被匹配括号完整包住的串;
+// `^` `_` `/` 只结合紧挨着的原子;空格分隔的相邻项是乘法;`+ - =` 等运算符优先级最低。
+
+fn sub(base: &str, s: &str) -> String {
+    format!("<m:sSub><m:e>{base}</m:e><m:sub>{s}</m:sub></m:sSub>")
+}
+
+fn func_of(name: &str, arg: &str) -> String {
+    format!(
+        "<m:func><m:fName>{}</m:fName><m:e>{arg}</m:e></m:func>",
+        mr(name)
+    )
+}
+
+/// 带分数 / 系数:`3` 后接分式原先输出 `31/2`(会读成 15.5),`x` 后接分式输出 `x1/2`。
+#[test]
+fn omath_number_or_letter_before_fraction_is_separated() {
+    let half = frac(&mr("1"), &mr("2"));
+    // 分式与乘法项相邻:分式整体加括号并用空格隔开,读作 3·(1/2),不会被读成 31/2。
+    assert_eq!(math_text(&(mr("3") + &half)), "3 (1/2)");
+    assert_eq!(math_text(&(mr("x") + &half)), "x (1/2)");
+    // 分式在前、乘法项在后:`(1/2) x` 不会被读成 1/(2x)。
+    assert_eq!(math_text(&(half.clone() + &mr("x"))), "(1/2) x");
+    // 与低优先级运算符相邻时不必加括号:3+1/2 按优先级本就是 3+(1/2)。
+    assert_eq!(math_text(&(mr("3+") + &half)), "3+1/2");
+    assert_eq!(math_text(&(half + &mr("=y"))), "1/2=y");
+}
+
+/// `1/(2x)` 与 `(1/2)·x` 原先都输出 `1/2x`:两个不同的式子必须输出不同文本。
+#[test]
+fn omath_fraction_with_compound_denominator_differs_from_fraction_times_x() {
+    let a = math_text(&frac(&mr("1"), &mr("2x")));
+    let b = math_text(&(frac(&mr("1"), &mr("2")) + &mr("x")));
+    // `2x` 不是原子,作分母加括号;后者分式整体加括号再接 x。
+    assert_eq!(a, "1/(2x)");
+    assert_eq!(b, "(1/2) x");
+    assert_ne!(a, b);
+}
+
+/// 多字符底数:`(2x)²` 原先与 `2·x²` 都输出 `2x^2`;`(ab)²` 输出 `ab^2`。
+#[test]
+fn omath_multichar_base_is_parenthesized_and_coefficient_is_separated() {
+    assert_eq!(math_text(&sup(&mr("2x"), &mr("2"))), "(2x)^2");
+    // 系数 2 与结构 x^2 之间一个空格:读作 2·x²。
+    assert_eq!(math_text(&(mr("2") + &sup(&mr("x"), &mr("2")))), "2 x^2");
+    assert_eq!(math_text(&sup(&mr("ab"), &mr("2"))), "(ab)^2");
+    // 重音同理:`ab` 不是原子,加括号后再挂重音符;单字母带重音仍是原子。
+    let acc = |b: &str| {
+        format!(
+            r#"<m:acc><m:accPr><m:chr m:val="̇"/></m:accPr><m:e>{}</m:e></m:acc>"#,
+            mr(b)
+        )
+    };
+    assert_eq!(math_text(&acc("ab")), "(ab)\u{307}");
+    assert_eq!(math_text(&acc("x")), "x\u{307}");
+    assert_eq!(
+        math_text(&sup(&acc("x"), &mr("2"))),
+        "x\u{307}^2",
+        "带组合重音的单字母是原子"
+    );
+}
+
+/// 上下标后接内容:`x^23` / `x_12` / `e^xy` / `x^2y^2` 都会把后项读进上下标。
+#[test]
+fn omath_scripts_are_separated_from_following_terms() {
+    // 上标只结合紧挨着的原子 `2`;空格之后的 3 是乘法项。
+    assert_eq!(math_text(&(sup(&mr("x"), &mr("2")) + &mr("3"))), "x^2 3");
+    assert_eq!(math_text(&(sub(&mr("x"), &mr("1")) + &mr("2"))), "x_1 2");
+    assert_eq!(math_text(&(sup(&mr("e"), &mr("x")) + &mr("y"))), "e^x y");
+    assert_eq!(
+        math_text(&(sup(&mr("x"), &mr("2")) + &sup(&mr("y"), &mr("2")))),
+        "x^2 y^2"
+    );
+    // 运算符本身就是分隔:不加空格。
+    assert_eq!(math_text(&(sup(&mr("x"), &mr("2")) + &mr("+1"))), "x^2+1");
+}
+
+/// 相邻函数:`sin x` 后接 `cos x` 原先输出 `sin xcos x`。
+#[test]
+fn omath_adjacent_functions_are_separated() {
+    let s = func_of("sin", &mr("x"));
+    let c = func_of("cos", &mr("x"));
+    // 前一个函数右侧紧邻乘法项:自变量改写成括号形式,杜绝读成 sin(x cos x)。
+    assert_eq!(math_text(&(s.clone() + &c)), "sin(x) cos x");
+    // 真正的 sin(x cos x) 输出不同。
+    assert_eq!(math_text(&func_of("sin", &(mr("x") + &c))), "sin(x cos x)");
+    assert_eq!(math_text(&(s + &mr("y"))), "sin(x) y");
+}
+
+/// 前置上下标:`x` 后接 `₆¹⁴C` 原先输出 `x_6^14 C`(上下标挂到了 x 上)。
+#[test]
+fn omath_prescript_after_term_binds_to_its_own_base() {
+    let pre = format!(
+        "<m:sPre><m:sub>{}</m:sub><m:sup>{}</m:sup><m:e>{}</m:e></m:sPre>",
+        mr("6"),
+        mr("14"),
+        mr("C")
+    );
+    // 前置上下标整体包在括号里紧贴底数 C,与前项 x 之间一个空格。
+    assert_eq!(math_text(&(mr("x") + &pre)), "x (_6^14)C");
+}
+
+/// 求和的被加式:`x_i+1` 原先输出 `∑_(i=1)^n x_i+1`,看不出 +1 在不在求和内。
+#[test]
+fn omath_nary_operand_scope_is_explicit() {
+    let sum = |e: &str| {
+        format!(
+            r#"<m:nary><m:naryPr><m:chr m:val="∑"/></m:naryPr><m:sub>{}</m:sub><m:sup>{}</m:sup><m:e>{e}</m:e></m:nary>"#,
+            mr("i=1"),
+            mr("n")
+        )
+    };
+    let xi = sub(&mr("x"), &mr("i"));
+    // +1 在求和内:被加式非原子,加括号。
+    assert_eq!(
+        math_text(&sum(&(xi.clone() + &mr("+1")))),
+        "∑_(i=1)^n (x_i+1)"
+    );
+    // +1 在求和外:被加式是带下标的原子 `x_i`,不加括号;`+` 优先级最低,读作 (∑ x_i)+1。
+    assert_eq!(math_text(&(sum(&xi) + &mr("+1"))), "∑_(i=1)^n x_i+1");
+    // 求和后紧跟乘法项:整个求和加括号,y 不在求和内。
+    assert_eq!(math_text(&(sum(&xi) + &mr("y"))), "(∑_(i=1)^n x_i) y");
+}
+
+/// `m:d` 的 `sepChr=""`:原先两个 `m:e` 粘成一项 `(ab)`。
+#[test]
+fn omath_delimiter_with_empty_separator_keeps_elements_apart() {
+    let d = format!(
+        r#"<m:d><m:dPr><m:sepChr m:val=""/></m:dPr><m:e>{}</m:e><m:e>{}</m:e></m:d>"#,
+        mr("a"),
+        mr("b")
+    );
+    assert_eq!(math_text(&d), "(a b)");
 }

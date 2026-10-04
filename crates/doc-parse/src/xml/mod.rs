@@ -5,6 +5,7 @@
 //! - [`numbering`]:解析 `word/numbering.xml`(编号层级 + 实例 -> `NumberingTable`,C-6)。
 //! - [`theme`]:解析 `word/theme/theme1.xml`(fontScheme + clrScheme -> `Theme`,C-5)。
 //! - [`settings`]:解析 `word/settings.xml`(缺省制表位间隔,C-9)。
+//! - `math`:公式 `m:oMath` / `m:oMathPara` 的线性化(规则见该模块文档)。
 //! - [`props`]:document.xml 与 styles.xml 共用的 rPr / pPr / 表格属性片段解析器。
 //!
 //! 本模块根放**关系(`.rels`)解析**与一批被多处复用的小工具(本地名、属性读取、跳树等)。
@@ -12,6 +13,7 @@
 
 pub mod core_props;
 pub mod document;
+mod math;
 pub mod numbering;
 pub mod props;
 pub mod settings;
