@@ -174,6 +174,14 @@ change.
 
 ### Fixed
 
+- **Complex-field state no longer leaks out of a rejected `mc:Choice`.** The
+  `mc:AlternateContent` try-parse runs each `mc:Choice` until one yields content;
+  a Choice that yielded nothing but had already advanced the `w:fldChar` stack
+  (an unpaired `begin` / `separate`) left its frame behind, so the text after the
+  `mc:AlternateContent` was marked as field result (`TextRun.field`) or the stack
+  stayed stuck in the instruction region and later fields were never marked. The
+  field stack is now snapshotted before each Choice and restored when that Choice
+  is rejected, so only the selected branch advances it.
 - **Parsing no longer silently drops content**: `w:moveTo` (kept; `w:moveFrom`
   dropped), `w:smartTag`, `w:customXml` (block + inline), `mc:AlternateContent`
   (first `mc:Choice` that yields content, else `mc:Fallback`), and floating text

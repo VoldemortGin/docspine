@@ -57,7 +57,7 @@ struct Ctx<'a> {
 }
 
 /// 复杂字段(`w:fldChar` begin / separate / end)的嵌套栈。
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct FieldStack {
     frames: Vec<FieldFrame>,
     /// 仍处在指令区(未遇 `separate`)的帧数:为 0 且栈非空时当前位置是可见的字段结果。
@@ -65,6 +65,7 @@ struct FieldStack {
 }
 
 /// 一层复杂字段:指令文字(`w:instrText` 拼接)+ 是否已进入结果区。
+#[derive(Clone)]
 struct FieldFrame {
     instr: String,
     in_result: bool,
@@ -1353,6 +1354,8 @@ fn parse_custom_xml_cells<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx
 /// 试解析,第一个 `is_empty` 判否(即本解析器认得其中元素、产出了内容)的分支即被
 /// 选中;全部为空则取 `mc:Fallback` 的解析结果。流式 reader 无法回退,故各分支都
 /// 顺序解析一遍、选中后其余丢弃——同一内容的 Choice/Fallback 两份绝不重复输出。
+/// 复杂字段栈([`FieldStack`])同理只认选中分支:试解析落选的 Choice 推进过的字段状态在
+/// 落选时回滚,否则它残留的 `begin` / `separate` 会把后续正文误标成字段(或卡在指令区)。
 /// 三层调用方共用本策略:块级([`parse_block_container`])、run 容器级
 /// ([`parse_run_container`])、run 内([`parse_run`])。
 fn parse_alternate_content<R, T>(
@@ -1375,9 +1378,15 @@ where
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"Choice" if chosen.is_none() => {
+                    // 病态的超深字段栈不做快照(防止对抗输入下的二次方拷贝)。
+                    let snapshot = Some(ctx.fields.borrow())
+                        .filter(|st| st.frames.len() <= MAX_NEST_DEPTH as usize)
+                        .map(|st| st.clone());
                     let v = parse(reader, ctx);
                     if !is_empty(&v) {
                         chosen = Some(v);
+                    } else if let Some(snapshot) = snapshot {
+                        *ctx.fields.borrow_mut() = snapshot;
                     }
                 }
                 b"Fallback" if chosen.is_none() && fallback.is_none() => {
