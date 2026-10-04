@@ -13,6 +13,7 @@
 //! - 只有空段落的部件视同无页眉 / 页脚(不画、不占高、不告警)。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use doc_core::geom::twips_to_points;
 use doc_core::model::{Block as DocBlock, Document, RunSegment, Section};
@@ -317,7 +318,7 @@ fn substitute_in(blocks: &mut [DocBlock], page_number: i64, total: usize, sect_f
     for block in blocks {
         match block {
             DocBlock::Paragraph(p) => {
-                let mut prev: Option<String> = None;
+                let mut prev: Option<Arc<str>> = None;
                 for run in &mut p.runs {
                     let value = run
                         .field
@@ -511,7 +512,7 @@ mod tests {
         if cached.is_empty() {
             run.segments.clear();
         }
-        run.field = Some(instr.to_string());
+        run.field = Some(instr.into());
         run
     }
 

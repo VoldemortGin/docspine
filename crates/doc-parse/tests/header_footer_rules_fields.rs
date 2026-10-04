@@ -47,7 +47,10 @@ fn first_para(d: &ParsedDoc) -> &Paragraph {
 
 /// `(run 文字, field)` 序列,便于整体断言。
 fn runs(p: &Paragraph) -> Vec<(String, Option<String>)> {
-    p.runs.iter().map(|r| (r.text(), r.field.clone())).collect()
+    p.runs
+        .iter()
+        .map(|r| (r.text(), r.field.as_deref().map(str::to_string)))
+        .collect()
 }
 
 fn some(s: &str) -> Option<String> {

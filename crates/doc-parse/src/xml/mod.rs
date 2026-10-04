@@ -53,6 +53,8 @@ pub struct PartStats {
     pub alt_chunks: usize,
     /// 超过 `MAX_NOTES` 被丢弃的脚注 / 尾注 / 批注条目数。
     pub notes_dropped: usize,
+    /// 因超长被截断的字段指令数。
+    pub field_instr_truncated: usize,
 }
 
 /// 一份 XML 是否完整良构地读到了结尾。各 walker 遇读错误都是 `break`、返回已解析的部分;

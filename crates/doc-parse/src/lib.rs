@@ -307,6 +307,7 @@ fn parse_part<T>(
         (DiagnosticKind::MissingPart, s.missing_media),
         (DiagnosticKind::AltChunkNotImported, s.alt_chunks),
         (DiagnosticKind::NotesTruncated, s.notes_dropped),
+        (DiagnosticKind::FieldInstrTruncated, s.field_instr_truncated),
     ] {
         add_diag(diags, kind, part, n);
     }

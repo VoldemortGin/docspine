@@ -11,6 +11,7 @@
 //!   区分 `restart` 起始格与 `continue` 延续格)。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::geom::{Emu, Twips};
 use crate::numbering::NumberingTable;
@@ -122,6 +123,8 @@ pub enum DiagnosticKind {
     StyleChainTruncated,
     /// 脚注 / 尾注 / 批注部件的条目数超过 [`MAX_NOTES`],多余条目被丢弃(计数 = 丢弃的条目数)。
     NotesTruncated,
+    /// 某个字段指令超过 [`MAX_FIELD_INSTR`] 被截断(计数 = 被截断的字段数)。
+    FieldInstrTruncated,
 }
 
 impl DiagnosticKind {
@@ -137,6 +140,7 @@ impl DiagnosticKind {
             DiagnosticKind::AltChunkNotImported => "alt-chunk-not-imported",
             DiagnosticKind::StyleChainTruncated => "style-chain-truncated",
             DiagnosticKind::NotesTruncated => "notes-truncated",
+            DiagnosticKind::FieldInstrTruncated => "field-instr-truncated",
         }
     }
 }
@@ -443,7 +447,8 @@ pub struct TextRun {
     /// 去首尾空白的原文,如 `"PAGE \* MERGEFORMAT"`);`None` = 不在字段结果里。
     /// 正文与导出照用缓存结果文字;PDF 渲染页眉页脚时 `PAGE` / `NUMPAGES` 换成真实值。
     /// 无缓存结果的字段留一个无分段、只带本标记的 run。
-    pub field: Option<String>,
+    /// `Arc<str>`:同一字段结果区里的所有 run 共享同一份指令;指令至多 [`MAX_FIELD_INSTR`] 字节。
+    pub field: Option<Arc<str>>,
 }
 
 /// 一个浮动文本框(`w:txbxContent`)的内容:段落与表格的块序列。
@@ -568,6 +573,12 @@ pub const MAX_TABLE_COLS: usize = 63;
 /// 超出时只映射前 `预算 / 列数` 行并告警(`table-over-budget`),不中止进程。取值依据:63 列
 /// 满宽时约 4 000 行,覆盖实际文档(几千行 × 十来列),占用约几十 MiB。
 pub const MAX_TABLE_CELLS: usize = 250_000;
+
+/// 单个字段指令(`w:instrText` 拼接 / `w:fldSimple@w:instr`)保留的最大字节数,超出截断并记
+/// `field-instr-truncated` 诊断。取值依据:渲染只认指令的首词(`PAGE` / `NUMPAGES`)与 `\*` 格式开关,
+/// 真实指令至多几百字节(`HYPERLINK` 受 URL 上限约 2 KB 约束);4 KiB 已是最长合法写法的两倍,
+/// 同时把「指令长度 × 结果 run 数」之类的放大钉死在常数上。
+pub const MAX_FIELD_INSTR: usize = 4096;
 
 /// 单个脚注 / 尾注 / 批注部件最多收录的条目数。超出的条目丢弃并记 `notes-truncated` 诊断。
 /// 取值依据:真实长文档(法律文书 / 学术专著)脚注至多几千条,10 万留足 20 倍以上余量;

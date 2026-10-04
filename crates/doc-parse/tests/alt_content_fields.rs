@@ -75,7 +75,7 @@ fn runs(p: &Paragraph) -> Vec<(String, Option<String>)> {
     p.runs
         .iter()
         .filter(|r| !r.text().is_empty())
-        .map(|r| (r.text(), r.field.clone()))
+        .map(|r| (r.text(), r.field.as_deref().map(str::to_string)))
         .collect()
 }
 

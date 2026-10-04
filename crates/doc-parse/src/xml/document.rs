@@ -24,12 +24,14 @@
 //! 一路消费到其匹配的结束标签为止,期间填充模型。容错:未知元素跳过、缺失属性 → 缺省、绝不 panic。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
     AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, Comment, HeaderFooterKind,
     HeaderFooterRef, HeightRule, NoteKind, Orientation, Paragraph, Picture, Placement, Row,
-    RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge, MAX_NOTES, MAX_TABLE_COLS,
+    RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge, MAX_FIELD_INSTR, MAX_NOTES,
+    MAX_TABLE_COLS,
 };
 use doc_core::page_number::PageNumFormat;
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
@@ -68,20 +70,53 @@ struct FieldStack {
     hidden: usize,
 }
 
-/// 一层复杂字段:指令文字(`w:instrText` 拼接)+ 是否已进入结果区。
+/// 一层复杂字段:指令文字(`w:instrText` 拼接,至多 [`MAX_FIELD_INSTR`] 字节)+ 是否已进入结果区。
 #[derive(Clone)]
 struct FieldFrame {
     instr: String,
+    /// 指令已因超长被截断(同一字段只记一次诊断)。
+    truncated: bool,
     in_result: bool,
+    /// 结果区里各 run 共享的指令(首次需要时由 `instr` 去空白后建成,之后只克隆指针)。
+    /// 只在进入结果区后才会被建出,此后 `instr` 不再增长,故不会过期。
+    shared: Option<Arc<str>>,
+}
+
+impl FieldFrame {
+    /// 追加一段 `w:instrText`,总长封顶 [`MAX_FIELD_INSTR`];返回本次是否**新**触发截断。
+    fn push_instr(&mut self, text: &str) -> bool {
+        let room = MAX_FIELD_INSTR - self.instr.len();
+        if text.len() <= room {
+            self.instr.push_str(text);
+            return false;
+        }
+        self.instr.push_str(cap_str(text, room));
+        !std::mem::replace(&mut self.truncated, true)
+    }
+}
+
+/// `s` 的前缀,至多 `max` 字节且落在字符边界上。
+fn cap_str(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 impl FieldStack {
     /// 当前位置若是(各层都已进入结果区的)可见字段结果,返回最内层字段的指令。
-    fn visible_instr(&self) -> Option<String> {
+    /// 同一字段结果里的所有 run 拿到的是同一份 `Arc`(不按 run 复制指令文本)。
+    fn visible_instr(&mut self) -> Option<Arc<str>> {
         if self.hidden > 0 {
             return None;
         }
-        self.frames.last().map(|f| f.instr.trim().to_string())
+        let f = self.frames.last_mut()?;
+        Some(
+            f.shared
+                .get_or_insert_with(|| Arc::from(f.instr.trim()))
+                .clone(),
+        )
     }
 
     /// 当前位置是否可见(不在任何字段的指令区里)。
@@ -804,7 +839,7 @@ fn parse_fld_simple<R: std::io::BufRead>(
         } else {
             for run in &mut runs {
                 if run.field.is_none() && has_content(run) {
-                    run.field = Some(instr.clone());
+                    run.field = Some(Arc::clone(&instr));
                 }
             }
         }
@@ -820,14 +855,19 @@ fn empty_field_run(e: &BytesStart, ctx: &Ctx) -> Option<TextRun> {
     })
 }
 
-/// `w:fldSimple@w:instr` 去首尾空白;空指令或位于不可见的字段指令区时 `None`。
-fn fld_simple_instr(e: &BytesStart, ctx: &Ctx) -> Option<String> {
+/// `w:fldSimple@w:instr` 去首尾空白(超过 [`MAX_FIELD_INSTR`] 截断并记诊断);
+/// 空指令或位于不可见的字段指令区时 `None`。
+fn fld_simple_instr(e: &BytesStart, ctx: &Ctx) -> Option<Arc<str>> {
     if !ctx.fields.borrow().is_visible() {
         return None;
     }
-    attr_of(e, b"instr")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let raw = attr_of(e, b"instr")?;
+    let capped = cap_str(&raw, MAX_FIELD_INSTR);
+    if capped.len() < raw.len() {
+        ctx.note(|s| s.field_instr_truncated += 1);
+    }
+    let instr = capped.trim();
+    (!instr.is_empty()).then(|| Arc::from(instr))
 }
 
 /// 复杂字段字符 `w:fldChar@w:fldCharType`:`begin` 入栈、`separate` 进入结果区、`end` 出栈。
@@ -839,7 +879,9 @@ fn field_char(e: &BytesStart, ctx: &Ctx, run: &mut TextRun) {
         Some("begin") => {
             st.frames.push(FieldFrame {
                 instr: String::new(),
+                truncated: false,
                 in_result: false,
+                shared: None,
             });
             st.hidden += 1;
         }
@@ -857,7 +899,7 @@ fn field_char(e: &BytesStart, ctx: &Ctx, run: &mut TextRun) {
                     st.hidden -= 1;
                     let instr = top.instr.trim();
                     if st.is_visible() && !instr.is_empty() && run.field.is_none() {
-                        run.field = Some(instr.to_string());
+                        run.field = Some(Arc::from(instr));
                     }
                 }
             }
@@ -886,7 +928,9 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
                         let text = read_text(reader);
                         let mut st = ctx.fields.borrow_mut();
                         if let Some(top) = st.frames.last_mut().filter(|f| !f.in_result) {
-                            top.instr.push_str(&text);
+                            if top.push_instr(&text) {
+                                ctx.note(|s| s.field_instr_truncated += 1);
+                            }
                         }
                     }
                     b"fldChar" => {
@@ -938,7 +982,7 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
         buf.clear();
     }
     if run.field.is_none() && has_content(&run) {
-        run.field = ctx.fields.borrow().visible_instr();
+        run.field = ctx.fields.borrow_mut().visible_instr();
     }
     run
 }
