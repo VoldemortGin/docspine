@@ -41,7 +41,8 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   (绝不两份都出);浮动文本框只抽取(`TextRun.text_boxes`,导出紧随锚定段落),PDF 不画 + 告警;
   行级·单元格级 `w:sdt`/`w:customXml` 透明展开;`m:oMath`/`m:oMathPara` 只抽 `m:t` 文本(分式 / 上下标 / 根号用 `1/2`·`x^2`·`x_i`·`sqrt(x)` 线性记法消歧,`TextRun.is_math`,PDF 按普通文字出 + `math-flattened` 告警)。
   页眉页脚(`Section.headers/footers` 引用 + `Document.header_footers` 部件表,按部件去重导出)与脚注尾注(`Document.footnotes/endnotes` + `RunSegment::NoteRef` 引用)只抽取进 `to_text`/`to_markdown`/`to_html`(HTML 用 `<header>`/`<footer>` + `<sup>` 锚点与回链),PDF 不画 + `header-footer-not-rendered` / `notes-not-rendered` 告警。
-  仍未覆盖:批注部件。
+  批注部件(`word/comments.xml` → `Document.comments` + 正文 `RunSegment::CommentRef` 引用点;作者 / 内容是文档内容可进模型,但**不得**进 trace / 日志 / 告警)是审阅元数据,默认**不进**任何导出,PDF 不画。
+  仍未覆盖:批注范围(`commentRangeStart/End`)、`commentsExtended` 回复链。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现;core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。

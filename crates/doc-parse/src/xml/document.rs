@@ -27,9 +27,9 @@ use std::collections::BTreeMap;
 
 use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
-    AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, HeaderFooterKind, HeaderFooterRef,
-    HeightRule, NoteKind, Orientation, Paragraph, Picture, Placement, Row, RunSegment, Section,
-    Table, TableWidth, TextBox, TextRun, VMerge,
+    AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, Comment, HeaderFooterKind,
+    HeaderFooterRef, HeightRule, NoteKind, Orientation, Paragraph, Picture, Placement, Row,
+    RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge,
 };
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
 use quick_xml::events::{BytesStart, Event};
@@ -187,6 +187,62 @@ pub fn parse_notes(
         buf.clear();
     }
     notes
+}
+
+/// 解析批注部件(`w:comments`):`w:comment` 子元素按 `w:id` 建表,记录 `w:author` /
+/// `w:date` / `w:initials`(缺失 `None`),内容走块级解析(共享 [`MAX_NEST_DEPTH`] 深度守卫)。
+/// 缺 / 非法 `w:id` 的批注跳过;重复 id 以先出现者为准。畸形 XML 返回已解析出的部分。
+pub fn parse_comments(
+    xml: &str,
+    rels_xml: Option<&str>,
+    media_index: &BTreeMap<String, usize>,
+) -> BTreeMap<i64, Comment> {
+    let rels = rels_xml.map(parse_rels).unwrap_or_default();
+    let ctx = Ctx {
+        rels: &rels,
+        media_index,
+        depth: std::cell::Cell::new(0),
+    };
+    let mut comments = BTreeMap::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    if !enter_root(&mut reader) {
+        return comments;
+    }
+    let head = |e: &BytesStart| {
+        let id = attr_of(e, b"id").and_then(|s| s.trim().parse::<i64>().ok())?;
+        Some(Comment {
+            id,
+            author: attr_of(e, b"author"),
+            date: attr_of(e, b"date"),
+            initials: attr_of(e, b"initials"),
+            blocks: Vec::new(),
+        })
+    };
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if local_name(e.name().as_ref()) == b"comment" => match head(&e) {
+                Some(mut c) => {
+                    c.blocks = parse_block_container(&mut reader, &ctx);
+                    comments.entry(c.id).or_insert(c);
+                }
+                None => skip_element(&mut reader),
+            },
+            Ok(Event::Empty(e)) if local_name(e.name().as_ref()) == b"comment" => {
+                if let Some(c) = head(&e) {
+                    comments.entry(c.id).or_insert(c);
+                }
+            }
+            Ok(Event::Start(_)) => skip_element(&mut reader),
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    comments
 }
 
 /// 读到部件根元素的起始标签并消费它;找不到(空 / 畸形)返回 `false`。
@@ -660,7 +716,7 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
 }
 
 /// 自闭合 run 内容元素 -> 分段:`w:tab`/`w:ptab` -> 制表、`w:br`/`w:cr` -> 断,
-/// `w:footnoteReference` / `w:endnoteReference` -> 带 id 的注引用段,
+/// `w:footnoteReference` / `w:endnoteReference` -> 带 id 的注引用段,`w:commentReference` -> 批注引用段,
 /// `w:sym` -> `@w:char` 十六进制码点(Symbol/Wingdings 等的 `U+F0xx` 私有区码点原样
 /// 保留,不做字体映射)、`w:softHyphen` -> U+00AD、`w:noBreakHyphen` -> U+2011。
 /// 其余元素忽略。
@@ -686,6 +742,12 @@ fn push_run_char(run: &mut TextRun, e: &BytesStart, name: &[u8]) {
                     NoteKind::Endnote
                 };
                 run.segments.push(RunSegment::NoteRef { kind, id });
+            }
+        }
+        // 批注引用:留一个带 id 的定位点(无 / 非法 id 忽略)。
+        b"commentReference" => {
+            if let Some(id) = attr_of(e, b"id").and_then(|s| s.trim().parse().ok()) {
+                run.segments.push(RunSegment::CommentRef { id });
             }
         }
         b"softHyphen" => run.push_text("\u{00AD}"),

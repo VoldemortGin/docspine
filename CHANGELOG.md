@@ -64,6 +64,16 @@ change.
   more than one text fragment is parenthesised, e.g. `(a+b)/c`. Other math
   structures keep plain concatenation; still no LaTeX. Iterative walk, structure
   depth capped by `MAX_NEST_DEPTH`.
+- **Comments (`word/comments.xml`) enter the model and the Python API.**
+  `Document.comments: BTreeMap<i64, Comment>` keeps `w:id`, `w:author`, `w:date`,
+  `w:initials` (missing -> `None`) and the content blocks (same block parser and
+  depth guard; duplicate / missing / non-numeric ids skipped). The part is located
+  by its fixed name like footnotes. Body anchors are `RunSegment::CommentRef { id }`
+  (reference point only; `commentRangeStart` / `commentRangeEnd` are not modelled).
+  Comments are review metadata: they are **not** emitted by `to_text` /
+  `to_markdown` / `to_html` (the export functions have no options struct, so no
+  switch was added), not drawn in PDF, and never appear in warnings. Python:
+  `Document.comments()` and `kind == "comment_ref"` run segments.
 - **`to_html` now emits headers, footers, footnotes and endnotes** (it silently
   dropped them before). Each distinct header/footer part is emitted once as
   `<header data-type="default|first|even">` (top) / `<footer ...>` (end), empty
@@ -92,8 +102,8 @@ change.
 
 ### Breaking (Rust API, pre-1.0)
 
-- `Document` gains `header_footers`, `footnotes`, `endnotes`; `Section` gains
-  `headers`, `footers`; `RunSegment` gains the `NoteRef { kind, id }` variant;
+- `Document` gains `header_footers`, `footnotes`, `endnotes`, `comments`; `Section` gains
+  `headers`, `footers`; `RunSegment` gains the `NoteRef { kind, id }` and `CommentRef { id }` variants;
   `RenderWarning` gains `HeaderFooterNotRendered` / `NotesNotRendered`. Struct
   literals without `..Default::default()` and exhaustive matches on `RunSegment` /
   `RenderWarning` must be updated.

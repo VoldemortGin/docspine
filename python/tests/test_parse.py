@@ -509,6 +509,65 @@ def test_sections_without_header_footer_or_notes_have_empty_lists(minimal_docx_b
     assert doc.endnotes() == []
 
 
+def test_comments_exposed_with_anchor_and_kept_out_of_default_exports():
+    body = (
+        "<w:body><w:p>"
+        '<w:commentRangeStart w:id="0"/><w:r><w:t>Body</w:t></w:r><w:commentRangeEnd w:id="0"/>'
+        '<w:r><w:commentReference w:id="0"/></w:r>'
+        '<w:r><w:commentReference w:id="9"/></w:r></w:p></w:body>'
+    )
+    docx = _with_parts(
+        build_docx(_DOC_HEADER + body + "</w:document>"),
+        {
+            "word/comments.xml": (
+                f"<w:comments {_W_NS}>"
+                '<w:comment w:id="0" w:author="Ann" w:date="2026-10-03T09:30:00Z" w:initials="A">'
+                f"{_p('SECRET-NOTE')}</w:comment>"
+                f'<w:comment w:id="2">{_p("bare")}</w:comment></w:comments>'
+            ),
+        },
+        {},
+    )
+    doc = docspine.open_bytes(docx)
+
+    first, second = doc.comments()
+    assert (first["id"], first["author"], first["date"], first["initials"]) == (
+        0,
+        "Ann",
+        "2026-10-03T09:30:00Z",
+        "A",
+    )
+    assert first["blocks"][0]["text"] == "SECRET-NOTE"
+    assert (second["id"], second["author"], second["date"], second["initials"]) == (
+        2,
+        None,
+        None,
+        None,
+    )
+
+    refs = [
+        seg["id"]
+        for run in doc.paragraphs()[0]["runs"]
+        for seg in run["segments"]
+        if seg["kind"] == "comment_ref"
+    ]
+    assert refs == [0, 9]  # 悬空引用(9)保留引用点,不报错
+
+    for out in (doc.to_text(), doc.to_markdown(), doc.to_html()):
+        assert "Body" in out
+        assert "SECRET-NOTE" not in out and "Ann" not in out
+
+
+def test_comments_empty_without_part_and_malformed_part_does_not_raise(minimal_docx_bytes):
+    assert docspine.open_bytes(minimal_docx_bytes).comments() == []
+    docx = _with_parts(
+        build_docx(_DOC_HEADER + "<w:body>" + _p("x") + "</w:body></w:document>"),
+        {"word/comments.xml": f'<w:comments {_W_NS}><w:comment w:id="1"><w:p><w:r><w:t>Cut'},
+        {},
+    )
+    assert docspine.open_bytes(docx).to_text() == "x"
+
+
 def test_math_run_exposes_is_math_flag():
     body = (
         '<w:body><w:p xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'

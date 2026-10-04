@@ -19,7 +19,7 @@ use std::sync::Arc;
 use doc_core::export;
 use doc_core::geom::{emu_to_points, twips_to_points};
 use doc_core::model::{
-    Block, BreakKind, Cell, Color, Document as CoreDocument, HeaderFooterRef, NoteKind,
+    Block, BreakKind, Cell, Color, Comment, Document as CoreDocument, HeaderFooterRef, NoteKind,
     Orientation, Paragraph, Picture, Row, RunSegment, Section, Table, TextRun, VMerge,
 };
 use doc_core::DocError;
@@ -73,9 +73,10 @@ fn color_hex(c: &Color) -> String {
 
 // --- dict 构造:把领域模型映射成可自省的 list[dict] ----------------------
 
-/// 一个 [`RunSegment`] -> dict(`kind` 为 `"text"` / `"tab"` / `"break"` / `"note_ref"`;
+/// 一个 [`RunSegment`] -> dict(`kind` 为 `"text"` / `"tab"` / `"break"` / `"note_ref"` / `"comment_ref"`;
 /// `break` 段另带 `break_type`:`"line"` / `"page"` / `"column"`;`note_ref` 段带 `note_kind`:
-/// `"footnote"` / `"endnote"` 与注 `id`,对应 `footnotes()` / `endnotes()` 的 `id`)。
+/// `"footnote"` / `"endnote"` 与注 `id`,对应 `footnotes()` / `endnotes()` 的 `id`;`comment_ref` 段带
+/// 批注 `id`,对应 `comments()` 的 `id`)。
 fn segment_dict<'py>(py: Python<'py>, seg: &RunSegment) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     match seg {
@@ -104,6 +105,10 @@ fn segment_dict<'py>(py: Python<'py>, seg: &RunSegment) -> PyResult<Bound<'py, P
                     NoteKind::Endnote => "endnote",
                 },
             )?;
+            d.set_item("id", id)?;
+        }
+        RunSegment::CommentRef { id } => {
+            d.set_item("kind", "comment_ref")?;
             d.set_item("id", id)?;
         }
     }
@@ -343,6 +348,25 @@ fn notes_list<'py>(
     Ok(list)
 }
 
+/// 批注表 -> `list[{"id", "author", "date", "initials", "blocks"}]`(按 id 升序;
+/// 缺失的 `author` / `date` / `initials` 为 `None`)。
+fn comments_list<'py>(
+    py: Python<'py>,
+    comments: &BTreeMap<i64, Comment>,
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for c in comments.values() {
+        let d = PyDict::new(py);
+        d.set_item("id", c.id)?;
+        d.set_item("author", c.author.as_deref())?;
+        d.set_item("date", c.date.as_deref())?;
+        d.set_item("initials", c.initials.as_deref())?;
+        d.set_item("blocks", blocks_list(py, &c.blocks)?)?;
+        list.append(d)?;
+    }
+    Ok(list)
+}
+
 // --- pyclass 句柄 ---------------------------------------------------------
 
 /// 一份已解析的 Word 文档句柄(`Arc` 共享底层数据)。
@@ -451,6 +475,13 @@ impl PyDocument {
     /// 尾注(`word/endnotes.xml`),形状同 [`footnotes`](Self::footnotes)。
     fn endnotes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         notes_list(py, &self.inner.endnotes)
+    }
+
+    /// 批注(`word/comments.xml`),作为 `list[{"id", "author", "date", "initials", "blocks"}]`
+    /// (按 id 升序;属性缺失为 `None`;`blocks` 同 `body()` 的块 dict)。正文里的锚点是 run 的
+    /// `kind == "comment_ref"` 分段。批注是审阅元数据,**不进** `to_text` / `to_markdown` / `to_html`。
+    fn comments<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        comments_list(py, &self.inner.comments)
     }
 
     /// 便利:把全文按段落顺序拼成纯文本(表格按行、单元格按 tab 连接)。

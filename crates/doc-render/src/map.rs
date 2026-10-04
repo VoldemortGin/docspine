@@ -479,6 +479,8 @@ fn map_paragraph(
                 }
                 // 注引用不画(含引用标记),一次性降级告警。
                 RunSegment::NoteRef { .. } => ctx.notes(),
+                // 批注是审阅元数据,不画也不告警(告警只记 code,不含批注内容)。
+                RunSegment::CommentRef { .. } => {}
             }
         }
         push_runs(

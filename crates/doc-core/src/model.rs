@@ -48,6 +48,26 @@ pub struct Document {
     pub footnotes: BTreeMap<i64, Vec<Block>>,
     /// 尾注(`word/endnotes.xml`):语义同 [`Document::footnotes`]。
     pub endnotes: BTreeMap<i64, Vec<Block>>,
+    /// 批注(`word/comments.xml`):`w:id` -> [`Comment`]。批注是审阅元数据而非正文,
+    /// 默认**不进** `to_text` / `to_markdown` / `to_html`;正文里的锚点见
+    /// [`RunSegment::CommentRef`]。
+    pub comments: BTreeMap<i64, Comment>,
+}
+
+/// 一条批注(`w:comment`)。作者 / 日期 / 内容属于文档内容,可进模型,但**不得**写进
+/// trace / 日志 / 告警。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Comment {
+    /// `w:id`(正文 [`RunSegment::CommentRef`] 的键)。
+    pub id: i64,
+    /// 作者(`w:author`),缺失 `None`。
+    pub author: Option<String>,
+    /// 日期(`w:date`,ISO 8601 原文,不解析),缺失 `None`。
+    pub date: Option<String>,
+    /// 作者缩写(`w:initials`),缺失 `None`。
+    pub initials: Option<String>,
+    /// 批注内容块(段落 / 表格,与正文同一套块级解析)。
+    pub blocks: Vec<Block>,
 }
 
 /// 页眉 / 页脚的类型(`w:headerReference` / `w:footerReference` 的 `@w:type`)。
@@ -299,6 +319,7 @@ impl TextRun {
                 RunSegment::Tab => out.push('\t'),
                 RunSegment::Break(_) => out.push('\n'),
                 RunSegment::NoteRef { kind, id } => out.extend(mark(*kind, *id)),
+                RunSegment::CommentRef { .. } => {}
             }
         }
         out
@@ -330,6 +351,10 @@ pub enum RunSegment {
     /// [`Document::footnotes`] / [`Document::endnotes`] 的键(可能悬空)。不产生文字:
     /// [`TextRun::text`] 折叠时忽略,导出侧另行按引用顺序编号。
     NoteRef { kind: NoteKind, id: i64 },
+    /// 批注引用(`w:commentReference`):`id` 对应 [`Document::comments`] 的键(可能悬空)。
+    /// 只记引用点(`commentRangeStart` / `commentRangeEnd` 是 run 之间的兄弟标记,
+    /// 模型不表达范围);不产生文字。
+    CommentRef { id: i64 },
 }
 
 /// 断的种类(`w:br@w:type`)。

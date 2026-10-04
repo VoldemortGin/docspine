@@ -247,6 +247,7 @@ fn html_para_text(p: &crate::model::Paragraph, notes: &Notes) -> String {
             RunSegment::Tab => out.push('\t'),
             RunSegment::Break(_) => out.push_str("<br>"),
             RunSegment::NoteRef { kind, id } => out.extend(notes.mark(*kind, *id)),
+            RunSegment::CommentRef { .. } => {}
         }
     }
     out

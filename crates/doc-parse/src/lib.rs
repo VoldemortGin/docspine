@@ -102,6 +102,17 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             )
         })
         .unwrap_or_default();
+    // 批注:固定部件名 `word/comments.xml`(与脚注尾注一致),带自己的 rels。
+    let comments = pkg
+        .part_str("word/comments.xml")
+        .map(|s| {
+            xml::document::parse_comments(
+                &s,
+                pkg_rels(&pkg, "word/comments.xml").as_deref(),
+                &media_index,
+            )
+        })
+        .unwrap_or_default();
 
     // 4) 跨部件表(C-5/C-6):styles.xml -> 样式表、numbering.xml -> 编号表、
     //    theme1.xml -> 主题;部件缺失时为空缺省(有效样式解析器落到 Word 内置兜底,
@@ -133,6 +144,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             header_footers,
             footnotes,
             endnotes,
+            comments,
         },
         media,
     })
