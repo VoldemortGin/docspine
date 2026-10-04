@@ -467,16 +467,32 @@ pub struct Table {
     pub width: Option<TableWidth>,
 }
 
+/// 表格列数上限:Word 的表格最多 63 列(UI 与二进制格式的硬上限)。解析时 `gridSpan` 与
+/// `w:tblGrid` 列数都钳到它,[`Table::col_count`] 也不会超过它——防恶意的巨大 `gridSpan`
+/// / 海量 `gridCol` 让按 `列数 × 行数` 分配的渲染映射分配失败而进程中止。
+pub const MAX_TABLE_COLS: usize = 63;
+
+/// 单张表格渲染映射的网格位(`列数 × 行数`)预算。渲染按该乘积分配占位网格 / 边表 / 引擎格,
+/// 超出时只映射前 `预算 / 列数` 行并告警(`table-over-budget`),不中止进程。取值依据:63 列
+/// 满宽时约 4 000 行,覆盖实际文档(几千行 × 十来列),占用约几十 MiB。
+pub const MAX_TABLE_CELLS: usize = 250_000;
+
 impl Table {
-    /// 逻辑列数:优先取 `w:tblGrid` 的列数;退而取首行单元格 `grid_span` 之和。
+    /// 逻辑列数:优先取 `w:tblGrid` 的列数;退而取首行单元格 `grid_span` 之和(饱和求和)。
+    /// 结果不超过 [`MAX_TABLE_COLS`]。
     pub fn col_count(&self) -> usize {
         if !self.grid_cols.is_empty() {
-            return self.grid_cols.len();
+            return self.grid_cols.len().min(MAX_TABLE_COLS);
         }
         self.rows
             .first()
-            .map(|r| r.cells.iter().map(|c| c.grid_span as usize).sum())
+            .map(|r| {
+                r.cells
+                    .iter()
+                    .fold(0usize, |acc, c| acc.saturating_add(c.grid_span as usize))
+            })
             .unwrap_or(0)
+            .min(MAX_TABLE_COLS)
     }
 }
 

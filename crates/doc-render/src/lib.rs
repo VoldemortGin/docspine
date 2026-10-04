@@ -184,7 +184,8 @@ fn layout_document(
 mod tests {
     use super::*;
     use doc_core::model::{
-        Block as DocBlock, BreakKind, Paragraph, RunSegment, Section, TextBox, TextRun,
+        Block as DocBlock, BreakKind, Cell, Paragraph, Row, RunSegment, Section, Table as DocTable,
+        TextBox, TextRun,
     };
     use pdf_typeset::FontResolver;
 
@@ -243,6 +244,86 @@ mod tests {
         .expect("render");
         assert!(res.pdf.starts_with(b"%PDF-"));
         assert_eq!(count_pages(&res.pdf), 1);
+    }
+
+    fn render_fast(doc: &Document) -> RenderResult {
+        let t0 = std::time::Instant::now();
+        let res = render_with(
+            deterministic(),
+            doc,
+            &BTreeMap::new(),
+            &RenderOptions::default(),
+        )
+        .expect("render");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(20),
+            "应很快返回"
+        );
+        res
+    }
+
+    fn kinds(res: &RenderResult) -> Vec<&'static str> {
+        res.warnings.iter().map(RenderWarning::kind).collect()
+    }
+
+    /// 无 `tblGrid`、首格 `gridSpan` 巨大(手工构造的 IR 绕过解析钳制):列数钳到
+    /// Word 上限,不按声明值分配,渲染不 abort。
+    #[test]
+    fn huge_grid_span_without_grid_renders_quickly() {
+        let table = DocTable {
+            rows: vec![Row {
+                cells: vec![Cell {
+                    grid_span: u32::MAX,
+                    blocks: vec![para("wide")],
+                    ..Cell::default()
+                }],
+                ..Row::default()
+            }],
+            ..DocTable::default()
+        };
+        let res = render_fast(&doc_of(vec![DocBlock::Table(table)]));
+        assert!(res.pdf.starts_with(b"%PDF-"));
+        assert!(!kinds(&res).contains(&"table-over-budget"));
+    }
+
+    /// 上万 `gridCol` × 上万空行:列数钳到 63、行数按总格预算截断并告警一次,不 abort。
+    #[test]
+    fn oversized_grid_times_rows_is_truncated_with_warning() {
+        let table = DocTable {
+            grid_cols: vec![100; 10_000],
+            rows: vec![Row::default(); 10_000],
+            ..DocTable::default()
+        };
+        let res = render_fast(&doc_of(vec![DocBlock::Table(table)]));
+        assert!(res.pdf.starts_with(b"%PDF-"));
+        let n = kinds(&res)
+            .iter()
+            .filter(|k| **k == "table-over-budget")
+            .count();
+        assert_eq!(n, 1, "超预算只告警一次");
+    }
+
+    /// 正常的 63 列表不受限、无告警。
+    #[test]
+    fn normal_63_column_table_renders_without_budget_warning() {
+        let cell = |t: &str| Cell {
+            grid_span: 1,
+            blocks: vec![para(t)],
+            ..Cell::default()
+        };
+        let table = DocTable {
+            grid_cols: vec![100; 63],
+            rows: vec![
+                Row {
+                    cells: (0..63).map(|_| cell("x")).collect(),
+                    ..Row::default()
+                };
+                20
+            ],
+            ..DocTable::default()
+        };
+        let res = render_fast(&doc_of(vec![DocBlock::Table(table)]));
+        assert!(!kinds(&res).contains(&"table-over-budget"));
     }
 
     /// 浮动文本框只抽取不绘制:渲染不 panic、照常出页,`text-box-not-rendered` 只报一次。

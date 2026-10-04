@@ -128,6 +128,7 @@ pub(crate) struct MapCtx {
     floating_warned: bool,
     internal_link_warned: bool,
     row_warned: bool,
+    table_budget_warned: bool,
     numbering_warned: bool,
     tab_warned: bool,
     text_box_warned: bool,
@@ -151,6 +152,7 @@ impl MapCtx {
             floating_warned: false,
             internal_link_warned: false,
             row_warned: false,
+            table_budget_warned: false,
             numbering_warned: false,
             tab_warned: false,
             text_box_warned: false,
@@ -251,6 +253,14 @@ impl MapCtx {
         if !self.internal_link_warned {
             self.internal_link_warned = true;
             self.list.push(RenderWarning::InternalLinkNotRendered);
+        }
+    }
+
+    /// 表格网格超预算被截断的一次性降级(table.rs 调用)。
+    pub(crate) fn table_over_budget(&mut self) {
+        if !self.table_budget_warned {
+            self.table_budget_warned = true;
+            self.list.push(RenderWarning::TableOverBudget);
         }
     }
 

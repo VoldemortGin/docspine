@@ -26,7 +26,10 @@
 //!   pct 对当前节正文宽解析),都无 → `Auto`。`tblInd`/表级 `jc` 解析保真、v1 不
 //!   参与布局(引擎表格自正文左缘起排)。嵌套表经块映射天然递归。
 use doc_core::geom::{twips_to_points, Twips};
-use doc_core::model::{Cell as DocCell, CellVAlign, HeightRule, Table as DocTable, VMerge};
+use doc_core::model::{
+    Cell as DocCell, CellVAlign, HeightRule, Row as DocRow, Table as DocTable, VMerge,
+    MAX_TABLE_CELLS, MAX_TABLE_COLS,
+};
 use doc_core::style::{resolve_table, Border, CellMargins, ColorRef, EffectiveTableProps};
 use doc_core::Document;
 use pdf_typeset::{
@@ -63,12 +66,18 @@ pub(crate) fn map_table(
     let eff = resolve_table(doc, table);
     let columns = column_policies(table, ctx);
     let ncols = columns.len();
-    let nrows = table.rows.len();
-    let (regions, grid) = build_span_map(table, ncols);
+    // 网格位预算:`列数 × 行数` 超限只映射前若干行并告警(列数已被钳到 Word 上限)。
+    let max_rows = MAX_TABLE_CELLS / ncols.max(1);
+    let nrows = table.rows.len().min(max_rows);
+    if nrows < table.rows.len() {
+        ctx.table_over_budget();
+    }
+    let rows_in = &table.rows[..nrows];
+    let (regions, grid) = build_span_map(rows_in, ncols);
     let (h_edges, v_edges) = resolve_edges(doc, &eff, &regions, &grid, nrows, ncols);
 
     let mut rows = Vec::with_capacity(nrows);
-    for (r, row) in table.rows.iter().enumerate() {
+    for (r, row) in rows_in.iter().enumerate() {
         let mut cells = Vec::with_capacity(ncols);
         for c in 0..ncols {
             let region = grid[r][c].map(|ai| &regions[ai]);
@@ -128,6 +137,7 @@ fn column_policies(table: &DocTable, ctx: &MapCtx) -> Vec<ColumnWidth> {
         return table
             .grid_cols
             .iter()
+            .take(MAX_TABLE_COLS)
             .map(|&t| {
                 if t > 0 {
                     ColumnWidth::Fixed(twips_to_points(t))
@@ -164,11 +174,11 @@ fn column_policies(table: &DocTable, ctx: &MapCtx) -> Vec<ColumnWidth> {
 
 /// 压平 `gridSpan`/`vMerge` 成占位网格。vMerge 延续格并入正上方网格位的合并区
 /// (上方无可并区的畸形延续格容错为自立锚格);声明超出列数的格截断。
-fn build_span_map(table: &DocTable, ncols: usize) -> (Vec<Region<'_>>, Grid) {
-    let nrows = table.rows.len();
+fn build_span_map(rows: &[DocRow], ncols: usize) -> (Vec<Region<'_>>, Grid) {
+    let nrows = rows.len();
     let mut regions: Vec<Region<'_>> = Vec::new();
     let mut grid: Grid = vec![vec![None; ncols]; nrows];
-    for (r, row) in table.rows.iter().enumerate() {
+    for (r, row) in rows.iter().enumerate() {
         let mut c = 0usize;
         for cell in &row.cells {
             if c >= ncols {

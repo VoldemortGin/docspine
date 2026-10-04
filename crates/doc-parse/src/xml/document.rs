@@ -29,7 +29,7 @@ use doc_core::geom::{Emu, Twips};
 use doc_core::model::{
     AnchorRef, Block, BreakKind, Cell, CellVAlign, Color, Comment, HeaderFooterKind,
     HeaderFooterRef, HeightRule, NoteKind, Orientation, Paragraph, Picture, Placement, Row,
-    RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge,
+    RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge, MAX_TABLE_COLS,
 };
 use doc_core::page_number::PageNumFormat;
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
@@ -1585,7 +1585,8 @@ fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Twips> {
 
 /// `w:gridCol` 记一列宽(其它元素忽略)。
 fn push_grid_col(e: &BytesStart, cols: &mut Vec<Twips>) {
-    if local_name(e.name().as_ref()) == b"gridCol" {
+    // 超过 Word 列数上限的 gridCol 丢弃(与 `gridSpan` 同一上限)。
+    if local_name(e.name().as_ref()) == b"gridCol" && cols.len() < MAX_TABLE_COLS {
         cols.push(attr_of(e, b"w").and_then(|s| s.parse().ok()).unwrap_or(0));
     }
 }
@@ -1747,7 +1748,17 @@ fn parse_tcpr<R: std::io::BufRead>(reader: &mut Reader<R>, cell: &mut Cell) {
 fn apply_tcpr_prop(e: &BytesStart, cell: &mut Cell) {
     match local_name(e.name().as_ref()) {
         b"gridSpan" => {
-            cell.grid_span = attr_of(e, b"val").and_then(|s| s.parse().ok()).unwrap_or(1);
+            // 钳到 Word 的表格列数上限;非数字 / 负数按缺省 1,纯数字但溢出 u64 视作超大。
+            cell.grid_span = attr_of(e, b"val").map_or(1, |s| {
+                let s = s.trim();
+                match s.parse::<u64>() {
+                    Ok(n) => n.min(MAX_TABLE_COLS as u64) as u32,
+                    Err(_) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
+                        MAX_TABLE_COLS as u32
+                    }
+                    Err(_) => 1,
+                }
+            });
         }
         b"vMerge" => {
             // val="restart" 起始;val="continue" **或省略 val** 是延续

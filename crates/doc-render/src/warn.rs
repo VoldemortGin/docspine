@@ -62,6 +62,9 @@ pub enum RenderWarning {
     /// 页码格式(`w:pgNumType@w:fmt`)取了不支持的值(`ordinal` / 各语种计数法 …):
     /// 该节页眉页脚里的 `PAGE` 按阿拉伯数字输出(字段自带 `\*` 开关时以开关为准)。
     PageNumFormatUnsupported,
+    /// 表格的 `列数 × 行数` 超过网格预算([`doc_core::model::MAX_TABLE_CELLS`]):只映射预算内的
+    /// 前若干行,其余行不进 PDF(防恶意超大表分配爆炸;文本 / HTML 导出不受影响)。
+    TableOverBudget,
 }
 
 impl RenderWarning {
@@ -98,6 +101,7 @@ impl RenderWarning {
             RenderWarning::HeaderFooterOverflow => "header-footer-overflow",
             RenderWarning::NotesNotRendered => "notes-not-rendered",
             RenderWarning::PageNumFormatUnsupported => "page-number-format-unsupported",
+            RenderWarning::TableOverBudget => "table-over-budget",
         }
     }
 }
@@ -206,6 +210,13 @@ impl fmt::Display for RenderWarning {
                     f,
                     "an unsupported page number format (w:pgNumType w:fmt) is shown as \
                      decimal digits in this version"
+                )
+            }
+            RenderWarning::TableOverBudget => {
+                write!(
+                    f,
+                    "a table exceeds the grid-cell budget; only its leading rows are \
+                     rendered in the PDF"
                 )
             }
         }
