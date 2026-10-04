@@ -15,6 +15,8 @@ change.
 
 ### Changed
 
+- **Python `text()` / `to_text()` / `to_markdown()` / `to_html()` now release the GIL** while exporting (parsing, OCR and PDF rendering already did), so a large export no longer stalls other Python threads. No output change.
+
 - **Style-level numbering (`w:style > w:pPr > w:numPr`) now applies to PDF export and all three text exports** (behavior change: headings linked to a multilevel list gain chapter numbers `1` / `1.1` / `1.1.1`, in `to_text`, Markdown `# 1.1 Title`, HTML and the PDF label). A paragraph's effective numbering is its own `numPr` (`numId=0` cancels), else the nearest `numId` along the style `basedOn` chain (a derived style's `numId=0` cancels); the level comes from the paragraph's own `ilvl`, else the `numbering.xml` `w:lvl > w:pStyle` back-link (ECMA-376 §17.9.23: it overrides the style's `numPr` level), else the style's `ilvl`, else 0. One shared resolver (`doc_core::style::resolve_numbering`) feeds both the PDF mapping and the exports. API additions: `ParaProps.num_id` / `num_ilvl`, `NumLevel.p_style`, `NumberingTable::level_for_style`, `NumRef`. `Paragraph.num_id` / `list_level` (and the Python paragraph dict) still carry only the paragraph's *own* `numPr`.
 
 - **`to_text` no longer drops tables nested in table cells** (behavior change; fixes silent text loss): a nested table's rows are flattened into the cell as extra lines (cells joined by `\t`, rows by `\n`, same style as multi-paragraph cells), recursively and bounded by the parser's nesting guard. Markdown already fell back to an HTML `<table>` and HTML already nested real `<table>`s; a table inside a text box inside a GFM cell now also forces the HTML fallback instead of being dropped.
@@ -48,6 +50,8 @@ change.
   SSIM gate included) ran green against pdfspine 0.12.0. Cargo git revs unchanged.
 
 ### Added
+
+- **Document properties** (`docProps/core.xml`): `Document.core_properties` (`CoreProperties`: title / subject / creator / keywords / description / category / last_modified_by / revision / created / modified / language, raw strings) and Python `doc.core_properties()` returning a fixed-key dict (names parallel to pptspine's `core_properties()`, core.xml subset; missing field -> `None`). The part is located via the package `_rels/.rels` core-properties relationship, falling back to `docProps/core.xml`; a missing or malformed part yields all `None` without error. The values never enter any warning or diagnostic. `Document` gains a public field (Rust API).
 
 - **Parse diagnostics channel** (`Document.diagnostics`, Python `doc.diagnostics()`): a structured list of `Diagnostic { kind, part, count }` (identical `(kind, part)` merged; **never contains document text**) so callers can tell when content was silently truncated, skipped or clamped. Kinds (`DiagnosticKind`, `#[non_exhaustive]`, stable `code()` strings in the `RenderWarning` kebab-case style): `xml-truncated` (a part's XML is broken / cut off; the parsed prefix is still returned), `nesting-depth-exceeded` (subtrees skipped by the `MAX_NEST_DEPTH` guard), `table-columns-clamped` (extra `gridCol`s dropped + `gridBefore` / `gridAfter` clamps), `grid-span-clamped`, `numbering-value-clamped` (`w:start` / `w:startOverride` above `MAX_LIST_NUMBER`), `missing-part` (header / footer relationships or parts that do not exist, pictures whose media is missing; `part` is the part holding the dangling reference), `alt-chunk-not-imported` (every `w:altChunk`, headers / notes included). Collected centrally: walkers only bump counters on their `Ctx`, and `doc-parse/src/lib.rs` turns them into diagnostics and runs one well-formedness pass per XML part. `alt_chunk_count` is kept unchanged (body only). `Document` gained a public field, so struct literals without `..Default::default()` need updating (Rust API).
 
@@ -173,7 +177,7 @@ change.
 
 ### Breaking (Rust API, pre-1.0)
 
-- `Document` gains `diagnostics`, `ParaProps` gains `num_id` / `num_ilvl`, and `NumLevel` gains `p_style` (struct literals without `..Default::default()` must be updated).
+- `Document` gains `diagnostics` and `core_properties`, `ParaProps` gains `num_id` / `num_ilvl`, and `NumLevel` gains `p_style` (struct literals without `..Default::default()` must be updated).
 
 - `Row` gains `grid_before` and `grid_after` (struct literals without `..Default::default()` must be updated).
 

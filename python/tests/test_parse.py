@@ -708,3 +708,91 @@ def test_diagnostics_report_truncation_and_altchunk_without_text():
     assert doc.alt_chunk_count == 1
     assert secret not in repr(doc.diagnostics())
     assert all(set(d) == {"kind", "part", "count"} for d in doc.diagnostics())
+
+
+_CORE_KEYS = {
+    "title",
+    "subject",
+    "creator",
+    "keywords",
+    "description",
+    "category",
+    "last_modified_by",
+    "revision",
+    "created",
+    "modified",
+    "language",
+}
+
+
+def _add_part(data: bytes, name: str, body: str) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w") as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item.filename))
+        dst.writestr(name, body)
+    return out.getvalue()
+
+
+def test_core_properties_fixed_keys_and_none_when_missing(minimal_docx_bytes):
+    """核心属性:固定键 dict(与 pptspine 平行,取 core.xml 子集);部件缺失 -> 全 None。"""
+    props = docspine.open_bytes(minimal_docx_bytes).core_properties()
+    assert set(props) == _CORE_KEYS
+    assert all(v is None for v in props.values())
+
+
+def test_core_properties_parsed_and_diagnostics_stay_clean(minimal_docx_bytes):
+    core = (
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">'
+        "<dc:title>Report</dc:title><dc:creator>Ada</dc:creator><cp:keywords>k1, k2</cp:keywords>"
+        "<dcterms:created>2026-09-01T08:00:00Z</dcterms:created></cp:coreProperties>"
+    )
+    doc = docspine.open_bytes(_add_part(minimal_docx_bytes, "docProps/core.xml", core))
+    props = doc.core_properties()
+    assert set(props) == _CORE_KEYS
+    assert props["title"] == "Report"
+    assert props["creator"] == "Ada"
+    assert props["keywords"] == "k1, k2"
+    assert props["created"] == "2026-09-01T08:00:00Z"
+    assert props["subject"] is None and props["modified"] is None
+    assert doc.diagnostics() == []
+
+
+def test_core_properties_malformed_part_is_all_empty_not_error(minimal_docx_bytes):
+    doc = docspine.open_bytes(_add_part(minimal_docx_bytes, "docProps/core.xml", "<<< not xml"))
+    assert all(v is None for v in doc.core_properties().values())
+
+
+def test_exports_release_the_gil():
+    """text / to_text / to_markdown / to_html 释放 GIL:导出进行时,别的 Python 线程照常推进。"""
+    import threading
+    import time
+
+    paras = "".join(f"<w:p><w:r><w:t>paragraph number {i}</w:t></w:r></w:p>" for i in range(150_000))
+    doc = docspine.open_bytes(build_docx(_DOC_HEADER + f"<w:body>{paras}</w:body></w:document>"))
+    for name in ("text", "to_text", "to_markdown", "to_html"):
+        export = getattr(doc, name)
+        t0 = time.perf_counter()
+        export()
+        solo = time.perf_counter() - t0
+        assert solo > 0.03, f"{name} too fast ({solo:.3f}s) to observe the GIL"
+        stop = threading.Event()
+        ticks = 0
+
+        def spin() -> None:
+            nonlocal ticks
+            while not stop.is_set():
+                ticks += 1
+                time.sleep(0.001)
+
+        th = threading.Thread(target=spin)
+        th.start()
+        time.sleep(0.02)  # 让计数线程先跑起来
+        base = ticks
+        export()
+        gained = ticks - base
+        stop.set()
+        th.join()
+        # 持有 GIL 时整个导出期间计数线程拿不到时间片(gained≈0);释放时约每毫秒一次。
+        assert gained >= 5, f"{name}: ticker only advanced {gained} during a {solo:.3f}s export"

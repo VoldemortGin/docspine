@@ -18,9 +18,9 @@ pub use geom::{
     TWIPS_PER_POINT,
 };
 pub use model::{
-    Block, BreakKind, Cell, CellVAlign, Color, Diagnostic, DiagnosticKind, Document, HeightRule,
-    Orientation, PageMargins, Paragraph, Picture, Row, RunSegment, Section, Table, TableWidth,
-    TextRun, VMerge,
+    Block, BreakKind, Cell, CellVAlign, Color, CoreProperties, Diagnostic, DiagnosticKind,
+    Document, HeightRule, Orientation, PageMargins, Paragraph, Picture, Row, RunSegment, Section,
+    Table, TableWidth, TextRun, VMerge,
 };
 pub use numbering::{ListCounters, NumberingTable};
 pub use page_number::{format_page_number, PageNumFormat};

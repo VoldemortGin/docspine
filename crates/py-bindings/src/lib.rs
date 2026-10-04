@@ -467,6 +467,30 @@ impl PyDocument {
         Ok(list)
     }
 
+    /// 文档属性(`docProps/core.xml`):固定键 dict(`title` / `subject` / `creator` / `keywords` /
+    /// `description` / `category` / `last_modified_by` / `revision` / `created` / `modified` /
+    /// `language`),缺失值为 `None`;部件缺失 / 畸形时全 `None`。日期是原文字符串。
+    fn core_properties<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let p = &self.inner.core_properties;
+        let d = PyDict::new(py);
+        for (k, v) in [
+            ("title", &p.title),
+            ("subject", &p.subject),
+            ("creator", &p.creator),
+            ("keywords", &p.keywords),
+            ("description", &p.description),
+            ("category", &p.category),
+            ("last_modified_by", &p.last_modified_by),
+            ("revision", &p.revision),
+            ("created", &p.created),
+            ("modified", &p.modified),
+            ("language", &p.language),
+        ] {
+            d.set_item(k, v.as_deref())?;
+        }
+        Ok(d)
+    }
+
     /// 顶层正文块,作为 `list[dict]`(段落 / 表格)。
     fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
@@ -533,25 +557,29 @@ impl PyDocument {
     }
 
     /// 便利:把全文按段落顺序拼成纯文本(表格按行、单元格按 tab 连接)。
-    fn text(&self) -> String {
-        export::to_text(self.inner.as_ref())
+    fn text(&self, py: Python<'_>) -> String {
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || export::to_text(&inner))
     }
 
     /// 结构化导出:纯文本(等价于 [`text`](Self::text))。
-    fn to_text(&self) -> String {
-        export::to_text(self.inner.as_ref())
+    fn to_text(&self, py: Python<'_>) -> String {
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || export::to_text(&inner))
     }
 
     /// 结构化导出:Markdown。段落空行分隔,标题样式映射成 `#`;表格无合并时输出 GFM 管道表,
     /// 含合并单元格(横向 `gridSpan` / 纵向 `vMerge`)或嵌套表时退回 HTML `<table>` 保真合并。
-    fn to_markdown(&self) -> String {
-        export::to_markdown(self.inner.as_ref())
+    fn to_markdown(&self, py: Python<'_>) -> String {
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || export::to_markdown(&inner))
     }
 
     /// 结构化导出:HTML 片段。段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带 `rowspan`/
     /// `colspan`),文本经 HTML 转义。
-    fn to_html(&self) -> String {
-        export::to_html(self.inner.as_ref())
+    fn to_html(&self, py: Python<'_>) -> String {
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || export::to_html(&inner))
     }
 
     /// 布局保真导出:把文档渲染成 PDF 字节(doc-render / pdf-typeset 流式布局引擎;

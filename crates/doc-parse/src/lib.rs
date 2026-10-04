@@ -163,6 +163,11 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         .unwrap_or_default();
     let settings_path = pkg.related_part("settings", "word/settings.xml");
     let settings_xml = pkg.part_str(&settings_path);
+    // 核心属性:隐私字段,不参与任何诊断(截断检测也不做)。
+    let core_properties = pkg
+        .part_str(&pkg.core_properties_part())
+        .map(|s| xml::core_props::parse(&s))
+        .unwrap_or_default();
     if let Some(s) = settings_xml.as_deref() {
         record_truncation(&mut diags, &settings_path, s);
     }
@@ -186,6 +191,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             comments,
             alt_chunk_count,
             diagnostics: diags,
+            core_properties,
         },
         media,
     })

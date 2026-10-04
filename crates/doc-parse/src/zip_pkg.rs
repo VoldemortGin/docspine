@@ -177,6 +177,21 @@ impl Package {
         self.main.rsplit_once('/').map_or("", |(dir, _)| dir)
     }
 
+    /// 核心属性部件路径:经包根 `_rels/.rels` 里类型以 `/core-properties` 结尾的关系定位
+    /// (Target 相对包根),缺失 / 不存在时回退 `docProps/core.xml`。
+    pub fn core_properties_part(&self) -> String {
+        self.parts
+            .get("_rels/.rels")
+            .map(|b| parse_rels(&String::from_utf8_lossy(b)))
+            .and_then(|rels| {
+                rels.values()
+                    .filter(|r| r.rel_type.ends_with("/core-properties"))
+                    .filter_map(|r| resolve_part_path("", &r.target))
+                    .find(|p| self.parts.contains_key(p))
+            })
+            .unwrap_or_else(|| "docProps/core.xml".to_string())
+    }
+
     /// 附属部件的包内路径:优先经主部件 rels 按关系类型(`rel_suffix`,如 `styles`)定位 ——
     /// Target 相对主部件目录解析,逃出包根或指向不存在的部件都视为没找到 —— 找不到回退 `fallback`
     /// (固定路径,保持历史行为)。

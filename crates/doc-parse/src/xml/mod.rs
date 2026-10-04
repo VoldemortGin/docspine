@@ -10,6 +10,7 @@
 //! 本模块根放**关系(`.rels`)解析**与一批被多处复用的小工具(本地名、属性读取、跳树等)。
 //! 所有 walker 都遵循家族约定:未知元素跳过、缺失属性 → `None`、**绝不 panic**。
 
+pub mod core_props;
 pub mod document;
 pub mod numbering;
 pub mod props;

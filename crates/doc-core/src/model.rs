@@ -63,6 +63,36 @@ pub struct Document {
     /// 解析诊断:内容被静默截断 / 跳过 / 钳制时的结构化记录(见 [`Diagnostic`])。正常文件为空;
     /// 只含种类 / 部件路径 / 计数,**绝不含文档正文**。
     pub diagnostics: Vec<Diagnostic>,
+    /// 文档属性(`docProps/core.xml`);部件缺失 / 畸形时全 `None`。**隐私**:不进任何告警 / 诊断 / trace。
+    pub core_properties: CoreProperties,
+}
+
+/// 文档核心属性(`docProps/core.xml`):标题 / 作者 / 主题 / 关键词 / 创建·修改时间等,
+/// 全部原文字符串(日期不解析),缺失 / 空元素为 `None`。字段名与兄弟库 pptspine 的 `core_properties()` 对齐。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CoreProperties {
+    /// `dc:title`。
+    pub title: Option<String>,
+    /// `dc:subject`。
+    pub subject: Option<String>,
+    /// `dc:creator`(作者)。
+    pub creator: Option<String>,
+    /// `cp:keywords`。
+    pub keywords: Option<String>,
+    /// `dc:description`(备注)。
+    pub description: Option<String>,
+    /// `cp:category`。
+    pub category: Option<String>,
+    /// `cp:lastModifiedBy`。
+    pub last_modified_by: Option<String>,
+    /// `cp:revision`。
+    pub revision: Option<String>,
+    /// `dcterms:created`(W3CDTF 原文)。
+    pub created: Option<String>,
+    /// `dcterms:modified`(W3CDTF 原文)。
+    pub modified: Option<String>,
+    /// `dc:language`。
+    pub language: Option<String>,
 }
 
 /// 解析诊断的种类。`#[non_exhaustive]`:后续可能新增。[`DiagnosticKind::code`] 是稳定的
