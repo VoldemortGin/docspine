@@ -42,6 +42,9 @@ pub struct Document {
     /// 关系 id([`HeaderFooterRef::rel_id`])。只收有节引用且部件存在的;指向同一部件的
     /// 多个关系 id 已归一成同一个键,所以一个部件只出现一次。
     pub header_footers: BTreeMap<String, Vec<Block>>,
+    /// 奇偶页不同页眉页脚(`word/settings.xml > w:evenAndOddHeaders`,缺省 `false`):
+    /// 为真时偶数页用 `even` 类型,否则全用 `default`(见 [`Document::header_footer_for_page`])。
+    pub even_and_odd_headers: bool,
     /// 脚注(`word/footnotes.xml`):`w:id` -> 内容块。`w:type` 为 `separator` /
     /// `continuationSeparator` / `continuationNotice` 的非内容注已跳过。
     /// 正文里的引用见 [`RunSegment::NoteRef`]。
@@ -52,6 +55,45 @@ pub struct Document {
     /// 默认**不进** `to_text` / `to_markdown` / `to_html`;正文里的锚点见
     /// [`RunSegment::CommentRef`]。
     pub comments: BTreeMap<i64, Comment>,
+}
+
+impl Document {
+    /// 某一页实际生效的 `(页眉, 页脚)` 部件键([`Document::header_footers`] 的键;`None` = 无)。
+    ///
+    /// `section` 是节序号(0 起),`page_in_section` 是该节内的页序号(0 起),`page_number`
+    /// 是全局页码(1 起,奇偶判定用)。纯函数,规则同 Word:
+    /// - 本节 `w:titlePg` 为真且是节内首页 → `first`;
+    /// - 否则 `w:evenAndOddHeaders` 为真且页码为偶数 → `even`;
+    /// - 否则 → `default`。
+    ///
+    /// 选定类型在本节没有引用时逐节向前回溯同类型引用;一直没有就是无页眉 / 页脚。
+    /// 节序号越界返回 `(None, None)`。
+    pub fn header_footer_for_page(
+        &self,
+        section: usize,
+        page_in_section: usize,
+        page_number: usize,
+    ) -> (Option<&str>, Option<&str>) {
+        let Some(sect) = self.sections.get(section) else {
+            return (None, None);
+        };
+        let kind = if sect.title_pg && page_in_section == 0 {
+            HeaderFooterKind::First
+        } else if self.even_and_odd_headers && page_number.is_multiple_of(2) {
+            HeaderFooterKind::Even
+        } else {
+            HeaderFooterKind::Default
+        };
+        let pick = |refs: fn(&Section) -> &[HeaderFooterRef]| {
+            self.sections[..=section].iter().rev().find_map(|s| {
+                refs(s)
+                    .iter()
+                    .find(|r| r.kind == kind)
+                    .map(|r| r.rel_id.as_str())
+            })
+        };
+        (pick(|s| &s.headers), pick(|s| &s.footers))
+    }
 }
 
 /// 一条批注(`w:comment`)。作者 / 日期 / 内容属于文档内容,可进模型,但**不得**写进
@@ -104,7 +146,7 @@ impl HeaderFooterKind {
 
 /// 一节对某个页眉 / 页脚部件的引用(`w:sectPr > w:headerReference` / `w:footerReference`)。
 /// 内容在 [`Document::header_footers`] 里按 `rel_id` 取;解析层只保留能解析到存在部件的引用。
-/// 原样记录引用,不做“缺省则继承上一节”的推断。
+/// 原样记录引用;“缺省则继承上一节”与首页 / 奇偶页的生效判断见 [`Document::header_footer_for_page`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderFooterRef {
     pub kind: HeaderFooterKind,
@@ -141,6 +183,8 @@ pub struct Section {
     pub headers: Vec<HeaderFooterRef>,
     /// 本节的页脚引用(`w:footerReference`),语义同 [`Section::headers`]。
     pub footers: Vec<HeaderFooterRef>,
+    /// 首页不同页眉页脚(`w:titlePg`,缺省 `false`):为真时本节首页用 `first` 类型。
+    pub title_pg: bool,
     /// 本节覆盖的正文块区间的**排他性**结束下标(相对 [`Document::body`])。
     /// 本节的块为 `body[上一节.end_block .. 本节.end_block]`,首节从 0 起。
     pub end_block: usize,
@@ -156,6 +200,7 @@ impl Default for Section {
             cols: 1,
             headers: Vec::new(),
             footers: Vec::new(),
+            title_pg: false,
             end_block: 0,
         }
     }
@@ -285,6 +330,11 @@ pub struct TextRun {
     /// 该 run 是公式(`m:oMath`)的纯文本抽取:只保 `m:t` 文字,不含公式排版;
     /// PDF 渲染按普通文字出(一次性降级告警)。
     pub is_math: bool,
+    /// 该 run 属于哪个字段的结果(`w:fldSimple@w:instr` / 复杂字段 `w:instrText` 拼接,
+    /// 去首尾空白的原文,如 `"PAGE \* MERGEFORMAT"`);`None` = 不在字段结果里。
+    /// 正文与导出照用缓存结果文字;PDF 渲染页眉页脚时 `PAGE` / `NUMPAGES` 换成真实值。
+    /// 无缓存结果的字段留一个无分段、只带本标记的 run。
+    pub field: Option<String>,
 }
 
 /// 一个浮动文本框(`w:txbxContent`)的内容:段落与表格的块序列。
@@ -670,5 +720,145 @@ mod color_tests {
         assert_eq!(Color::from_hex("D\u{FFFD}D"), None); // 1 + 3 + 1 = 5 bytes
         assert_eq!(Color::from_hex("DD\u{FFFD}D"), None); // 2 + 3 + 1 = 6 bytes: 切点 4 在字符内
         assert_eq!(Color::from_hex("\u{4e2d}\u{6587}"), None); // 6 bytes,切点 2 在字符内
+    }
+}
+
+#[cfg(test)]
+mod header_footer_rule_tests {
+    use super::{Document, HeaderFooterKind, HeaderFooterRef, Section};
+
+    fn r(kind: HeaderFooterKind, id: &str) -> HeaderFooterRef {
+        HeaderFooterRef {
+            kind,
+            rel_id: id.to_string(),
+        }
+    }
+
+    /// 一节:页眉 / 页脚各三种类型都有(键 `h-*` / `f-*`)。
+    fn full_section(tag: &str) -> Section {
+        let kinds = [
+            HeaderFooterKind::Default,
+            HeaderFooterKind::First,
+            HeaderFooterKind::Even,
+        ];
+        Section {
+            headers: kinds
+                .iter()
+                .map(|k| r(*k, &format!("h-{tag}-{}", k.as_str())))
+                .collect(),
+            footers: kinds
+                .iter()
+                .map(|k| r(*k, &format!("f-{tag}-{}", k.as_str())))
+                .collect(),
+            ..Section::default()
+        }
+    }
+
+    fn doc_of(sections: Vec<Section>, even_odd: bool) -> Document {
+        Document {
+            sections,
+            even_and_odd_headers: even_odd,
+            ..Document::default()
+        }
+    }
+
+    #[test]
+    fn title_pg_off_uses_default_on_first_page() {
+        let d = doc_of(vec![full_section("a")], false);
+        assert_eq!(
+            d.header_footer_for_page(0, 0, 1),
+            (Some("h-a-default"), Some("f-a-default"))
+        );
+        assert_eq!(
+            d.header_footer_for_page(0, 1, 2),
+            (Some("h-a-default"), Some("f-a-default"))
+        );
+    }
+
+    #[test]
+    fn title_pg_on_uses_first_only_on_section_first_page() {
+        let mut s = full_section("a");
+        s.title_pg = true;
+        let d = doc_of(vec![s], false);
+        assert_eq!(
+            d.header_footer_for_page(0, 0, 1),
+            (Some("h-a-first"), Some("f-a-first"))
+        );
+        assert_eq!(
+            d.header_footer_for_page(0, 1, 2),
+            (Some("h-a-default"), Some("f-a-default"))
+        );
+    }
+
+    #[test]
+    fn even_and_odd_on_uses_even_on_even_page_numbers() {
+        let d = doc_of(vec![full_section("a")], true);
+        assert_eq!(d.header_footer_for_page(0, 0, 1).0, Some("h-a-default"));
+        assert_eq!(d.header_footer_for_page(0, 1, 2).0, Some("h-a-even"));
+        assert_eq!(d.header_footer_for_page(0, 2, 3).1, Some("f-a-default"));
+        assert_eq!(d.header_footer_for_page(0, 3, 4).1, Some("f-a-even"));
+        // 奇偶看全局页码,不看节内序号。
+        assert_eq!(d.header_footer_for_page(0, 0, 2).0, Some("h-a-even"));
+    }
+
+    #[test]
+    fn even_and_odd_off_ignores_even_parts() {
+        let d = doc_of(vec![full_section("a")], false);
+        assert_eq!(d.header_footer_for_page(0, 1, 2).0, Some("h-a-default"));
+    }
+
+    #[test]
+    fn title_pg_wins_over_even_on_first_page() {
+        let mut s = full_section("a");
+        s.title_pg = true;
+        let d = doc_of(vec![s], true);
+        assert_eq!(d.header_footer_for_page(0, 0, 2).0, Some("h-a-first"));
+    }
+
+    /// 本节缺某类型 → 逐节向前回溯同类型;中间节缺也继续往前。
+    #[test]
+    fn missing_kind_inherits_from_previous_sections() {
+        let first = full_section("a");
+        let mut second = Section::default();
+        second
+            .headers
+            .push(r(HeaderFooterKind::Default, "h-b-default"));
+        second.title_pg = true;
+        let third = Section {
+            title_pg: true,
+            ..Section::default()
+        };
+        let d = doc_of(vec![first, second, third], true);
+        // 第二节:default 页眉自有;页脚全继承第一节。
+        assert_eq!(
+            d.header_footer_for_page(1, 1, 3),
+            (Some("h-b-default"), Some("f-a-default"))
+        );
+        // 第二节首页(titlePg):first 继承第一节。
+        assert_eq!(
+            d.header_footer_for_page(1, 0, 3),
+            (Some("h-a-first"), Some("f-a-first"))
+        );
+        // 第三节一无所有:越过第二节继续回溯;偶数页取第一节的 even。
+        assert_eq!(
+            d.header_footer_for_page(2, 1, 6),
+            (Some("h-a-even"), Some("f-a-even"))
+        );
+        assert_eq!(d.header_footer_for_page(2, 1, 5).0, Some("h-b-default"));
+    }
+
+    /// 完全没有引用 / titlePg 开但无 first 引用 / 节序号越界:无页眉页脚。
+    #[test]
+    fn no_reference_anywhere_yields_none() {
+        let d = doc_of(vec![Section::default(), Section::default()], true);
+        assert_eq!(d.header_footer_for_page(1, 0, 4), (None, None));
+
+        let mut s = Section::default();
+        s.headers.push(r(HeaderFooterKind::Default, "h"));
+        s.title_pg = true;
+        let d = doc_of(vec![s], false);
+        assert_eq!(d.header_footer_for_page(0, 0, 1), (None, None));
+        assert_eq!(d.header_footer_for_page(0, 1, 2), (Some("h"), None));
+        assert_eq!(d.header_footer_for_page(5, 0, 1), (None, None));
     }
 }

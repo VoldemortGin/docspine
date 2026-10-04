@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 import warnings
+import zipfile
 from collections import Counter
 from pathlib import Path
 
@@ -903,3 +905,79 @@ def test_text_box_extracted_but_pdf_warns_and_skips():
     assert len(box_warnings) == 1, [str(w.message) for w in ws]
     assert issubclass(box_warnings[0].category, UserWarning)
     assert _open_pdf(pdf)[0].get_text().split() == ["Anchor", "Next"]
+
+
+# ============================================================ 页眉页脚:每页绘制 + 页码字段
+
+_HF_NS = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+)
+_HF_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _with_hf_parts(docx: bytes, parts: dict[str, str], rels: dict[str, tuple[str, str]]) -> bytes:
+    """在 ``build_docx`` 产物上追加部件与主文档关系(``rId -> (类型后缀, Target)``)。"""
+    src = zipfile.ZipFile(io.BytesIO(docx))
+    out = io.BytesIO()
+    extra = "".join(
+        f'<Relationship Id="{rid}" Type="{_HF_REL}/{ty}" Target="{target}"/>'
+        for rid, (ty, target) in rels.items()
+    )
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "word/_rels/document.xml.rels":
+                data = data.decode().replace("</Relationships>", f"{extra}</Relationships>").encode()
+            dst.writestr(info.filename, data)
+        for name, xml in parts.items():
+            dst.writestr(name, xml)
+    return out.getvalue()
+
+
+def test_header_footer_drawn_on_every_page_with_live_page_numbers():
+    """三页正文:每页画页眉;页脚 ``Page {PAGE} of {NUMPAGES}`` 逐页现算(缓存值 9 / 无缓存);
+    首页(titlePg)用 first 页眉,且无 first 页脚 → 首页无页脚(Word 行为);不再有页眉告警。"""
+    brk = '<w:r><w:br w:type="page"/></w:r>'
+    body = (
+        f"<w:p><w:r><w:t>One</w:t></w:r>{brk}<w:r><w:t>Two</w:t></w:r>{brk}"
+        "<w:r><w:t>Three</w:t></w:r></w:p>"
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/>'
+        '<w:headerReference w:type="first" r:id="rIdH1"/>'
+        '<w:footerReference w:type="default" r:id="rIdF"/><w:titlePg/></w:sectPr>'
+    )
+    footer = (
+        f'<w:ftr {_HF_NS}><w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        '<w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr="NUMPAGES"/></w:p></w:ftr>'
+    )
+    docx = _with_hf_parts(
+        build_docx(_DOC_HEADER + f"<w:body>{body}</w:body></w:document>"),
+        {
+            "word/header1.xml": f"<w:hdr {_HF_NS}><w:p><w:r><w:t>Running Head</w:t></w:r></w:p></w:hdr>",
+            "word/header2.xml": f"<w:hdr {_HF_NS}><w:p><w:r><w:t>Title Head</w:t></w:r></w:p></w:hdr>",
+            "word/footer1.xml": footer,
+        },
+        {
+            "rIdH": ("header", "header1.xml"),
+            "rIdH1": ("header", "header2.xml"),
+            "rIdF": ("footer", "footer1.xml"),
+        },
+    )
+    doc = docspine.open_bytes(docx)
+    with warnings.catch_warnings(record=True) as ws:
+        warnings.simplefilter("always")
+        pdf = doc.to_pdf()
+    assert not [w for w in ws if "header" in str(w.message).lower()], [str(w.message) for w in ws]
+    d = _open_pdf(pdf)
+    assert d.page_count == 3
+    pages = [d[i].get_text().split() for i in range(3)]
+    assert pages[0] == ["Title", "Head", "One"]
+    for i, words in enumerate(pages[1:], start=1):
+        assert words[:2] == ["Running", "Head"], words
+        assert words[-4:] == ["Page", str(i + 1), "of", "3"], words
+        # 页脚在页底:"Page" 的词框落在下边距(72pt)之内。
+        page_word = next(w for w in d[i].get_text_words() if w[4] == "Page")
+        assert page_word[1] > d[i].rect.height - 72.0

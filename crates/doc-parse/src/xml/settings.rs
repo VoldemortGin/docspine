@@ -1,5 +1,6 @@
 //! 解析 `word/settings.xml`(文档设置)—— 目前只取 `w:defaultTabStop@w:val`
-//! (缺省制表位间隔,twip;C-9 的制表位推进依据)。
+//! (缺省制表位间隔,twip;C-9 的制表位推进依据)与 `w:evenAndOddHeaders`(奇偶页不同
+//! 页眉页脚)。
 //!
 //! 与 numbering / styles walker 同一套模式:定位根元素,机械搬运需要的属性;
 //! 容错——部件畸形 / 属性缺失 → `None`,渲染侧落 Word 缺省 720 twip。
@@ -8,7 +9,7 @@ use doc_core::geom::Twips;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use super::{attr_of, local_name};
+use super::{attr_of, local_name, on_off_val};
 
 /// 解析 `word/settings.xml` 文本,返回 `w:defaultTabStop@w:val`(twip)。
 /// 非正值 / 缺失 / 畸形输入 → `None`。
@@ -32,6 +33,28 @@ pub fn parse(xml: &str) -> Option<Twips> {
         buf.clear();
     }
     None
+}
+
+/// 解析 `word/settings.xml` 文本,返回 `w:evenAndOddHeaders`(奇偶页不同页眉页脚)是否开启。
+/// 缺失 / 畸形输入 → `false`;on/off 语义同其它布尔开关(无 `w:val` 即真)。
+pub fn even_and_odd_headers(xml: &str) -> bool {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
+                if local_name(e.name().as_ref()) == b"evenAndOddHeaders" {
+                    return on_off_val(&e);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    false
 }
 
 // ============================================================ 单测

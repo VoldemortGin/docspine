@@ -40,7 +40,7 @@ all sharing the same `ocrspine` OCR core.
 | Embedded pictures: `r:embed` rel → media name + raw bytes + EMU extent | parsed |
 | Transparent wrappers: `w:sdt`, `w:customXml` (block + inline), `w:smartTag`, `w:hyperlink`, `w:fldSimple` (cached result), including row-level and cell-level `w:sdt` / `w:customXml` inside tables; complex fields keep the cached result, `w:instrText` never leaks | parsed |
 | Math `m:oMath` / `m:oMathPara`: `m:t` text extracted in order (fractions / scripts / radicals as `1/2`, `x^2`, `x_i`, `sqrt(x)`; `run["is_math"]`; no layout; PDF draws plain text, `math-flattened` warning) | extracted |
-| Headers / footers (`word/header*.xml` / `footer*.xml`; `default` / `first` / `even`, tables included): `sections()[i]["headers"|"footers"]` = `[{type, rel_id, blocks}]`; `to_text` / `to_markdown` / `to_html` emit each distinct part once (headers at the top as `[Header: default]` / `<header data-type="default">`, footers at the end); **not drawn** in PDF (`header-footer-not-rendered` warning) | extracted |
+| Headers / footers (`word/header*.xml` / `footer*.xml`; `default` / `first` / `even`, tables included): `sections()[i]["headers"|"footers"]` = `[{type, rel_id, blocks}]`; `to_text` / `to_markdown` / `to_html` emit each distinct part once (headers at the top as `[Header: default]` / `<header data-type="default">`, footers at the end); **drawn on every page** in the PDF (`w:titlePg` first page, `w:evenAndOddHeaders` even pages, missing types inherited from earlier sections; body pushed clear of tall headers/footers, `header-footer-overflow` warning when it cannot be; `PAGE` / `NUMPAGES` computed, other fields use the cached result) | extracted + rendered |
 | Comments (`word/comments.xml`): `comments()` = `[{id, author, date, initials, blocks}]` (missing attributes `None`), anchors are `kind == "comment_ref"` run segments (reference point only, no range); review metadata, so **not** in `to_text` / `to_markdown` / `to_html` and not drawn in PDF | extracted |
 | Footnotes / endnotes (`word/footnotes.xml` / `endnotes.xml`; separator notes skipped): `footnotes()` / `endnotes()` = `[{id, blocks}]`, references are `kind == "note_ref"` run segments; `to_text` marks `[1]` / `[e1]` + trailing list, `to_markdown` uses `[^1]` / `[^e1]` footnote syntax, `to_html` uses `<sup>` anchors with back-linked `<div class="note">` entries; **not drawn** in PDF (`notes-not-rendered` warning) | extracted |
 | Revisions (accept-all semantics): `w:ins` / `w:moveTo` kept, `w:del` / `w:moveFrom` dropped | parsed |
@@ -187,5 +187,5 @@ shrink it with `cargo +nightly fuzz tmin <target> <crash-file>`. To add a target
 
 - Full legacy binary `.doc` (OLE/CFB / `[MS-DOC]`) body reconstruction (FIB,
   piece table, CHPX/PAPX). Today: detection + typed downgrade + `probe_doc`.
-- Richer styling, comment ranges / threaded replies, fields, drawing headers/footers/footnotes in the PDF,
+- Richer styling, comment ranges / threaded replies, fields (beyond `PAGE` / `NUMPAGES` in headers/footers), drawing footnotes in the PDF,
   hyperlinks targets, SmartArt/charts.

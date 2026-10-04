@@ -34,8 +34,18 @@ w:type="page"`); tab-to-default-stops; theme1.xml fontScheme (major/minor latin 
 
 **v1 OUT of scope** (declared, with rationale; every degradation emits a structured warning):
 
-- **Headers/footers** — declared out for v1. Parts never read today (§3j); requires per-section
-  header/footer parts + a PAGE/NUMPAGES field engine (M–L on top of everything else).
+- **Headers/footers** — ~~declared out for v1~~ **landed (2026-10)**: drawn on every page in the
+  header/footer band (`w:pgMar@w:header` / `@w:footer`, Word default 720 twips) through the same block
+  mapping + engine `layout_text_box` (paragraphs, tables, inline and anchored images). Effective part per
+  page = `Document::header_footer_for_page` (`w:titlePg` → `first` on a section's first page,
+  `w:evenAndOddHeaders` → `even` on even page numbers, else `default`; a missing type inherits the same
+  type from earlier sections, none → nothing). Parts are measured (`measure_blocks`) before the body is
+  laid out and each page's body top / bottom is pushed clear of its header / footer (Word behaviour; a
+  negative top / bottom margin keeps the body fixed). If the push would leave less than
+  min(72pt, original body height), that page keeps its margins and one `header-footer-overflow` warning
+  fires. `PAGE` / `NUMPAGES` are computed (single body pass, then headers/footers per page; part heights
+  use the cached field text); other fields render their cached result. Parts holding only empty
+  paragraphs are treated as absent. The former `header-footer-not-rendered` warning was removed.
 - **Footnotes/endnotes** — per-page float layout with split/continuation is L-hard; parts never read
   (`w:footnoteReference` skipped, `document.rs:224`).
 - **Multi-column sections** — needs a column-balancing engine; `w:cols` parsed (C-2) but rendered
@@ -114,7 +124,7 @@ Verdicts against `crates/doc-parse` as of 2026-07-02. "Model growth" = which doc
 | i | Tab stops (`w:tabs`, settings.xml `defaultTabStop`) | **MISSING** (`w:tab` folded to `'\t'`, `document.rs:206-209`; settings.xml never read) | no `tabs` arm in `parse_ppr` | M (parse S, render M) | `ParaProps.tabs`; `Document.default_tab_stop` |
 | j | Hyperlink targets | **DONE** — `@r:id`→rels URI in `TextRun.link_target`; renders as a PDF `/Link` annotation via the engine's `RunStyle.link` (TS-11); internal `@w:anchor` stored as `"#name"`, not drawn + one-time warning | `document.rs` `hyperlink_target`; `map.rs` `push_runs` link threading | done | `TextRun.link_target` (landed) |
 | j | Footnotes/endnotes | **MISSING** | parts never read; refs skipped (`document.rs:224`) | L — **OUT v1** | — |
-| j | Headers/footers | **MISSING** | inside skipped sectPr (`document.rs:82-83`); parts never read | M–L — **OUT v1** | — |
+| j | Headers/footers | **DONE** — parsed (refs + parts, `w:titlePg`, settings `w:evenAndOddHeaders`) and drawn per page with body avoidance; `PAGE` / `NUMPAGES` computed in headers/footers | `document.rs` `apply_sectpr_prop` / `field_char`; `doc-render/src/header.rs` | done | `Section.title_pg`, `Document.even_and_odd_headers`, `TextRun.field` |
 | + | **Bonus bug: `w:sdt` content dropped wholesale** — cover pages / TOC text LOST | **MISSING** | `document.rs:82-83` + `skip_element` (`document.rs:620-638`) | S — fix in C-3 | none (transparent container) |
 | + | **Bonus bug: `w:fldSimple` cached result dropped** | **MISSING** | falls into `document.rs:127` skip | S — fix in C-3 | none (transparent container) |
 | + | **Silent drops (2026-10): `w:moveTo`, `w:smartTag`, `w:customXml` (block + inline), `mc:AlternateContent`, text boxes (`w:txbxContent`), `w:sym`/`w:softHyphen`/`w:noBreakHyphen`/`w:ptab`; VML `w:pict` with a nested shape truncated the rest of the body** | **FIXED** — wrappers transparent (same `MAX_NEST_DEPTH` guard), `w:moveFrom` dropped like `w:del`; AlternateContent = first `mc:Choice` that parses to non-empty content, else `mc:Fallback`; VML walker depth-counted; text boxes extracted only (`TextRun.text_boxes`, emitted after the anchoring paragraph), PDF not drawn + `TextBoxNotRendered` warning; soft hyphen stripped at render time | `document.rs` `parse_alternate_content` / `parse_text_box` / `push_run_char` | done | `TextBox { blocks }` on `TextRun` |

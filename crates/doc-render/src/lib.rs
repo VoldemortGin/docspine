@@ -5,7 +5,10 @@
 //! [`pdf-typeset`](pdf_typeset)(pdfspine Phase A,git dep + 钉死 rev):
 //!
 //! - **节 → 页面几何**:每一节对应一次 [`Typesetter::layout_flow`] 调用,分页回调
-//!   ([`pdf_typeset::PageProvider`])节内页页同几何;节界 = 强制新页 + 换几何。
+//!   ([`pdf_typeset::PageProvider`])节内页面尺寸不变、上/下边距按页眉页脚避让逐页取;
+//!   节界 = 强制新页 + 换几何。
+//! - **页眉页脚**(`header`):先量部件高度再排正文,正文排完(总页数已知)后逐页画,
+//!   `PAGE` / `NUMPAGES` 现算。
 //! - **有效样式驱动**:每段每 run 经 doc-core C-5 的 `resolve_para` / `resolve_run`
 //!   (表格内 `*_in_table`)得到最终值再喂引擎;渲染前 `styles.validate()` 一次,
 //!   体检告警并入 [`RenderWarning`]。
@@ -15,6 +18,7 @@
 //! 本 crate 不做 IO(`save_pdf` 的落盘在 py-bindings);与 `doc_core::export`
 //! 的字符串导出面无共享(那是内容级,这里是版面级)。
 
+mod header;
 mod map;
 mod section;
 mod table;
@@ -25,7 +29,7 @@ use std::path::Path;
 
 use doc_core::model::Document;
 use doc_core::{DocError, Result};
-use pdf_typeset::{FontResolver, ImageSpec, Op, Typesetter};
+use pdf_typeset::{FontResolver, ImageSpec, Op, PageOps, Typesetter};
 
 pub use warn::RenderWarning;
 
@@ -99,11 +103,35 @@ fn render_with(
         }
     }
 
+    let (pages, mut warnings) = layout_document(&mut ts, doc, media);
+    let result = ts
+        .emit(&pages)
+        .map_err(|e| DocError::Render(e.to_string()))?;
+
+    warnings.extend(result.warnings.into_iter().map(RenderWarning::Engine));
+    Ok(RenderResult {
+        pdf: result.pdf,
+        warnings,
+    })
+}
+
+/// 排版整篇文档:逐节流式排正文(页眉页脚先量、正文逐页避让),正文全部排完(总页数已知)
+/// 后逐页画页眉页脚;返回每页 ops + docspine 侧告警(引擎告警在 `emit` 时取)。
+fn layout_document(
+    ts: &mut Typesetter,
+    doc: &Document,
+    media: &BTreeMap<String, Vec<u8>>,
+) -> (Vec<PageOps>, Vec<RenderWarning>) {
     let mapped = map::map_document_with_media(doc, media);
+    let mut hf = header::HeaderFooters::new(doc, media);
     let mut pages = Vec::new();
-    for plan in &mapped.sections {
-        // 每节一个分页回调(节内页页同几何);引擎每起一页调用一次,含首页。
-        let mut provider = section::SectionPages::new(plan.geom);
+    // 每页的 (节序号, 节内页序号),页眉页脚选部件用。
+    let mut placement = Vec::new();
+    for (si, plan) in mapped.sections.iter().enumerate() {
+        hf.measure_section(ts, si, plan.geom);
+        // 每节一个分页回调;引擎每起一页调用一次,含首页。
+        let first_number = pages.len() + 1;
+        let mut provider = section::SectionPages::new(|k| hf.body_geom(si, k, first_number + k));
         let mut section_pages = ts.layout_flow(&plan.blocks, &mut provider);
         // 锚定浮动图(C-8):画在本节**首页**的绝对位置。behindDoc 衬于正文下方
         // (插到 ops 最前),否则叠加在上层(追加到末尾)。文字不环绕(声明降级)。
@@ -125,18 +153,13 @@ fn render_with(
                 }
             }
         }
+        placement.extend((0..section_pages.len()).map(|k| (si, k)));
         pages.extend(section_pages);
     }
-    let result = ts
-        .emit(&pages)
-        .map_err(|e| DocError::Render(e.to_string()))?;
-
+    hf.draw(ts, &mut pages, &placement);
     let mut warnings = mapped.warnings;
-    warnings.extend(result.warnings.into_iter().map(RenderWarning::Engine));
-    Ok(RenderResult {
-        pdf: result.pdf,
-        warnings,
-    })
+    warnings.extend(hf.into_warnings());
+    (pages, warnings)
 }
 
 // ============================================================ 冒烟测试(确定性字体)
@@ -272,10 +295,11 @@ mod tests {
         assert_eq!(n, 1);
     }
 
-    /// 页眉页脚只抽取不绘制:渲染不 panic、页数不变,`header-footer-not-rendered` 只报一次
-    /// (多个部件 / 多个节引用也只一次);内容为空的页眉不触发告警。
+    /// 页眉页脚现在照画(原 `header_footer_warns_once_and_is_not_drawn` 断言“告警一次且
+    /// 不画”,行为改变后改写):渲染不 panic、页数不变,页眉 / 页脚文字进了页面 ops,
+    /// 不再发任何 `header-footer-*` 告警;只有空页眉同样不告警。
     #[test]
-    fn header_footer_warns_once_and_is_not_drawn() {
+    fn header_footer_is_drawn_without_warning() {
         use doc_core::model::{HeaderFooterKind, HeaderFooterRef};
         let r = |id: &str| HeaderFooterRef {
             kind: HeaderFooterKind::Default,
@@ -299,13 +323,27 @@ mod tests {
         let n = |res: &RenderResult| {
             res.warnings
                 .iter()
-                .filter(|w| w.kind() == "header-footer-not-rendered")
+                .filter(|w| w.kind().starts_with("header-footer"))
                 .count()
         };
-        assert_eq!(n(&res), 1);
+        assert_eq!(n(&res), 0);
+        let (pages, _) = layout_document(&mut deterministic(), &doc, &BTreeMap::new());
+        let drawn: String = pages[0]
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.contains("header") && drawn.contains("footer"),
+            "{drawn}"
+        );
 
         // 只有空页眉:不告警。
         let mut empty = doc_of(vec![para("body")]);
+        empty.sections[0].headers = vec![r("h1")];
         empty
             .header_footers
             .insert("h1".into(), vec![DocBlock::Paragraph(Paragraph::default())]);

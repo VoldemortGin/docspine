@@ -129,9 +129,11 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         .theme_xml_str()
         .map(|s| xml::theme::parse(&s))
         .unwrap_or_default();
-    let default_tab_stop = pkg
-        .settings_xml_str()
-        .and_then(|s| xml::settings::parse(&s));
+    let settings_xml = pkg.settings_xml_str();
+    let default_tab_stop = settings_xml.as_deref().and_then(xml::settings::parse);
+    let even_and_odd_headers = settings_xml
+        .as_deref()
+        .is_some_and(xml::settings::even_and_odd_headers);
 
     Ok(ParsedDoc {
         document: Document {
@@ -142,6 +144,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             numbering,
             default_tab_stop,
             header_footers,
+            even_and_odd_headers,
             footnotes,
             endnotes,
             comments,

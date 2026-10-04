@@ -281,16 +281,6 @@ pub(crate) fn map_document_with_media(
         ctx.list.push(RenderWarning::Style(sw));
     }
 
-    // 页眉页脚有实际内容(段落有 run / 含表格)才报:Word 模板里的空页眉很常见。
-    if doc.header_footers.values().any(|blocks| {
-        blocks.iter().any(|b| match b {
-            DocBlock::Paragraph(p) => !p.runs.is_empty(),
-            DocBlock::Table(_) => true,
-        })
-    }) {
-        ctx.list.push(RenderWarning::HeaderFooterNotRendered);
-    }
-
     let mut sections = Vec::new();
     let mut start = 0usize;
     for sect in &doc.sections {
@@ -335,6 +325,38 @@ pub(crate) fn map_document_with_media(
     MappedDoc {
         sections,
         warnings: ctx.list,
+    }
+}
+
+/// 页眉 / 页脚部件的映射器:与正文分开的一份映射上下文(docspine 侧降级每种只报一次;
+/// 列表计数每次映射重置,部件按页重复映射也不累加编号)。
+pub(crate) struct PartMapper {
+    ctx: MapCtx,
+}
+
+impl PartMapper {
+    pub(crate) fn new() -> Self {
+        PartMapper { ctx: MapCtx::new() }
+    }
+
+    /// 在给定节几何(正文框架:表格 pct 宽 / 锚定图 margin 原点)下映射一个部件的块,
+    /// 返回引擎块 + 部件内锚定图的覆盖层(页坐标)。
+    pub(crate) fn map(
+        &mut self,
+        doc: &Document,
+        blocks: &[DocBlock],
+        geom: &PageGeom,
+        media: &BTreeMap<String, Vec<u8>>,
+    ) -> (Vec<Block>, Vec<AnchoredImage>) {
+        self.ctx.set_frame(geom);
+        self.ctx.counters = ListCounters::new();
+        let out = map_blocks(doc, blocks, None, &mut self.ctx, media);
+        (out, std::mem::take(&mut self.ctx.overlays))
+    }
+
+    /// 部件映射期间累积的降级告警。
+    pub(crate) fn into_warnings(self) -> Vec<RenderWarning> {
+        self.ctx.list
     }
 }
 

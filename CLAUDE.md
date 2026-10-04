@@ -40,7 +40,7 @@ docspine 是文档引擎三件套(pdf / ppt / doc)里的 `doc`,与 pdfspine / pp
   (`w:instrText` 不进正文);`mc:AlternateContent` 取第一个产出非空内容的 `mc:Choice`,否则 `mc:Fallback`
   (绝不两份都出);浮动文本框只抽取(`TextRun.text_boxes`,导出紧随锚定段落),PDF 不画 + 告警;
   行级·单元格级 `w:sdt`/`w:customXml` 透明展开;`m:oMath`/`m:oMathPara` 只抽 `m:t` 文本(分式 / 上下标 / 根号用 `1/2`·`x^2`·`x_i`·`sqrt(x)` 线性记法消歧,`TextRun.is_math`,PDF 按普通文字出 + `math-flattened` 告警)。
-  页眉页脚(`Section.headers/footers` 引用 + `Document.header_footers` 部件表,按部件去重导出)与脚注尾注(`Document.footnotes/endnotes` + `RunSegment::NoteRef` 引用)只抽取进 `to_text`/`to_markdown`/`to_html`(HTML 用 `<header>`/`<footer>` + `<sup>` 锚点与回链),PDF 不画 + `header-footer-not-rendered` / `notes-not-rendered` 告警。
+  页眉页脚(`Section.headers/footers` 引用 + `Document.header_footers` 部件表,按部件去重导出)与脚注尾注(`Document.footnotes/endnotes` + `RunSegment::NoteRef` 引用)只抽取进 `to_text`/`to_markdown`/`to_html`(HTML 用 `<header>`/`<footer>` + `<sup>` 锚点与回链),页眉页脚 PDF 逐页照画(`doc-render/src/header.rs`:生效部件走 `Document::header_footer_for_page`——`w:titlePg` 首页 / `w:evenAndOddHeaders` 偶数页 / 缺类型逐节向前继承;先量后排、正文避让,避不开时 `header-footer-overflow`;`PAGE`/`NUMPAGES` 现算,其余字段用缓存结果,`TextRun.field` 记字段指令);脚注尾注 PDF 不画 + `notes-not-rendered` 告警。
   批注部件(`word/comments.xml` → `Document.comments` + 正文 `RunSegment::CommentRef` 引用点;作者 / 内容是文档内容可进模型,但**不得**进 trace / 日志 / 告警)是审阅元数据,默认**不进**任何导出,PDF 不画。
   仍未覆盖:批注范围(`commentRangeStart/End`)、`commentsExtended` 回复链。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
@@ -80,7 +80,7 @@ crates/
     src/xml/styles.rs    styles.xml → StyleTable:docDefaults + 样式定义(id/basedOn/type/default)
     src/xml/theme.rs     theme1.xml → Theme:clrScheme 颜色槽 + fontScheme 主/次字体
     src/xml/numbering.rs numbering.xml → NumberingTable:num → abstractNum + 每层 lvl
-    src/xml/settings.rs  settings.xml → defaultTabStop(C-9 制表位间隔;缺失落 720 twip 缺省)
+    src/xml/settings.rs  settings.xml → defaultTabStop(C-9 制表位间隔;缺失落 720 twip 缺省)+ evenAndOddHeaders
     src/legacy.rs  旧二进制 .doc(OLE/CFB)探测:probe_doc(legacy-doc 特性) + CFB_MAGIC 早判
   doc-ocr/     图片 OCR 桥 + 图像表格几何重建。#![forbid(unsafe_code)]
     src/lib.rs     ocr_image_bytes / DocOcr{engine};把 OcrWord 映射成 OcrItem
@@ -88,7 +88,8 @@ crates/
   doc-render/  docx IR → PDF 布局保真渲染(PRD-PDF-EXPORT):over 家族共享 pdf-typeset 引擎(git dep)。#![forbid(unsafe_code)]
     src/lib.rs     render_pdf / RenderOptions{font_map} / RenderResult{pdf, warnings};按节 layout_flow
     src/map.rs     doc-core IR → 引擎 Block:有效样式驱动 + run 分段 + 列表标签 + 图片/EMF·WMF 占位
-    src/section.rs 节 → PageGeom + 分页回调(节内页页同几何,节界换几何)
+    src/section.rs 节 → PageGeom + 分页回调(逐页取几何:页眉页脚避让改上/下边距,节界换几何)
+    src/header.rs  页眉页脚:按页选部件 + 先量后排正文避让 + 页眉/页脚区排版 + PAGE/NUMPAGES 现算
     src/table.rs   表格映射:span map 压平 + 边框冲突消解 + 单元格边距/行高 + vAlign 引擎锚定
     src/warn.rs    RenderWarning 枚举(引擎侧 + docspine 侧降级)+ kind() 去重标签
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]

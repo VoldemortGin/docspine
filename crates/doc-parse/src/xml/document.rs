@@ -46,11 +46,42 @@ use super::{
 /// [`skip_element`](迭代、不递归)静默跳过,与“未知元素跳过”的容错策略一致。
 const MAX_NEST_DEPTH: u32 = 64;
 
-/// 解析期上下文:rel 映射(图片 r:id -> media 名) + media 长度索引 + 嵌套深度计数。
+/// 解析期上下文:rel 映射(图片 r:id -> media 名) + media 长度索引 + 嵌套深度计数 +
+/// 复杂字段状态(`w:fldChar` 跨 run、跨段落,一个部件一份)。
 struct Ctx<'a> {
     rels: &'a BTreeMap<String, Relationship>,
     media_index: &'a BTreeMap<String, usize>,
     depth: std::cell::Cell<u32>,
+    fields: std::cell::RefCell<FieldStack>,
+}
+
+/// 复杂字段(`w:fldChar` begin / separate / end)的嵌套栈。
+#[derive(Default)]
+struct FieldStack {
+    frames: Vec<FieldFrame>,
+    /// 仍处在指令区(未遇 `separate`)的帧数:为 0 且栈非空时当前位置是可见的字段结果。
+    hidden: usize,
+}
+
+/// 一层复杂字段:指令文字(`w:instrText` 拼接)+ 是否已进入结果区。
+struct FieldFrame {
+    instr: String,
+    in_result: bool,
+}
+
+impl FieldStack {
+    /// 当前位置若是(各层都已进入结果区的)可见字段结果,返回最内层字段的指令。
+    fn visible_instr(&self) -> Option<String> {
+        if self.hidden > 0 {
+            return None;
+        }
+        self.frames.last().map(|f| f.instr.trim().to_string())
+    }
+
+    /// 当前位置是否可见(不在任何字段的指令区里)。
+    fn is_visible(&self) -> bool {
+        self.hidden == 0
+    }
 }
 
 /// 一层递归容器的深度占位;离开作用域时深度减一。
@@ -91,6 +122,7 @@ pub fn parse(
         rels: &rels,
         media_index,
         depth: std::cell::Cell::new(0),
+        fields: Default::default(),
     };
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -126,6 +158,7 @@ pub fn parse_hdr_ftr(
         rels: &rels,
         media_index,
         depth: std::cell::Cell::new(0),
+        fields: Default::default(),
     };
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -149,6 +182,7 @@ pub fn parse_notes(
         rels: &rels,
         media_index,
         depth: std::cell::Cell::new(0),
+        fields: Default::default(),
     };
     let mut notes = BTreeMap::new();
     let mut reader = Reader::from_str(xml);
@@ -202,6 +236,7 @@ pub fn parse_comments(
         rels: &rels,
         media_index,
         depth: std::cell::Cell::new(0),
+        fields: Default::default(),
     };
     let mut comments = BTreeMap::new();
     let mut reader = Reader::from_str(xml);
@@ -431,6 +466,7 @@ fn apply_sectpr_prop(e: &BytesStart, sect: &mut Section) {
                 sect.cols = n;
             }
         }
+        b"titlePg" => sect.title_pg = on_off_val(e),
         // 页眉 / 页脚引用:先只记 `r:id` + 类型,部件由 lib.rs 经 rels 解析并归一。
         name @ (b"headerReference" | b"footerReference") => {
             if let Some(rel_id) = attr_of(e, b"id").filter(|id| !id.is_empty()) {
@@ -487,9 +523,16 @@ fn parse_paragraph<R: std::io::BufRead>(
                         }
                     }
                     // 修订插入 `w:ins` / 修订移动目标 `w:moveTo` / 字段 `w:fldSimple`(缓存的
-                    // 字段结果)/ 智能标记 `w:smartTag` / 行内 `w:customXml` 也是 run 容器:
-                    // 展开其中的 run。`w:ins`·`w:moveTo` 按“接受修订”语义保留正文。
-                    b"ins" | b"moveTo" | b"fldSimple" | b"smartTag" | b"customXml" => {
+                    // 字段结果,run 盖上字段指令)/ 智能标记 `w:smartTag` / 行内 `w:customXml`
+                    // 也是 run 容器:展开其中的 run。`w:ins`·`w:moveTo` 按“接受修订”语义保留正文。
+                    b"fldSimple" => {
+                        para.runs.extend(
+                            parse_fld_simple(reader, &e, ctx)
+                                .into_iter()
+                                .filter(has_content),
+                        );
+                    }
+                    b"ins" | b"moveTo" | b"smartTag" | b"customXml" => {
                         para.runs.extend(
                             parse_run_container(reader, ctx)
                                 .into_iter()
@@ -516,7 +559,12 @@ fn parse_paragraph<R: std::io::BufRead>(
                     _ => skip_element(reader),
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            // 自闭合 `w:fldSimple`:无缓存结果的字段,留一个带标记的空 run。
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"fldSimple" {
+                    para.runs.extend(empty_field_run(&e, ctx));
+                }
+            }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -638,7 +686,8 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
                             runs.push(run);
                         }
                     }
-                    b"ins" | b"moveTo" | b"fldSimple" | b"smartTag" | b"customXml" => {
+                    b"fldSimple" => runs.extend(parse_fld_simple(reader, &e, ctx)),
+                    b"ins" | b"moveTo" | b"smartTag" | b"customXml" => {
                         runs.extend(parse_run_container(reader, ctx));
                     }
                     b"sdt" => runs.extend(parse_sdt_runs(reader, ctx)),
@@ -647,7 +696,11 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
                     _ => skip_element(reader),
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"fldSimple" {
+                    runs.extend(empty_field_run(&e, ctx));
+                }
+            }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -658,11 +711,93 @@ fn parse_run_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -
     runs
 }
 
+/// 解析 `w:fldSimple`(已消费起始标签 `e`):展开其中的缓存结果 run,并给尚未带字段标记的
+/// run 盖上 `@w:instr`(去首尾空白)。没有任何缓存结果时留一个带标记的空 run。
+/// 位于外层复杂字段指令区里(不可见)时不盖标记。
+fn parse_fld_simple<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    e: &BytesStart,
+    ctx: &Ctx,
+) -> Vec<TextRun> {
+    let instr = fld_simple_instr(e, ctx);
+    let mut runs = parse_run_container(reader, ctx);
+    if let Some(instr) = instr {
+        if !runs.iter().any(has_content) {
+            runs.push(TextRun {
+                field: Some(instr),
+                ..TextRun::default()
+            });
+        } else {
+            for run in &mut runs {
+                if run.field.is_none() && has_content(run) {
+                    run.field = Some(instr.clone());
+                }
+            }
+        }
+    }
+    runs
+}
+
+/// 自闭合 `w:fldSimple`:无缓存结果,留一个只带字段标记的空 run(指令为空 / 不可见则无)。
+fn empty_field_run(e: &BytesStart, ctx: &Ctx) -> Option<TextRun> {
+    fld_simple_instr(e, ctx).map(|instr| TextRun {
+        field: Some(instr),
+        ..TextRun::default()
+    })
+}
+
+/// `w:fldSimple@w:instr` 去首尾空白;空指令或位于不可见的字段指令区时 `None`。
+fn fld_simple_instr(e: &BytesStart, ctx: &Ctx) -> Option<String> {
+    if !ctx.fields.borrow().is_visible() {
+        return None;
+    }
+    attr_of(e, b"instr")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 复杂字段字符 `w:fldChar@w:fldCharType`:`begin` 入栈、`separate` 进入结果区、`end` 出栈。
+/// 孤立的 `separate` / `end` 忽略。无结果区的字段在可见位置结束时,给当前 run 盖上该字段的
+/// 指令(渲染侧据此在页眉页脚里现算 `PAGE` / `NUMPAGES`)。
+fn field_char(e: &BytesStart, ctx: &Ctx, run: &mut TextRun) {
+    let mut st = ctx.fields.borrow_mut();
+    match attr_of(e, b"fldCharType").as_deref() {
+        Some("begin") => {
+            st.frames.push(FieldFrame {
+                instr: String::new(),
+                in_result: false,
+            });
+            st.hidden += 1;
+        }
+        Some("separate") => {
+            if let Some(top) = st.frames.last_mut() {
+                if !top.in_result {
+                    top.in_result = true;
+                    st.hidden -= 1;
+                }
+            }
+        }
+        Some("end") => {
+            if let Some(top) = st.frames.pop() {
+                if !top.in_result {
+                    st.hidden -= 1;
+                    let instr = top.instr.trim();
+                    if st.is_visible() && !instr.is_empty() && run.field.is_none() {
+                        run.field = Some(instr.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// 解析 `w:r`(文本 run):`w:rPr`(字体/字号/粗斜/下划线/颜色)+ 内容分段
 /// (`w:t` -> `Text`、`w:tab`/`w:ptab` -> `Tab`、`w:br`/`w:cr` -> `Break`,`w:br@w:type`
 /// 区分换行/换页/换栏;`w:sym` / `w:softHyphen` / `w:noBreakHyphen` -> 对应字符)+
 /// `w:drawing`/`w:pict`(内嵌图片与浮动文本框)+ run 内 `mc:AlternateContent`。
-/// 已消费 `<w:r>` 起始标签。字段指令 `w:instrText` 走缺省 skip(只留缓存结果)。
+/// 已消费 `<w:r>` 起始标签。字段指令 `w:instrText` 不进正文(只留缓存结果),只累积进
+/// 复杂字段栈;处在可见字段结果里的 run 盖上该字段指令([`TextRun::field`])。
 fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun {
     let mut run = TextRun::default();
     let mut buf = Vec::new();
@@ -673,6 +808,17 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
                 match name.as_slice() {
                     b"rPr" => apply_direct_rpr(&mut run, props::parse_rpr(reader)),
                     b"t" => run.push_text(&read_text(reader)),
+                    b"instrText" => {
+                        let text = read_text(reader);
+                        let mut st = ctx.fields.borrow_mut();
+                        if let Some(top) = st.frames.last_mut().filter(|f| !f.in_result) {
+                            top.instr.push_str(&text);
+                        }
+                    }
+                    b"fldChar" => {
+                        field_char(&e, ctx, &mut run);
+                        skip_element(reader);
+                    }
                     b"drawing" => {
                         if let Some(pic) = parse_drawing(reader, ctx, &mut run.text_boxes) {
                             run.pictures.push(pic);
@@ -703,7 +849,11 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                push_run_char(&mut run, &e, &name);
+                if name == b"fldChar" {
+                    field_char(&e, ctx, &mut run);
+                } else {
+                    push_run_char(&mut run, &e, &name);
+                }
             }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
@@ -711,6 +861,9 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
             _ => {}
         }
         buf.clear();
+    }
+    if run.field.is_none() && has_content(&run) {
+        run.field = ctx.fields.borrow().visible_instr();
     }
     run
 }
@@ -756,9 +909,12 @@ fn push_run_char(run: &mut TextRun, e: &BytesStart, name: &[u8]) {
     }
 }
 
-/// run 是否值得保留:有内容分段、图片或浮动文本框。
+/// run 是否值得保留:有内容分段、图片、浮动文本框,或是无缓存结果字段的标记 run。
 fn has_content(run: &TextRun) -> bool {
-    !run.segments.is_empty() || !run.pictures.is_empty() || !run.text_boxes.is_empty()
+    !run.segments.is_empty()
+        || !run.pictures.is_empty()
+        || !run.text_boxes.is_empty()
+        || run.field.is_some()
 }
 
 /// 读 `w:br@w:type` 的断种类:`page` 换页、`column` 换栏、其余(含缺省 `textWrapping`)换行。

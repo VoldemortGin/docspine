@@ -53,9 +53,9 @@ pub enum RenderWarning {
     /// 公式(`m:oMath` / `m:oMathPara`)只抽取 `m:t` 纯文本:PDF 按普通文字出,不做
     /// 公式排版(分式 / 上下标 / 根号等结构丢失;v1 声明降级;文字不丢)。
     MathFlattened,
-    /// 页眉 / 页脚(`word/header*.xml` / `footer*.xml`)只抽取(进 `to_text` / `to_markdown`),
-    /// PDF **不绘制**(v1 声明降级;正文照常,页边距照旧)。
-    HeaderFooterNotRendered,
+    /// 页眉 / 页脚内容过高:按 Word 行为下推 / 上推正文会让正文区小于下限(72pt 或原正文高),
+    /// 该页正文退回按原上 / 下边距排,页眉页脚照画(可能与正文重叠)。
+    HeaderFooterOverflow,
     /// 脚注 / 尾注只抽取(进 `to_text` / `to_markdown`),PDF **不绘制**注文,正文里的引用
     /// 标记也不画(v1 声明降级;正文照常)。
     NotesNotRendered,
@@ -92,7 +92,7 @@ impl RenderWarning {
             RenderWarning::CustomTabStopsIgnored => "custom-tab-stops-ignored",
             RenderWarning::TextBoxNotRendered => "text-box-not-rendered",
             RenderWarning::MathFlattened => "math-flattened",
-            RenderWarning::HeaderFooterNotRendered => "header-footer-not-rendered",
+            RenderWarning::HeaderFooterOverflow => "header-footer-overflow",
             RenderWarning::NotesNotRendered => "notes-not-rendered",
         }
     }
@@ -183,11 +183,11 @@ impl fmt::Display for RenderWarning {
                      (fractions, scripts, radicals) is not reproduced in this version"
                 )
             }
-            RenderWarning::HeaderFooterNotRendered => {
+            RenderWarning::HeaderFooterOverflow => {
                 write!(
                     f,
-                    "headers and footers are extracted to text/markdown but not drawn \
-                     in the PDF in this version"
+                    "a header or footer is too tall to push the body clear of it; the body \
+                     keeps the page margins and may overlap the header or footer"
                 )
             }
             RenderWarning::NotesNotRendered => {

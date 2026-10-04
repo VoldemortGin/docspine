@@ -1,29 +1,33 @@
 //! 节([`Section`])→ 每页几何([`PageGeom`])+ 分页回调([`PageProvider`])。
 //!
-//! 引擎的流式布局每**起一页**(含首页)调用一次 `next_page`;docspine 一节之内页页
-//! 同几何,节界处换几何。渲染层对每一节各跑一次 `layout_flow`(节界 = 强制起新页 +
-//! 换页面几何,语义与「节界处塞 `Block::PageBreak`」一致——引擎的回调无法区分
-//! 溢出换页与显式换页,所以节的推进由渲染层的按节调用驱动)。
+//! 引擎的流式布局每**起一页**(含首页)调用一次 `next_page`;docspine 一节之内页面尺寸与
+//! 左右边距不变,上 / 下边距可能因页眉页脚避让逐页不同(首页 / 奇偶页用不同部件),节界处
+//! 换几何。渲染层对每一节各跑一次 `layout_flow`(节界 = 强制起新页 + 换页面几何,语义与
+//! 「节界处塞 `Block::PageBreak`」一致——引擎的回调无法区分溢出换页与显式换页,所以节的
+//! 推进由渲染层的按节调用驱动)。
 
 use doc_core::geom::twips_to_points;
 use doc_core::model::Section;
 use pdf_typeset::{PageGeom, PageProvider};
 
-/// 一节的分页回调:节内每页返回同一份几何。
-pub(crate) struct SectionPages {
-    geom: PageGeom,
+/// 一节的分页回调:按节内页序号(0 起)逐页取几何。
+pub(crate) struct SectionPages<F> {
+    next: usize,
+    geom_for: F,
 }
 
-impl SectionPages {
-    /// 由一节的页面几何(已换算成磅)构造。
-    pub(crate) fn new(geom: PageGeom) -> Self {
-        SectionPages { geom }
+impl<F: FnMut(usize) -> PageGeom> SectionPages<F> {
+    /// 由「节内页序号 → 该页几何(已换算成磅)」构造。
+    pub(crate) fn new(geom_for: F) -> Self {
+        SectionPages { next: 0, geom_for }
     }
 }
 
-impl PageProvider for SectionPages {
+impl<F: FnMut(usize) -> PageGeom> PageProvider for SectionPages<F> {
     fn next_page(&mut self) -> PageGeom {
-        self.geom
+        let geom = (self.geom_for)(self.next);
+        self.next += 1;
+        geom
     }
 }
 

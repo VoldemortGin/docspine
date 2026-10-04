@@ -41,6 +41,31 @@ change.
 
 ### Added
 
+- **PDF export draws headers and footers on every page.** The effective part per
+  page comes from the new pure `Document::header_footer_for_page(section,
+  page_in_section, page_number)`: `w:titlePg` selects `first` on a section's first
+  page, `w:evenAndOddHeaders` (`word/settings.xml`) selects `even` on even page
+  numbers, otherwise `default`; a type a section lacks is inherited from the
+  nearest earlier section, and none means no header/footer. Parts go through the
+  body's block mapping and the engine's `layout_text_box` (paragraphs, tables,
+  inline and anchored images; an image is embedded once however many pages repeat
+  it), placed at `w:pgMar@w:header` from the top / `@w:footer` from the bottom.
+  Part heights are measured before the body is laid out, and each page's body is
+  pushed below its header / above its footer like Word (negative top / bottom
+  margins keep the body fixed); when the push would leave less than
+  min(72pt, original body height) the page keeps its margins and one
+  `header-footer-overflow` warning fires. `PAGE` and `NUMPAGES` are computed in
+  headers/footers (one body pass, then headers/footers per page with the known
+  total; part heights use the cached field text). Other fields, and all fields in
+  the body, keep their cached result. Parts holding only empty paragraphs are
+  treated as absent. SSIM baselines are unchanged (no fixture has headers).
+- **Fields are marked in the model**: `TextRun.field` holds the field instruction
+  (`w:fldSimple@w:instr`, or the joined `w:instrText` of a `w:fldChar`
+  begin/separate/end field, nesting-aware and spanning paragraphs) on runs that
+  are part of a visible field result; a field without a cached result leaves one
+  empty run carrying only the mark. Text and exports are unchanged.
+  `Section.title_pg` (`w:titlePg`) and `Document.even_and_odd_headers` are parsed.
+
 - **Parse + cascade rPr `w:spacing`** (character spacing, twips, signed) **and
   `w:position`** (manual baseline shift, half-points); mapped to engine
   `CharacterSpacing` (condensed via `resolved_signed`) and an additive baseline
@@ -106,7 +131,7 @@ change.
   notes by first reference (`[1]` / `[e1]` plus a trailing list; Markdown
   `[^1]` / `[^e1]` with `[^1]: ...` definitions). References to missing ids,
   rels to missing parts and malformed parts degrade without panicking. PDF export still does not draw them and emits one
-  `header-footer-not-rendered` and one `notes-not-rendered` warning; SSIM
+  `header-footer-not-rendered` (removed again later in this cycle, see Breaking) and one `notes-not-rendered` warning; SSIM
   baselines are unchanged. Python: `sections()[i]["headers"|"footers"]`,
   `Document.footnotes()` / `endnotes()`, `kind == "note_ref"` run segments, and
   the previously missing `run["is_math"]`.
@@ -118,6 +143,13 @@ change.
   `RenderWarning` gains `HeaderFooterNotRendered` / `NotesNotRendered`. Struct
   literals without `..Default::default()` and exhaustive matches on `RunSegment` /
   `RenderWarning` must be updated.
+- Headers/footers are now drawn, so `RenderWarning::HeaderFooterNotRendered`
+  (`header-footer-not-rendered`) is removed; `RenderWarning::HeaderFooterOverflow`
+  (`header-footer-overflow`) is added. `Document` gains `even_and_odd_headers`,
+  `Section` gains `title_pg`, `TextRun` gains `field`: struct literals without
+  `..Default::default()` and exhaustive matches on `RenderWarning` must be updated.
+  Python run lists can now contain an empty run marking a field that has no
+  cached result.
 
 ### Fixed
 
