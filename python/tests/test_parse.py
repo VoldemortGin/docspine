@@ -620,3 +620,48 @@ def test_math_run_exposes_is_math_flag():
     )
     doc = docspine.open_bytes(build_docx(_DOC_HEADER + body + "</w:document>"))
     assert [r["is_math"] for r in doc.paragraphs()[0]["runs"]] == [False, True]
+
+
+def test_field_run_title_pg_even_odd_and_page_numbering_exposed():
+    """run["field"] / section 的 title_pg 与页码设置 / document 的 even_and_odd_headers。"""
+    fld = (
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        "<w:r><w:instrText> PAGE </w:instrText></w:r>"
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        "<w:r><w:t>3</w:t></w:r>"
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    )
+    body = (
+        f"<w:body><w:p><w:r><w:t>plain</w:t></w:r>{fld}</w:p>"
+        '<w:p><w:pPr><w:sectPr><w:titlePg/>'
+        '<w:pgNumType w:fmt="lowerRoman" w:start="0"/></w:sectPr></w:pPr></w:p>'
+        '<w:p/><w:sectPr><w:pgNumType w:fmt="ordinal" w:start="-2"/></w:sectPr></w:body>'
+    )
+    settings = f'<w:settings xmlns:w="{_W_NS}"><w:evenAndOddHeaders/></w:settings>'
+    doc = docspine.open_bytes(
+        build_docx(_DOC_HEADER + body + "</w:document>", settings_xml=settings)
+    )
+
+    runs = doc.paragraphs()[0]["runs"]
+    assert [(r["text"], r["field"]) for r in runs if r["text"]] == [
+        ("plain", None),
+        ("3", "PAGE"),
+    ]
+
+    first, second = doc.sections()
+    assert first["title_pg"] is True
+    assert (first["page_number_start"], first["page_number_format"]) == (0, "lowerRoman")
+    assert second["title_pg"] is False
+    # 非法 start(负数)按缺失 = None;不支持的 fmt 暴露为 "other"。
+    assert (second["page_number_start"], second["page_number_format"]) == (None, "other")
+    assert doc.even_and_odd_headers is True
+
+
+def test_page_numbering_defaults_when_not_declared(minimal_docx_bytes):
+    doc = docspine.open_bytes(minimal_docx_bytes)
+    (sect,) = doc.sections()
+    assert sect["title_pg"] is False
+    assert sect["page_number_start"] is None
+    assert sect["page_number_format"] == "decimal"
+    assert doc.even_and_odd_headers is False
+    assert all(r["field"] is None for p in doc.paragraphs() for r in p["runs"])

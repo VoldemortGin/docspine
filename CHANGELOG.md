@@ -81,6 +81,11 @@ change.
   shifts which pages are even. New pure `format_page_number` and
   `Section::first_page_number`. `oddPage` / `evenPage` section breaks still insert
   no blank page.
+- **Python exposes the header/footer rule and page numbering model.**
+  `run["field"]` (field instruction or `None`), `sections()[i]["title_pg"]`,
+  `sections()[i]["page_number_start"]` (`int | None`),
+  `sections()[i]["page_number_format"]` (`"decimal"`, `"lowerRoman"`, `"upperRoman"`,
+  `"lowerLetter"`, `"upperLetter"` or `"other"`) and `Document.even_and_odd_headers`.
 
 - **Parse + cascade rPr `w:spacing`** (character spacing, twips, signed) **and
   `w:position`** (manual baseline shift, half-points); mapped to engine

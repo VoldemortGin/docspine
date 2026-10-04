@@ -22,7 +22,7 @@ use doc_core::model::{
     Block, BreakKind, Cell, Color, Comment, Document as CoreDocument, HeaderFooterRef, NoteKind,
     Orientation, Paragraph, Picture, Row, RunSegment, Section, Table, TextRun, VMerge,
 };
-use doc_core::DocError;
+use doc_core::{DocError, PageNumFormat};
 use doc_parse::{parse_bytes, parse_path};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyOSError, PyValueError};
@@ -116,7 +116,8 @@ fn segment_dict<'py>(py: Python<'py>, seg: &RunSegment) -> PyResult<Bound<'py, P
 }
 
 /// 一个 [`TextRun`] -> dict。`text` 是分段折叠后的纯文本(契约不变:Tab -> `\t`、
-/// Break -> `\n`);`segments` 是无损的内容分段(`w:br@w:type` 不再丢失)。
+/// Break -> `\n`);`segments` 是无损的内容分段(`w:br@w:type` 不再丢失);`field` 是所属可见字段结果的
+/// 字段指令(如 `"PAGE"`),不属于字段为 `None`。
 fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("text", run.text())?;
@@ -150,6 +151,7 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
     }
     d.set_item("text_boxes", boxes)?;
     d.set_item("is_math", run.is_math)?;
+    d.set_item("field", run.field.as_deref())?;
     Ok(d)
 }
 
@@ -296,6 +298,19 @@ fn section_dict<'py>(
     d.set_item("margins_points", margins_points)?;
     d.set_item("cols", sect.cols)?;
     d.set_item("end_block_index", sect.end_block)?;
+    d.set_item("title_pg", sect.title_pg)?;
+    d.set_item("page_number_start", sect.page_number_start)?;
+    d.set_item(
+        "page_number_format",
+        match sect.page_number_format {
+            PageNumFormat::Decimal => "decimal",
+            PageNumFormat::LowerRoman => "lowerRoman",
+            PageNumFormat::UpperRoman => "upperRoman",
+            PageNumFormat::LowerLetter => "lowerLetter",
+            PageNumFormat::UpperLetter => "upperLetter",
+            PageNumFormat::Other => "other",
+        },
+    )?;
     d.set_item("headers", header_footer_list(py, doc, &sect.headers)?)?;
     d.set_item("footers", header_footer_list(py, doc, &sect.footers)?)?;
     Ok(d)
@@ -422,6 +437,12 @@ impl PyDocument {
         self.inner.body.len()
     }
 
+    /// 奇偶页不同页眉页脚(`word/settings.xml > w:evenAndOddHeaders`,缺省 `False`)。
+    #[getter]
+    fn even_and_odd_headers(&self) -> bool {
+        self.inner.even_and_odd_headers
+    }
+
     /// 顶层正文块,作为 `list[dict]`(段落 / 表格)。
     fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
@@ -456,7 +477,10 @@ impl PyDocument {
     /// 节(`w:sectPr`)序列,作为 `list[dict]`:页面尺寸 / 页边距 / 纸向 / 分栏,twip 原值
     /// 带 `_points` 便利换算;`end_block_index` 是本节覆盖的正文块区间的排他性结束下标
     /// (本节的块为 `body()[上一节.end_block_index : 本节.end_block_index]`)。至少一节
-    /// (无 `w:sectPr` 时为 Word 默认页面设置:Letter 纵向、1 英寸边距)。
+    /// (无 `w:sectPr` 时为 Word 默认页面设置:Letter 纵向、1 英寸边距)。另含 `title_pg`
+    /// (`w:titlePg`)、`page_number_start`(`w:pgNumType@w:start`,缺失 / 非法为 `None`)与
+    /// `page_number_format`(`"decimal"` / `"lowerRoman"` / `"upperRoman"` / `"lowerLetter"` /
+    /// `"upperLetter"`,其它取值为 `"other"`)。
     fn sections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
         for s in &self.inner.sections {
