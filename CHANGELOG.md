@@ -58,6 +58,12 @@ change.
   is extracted in document order as a plain-text run (`TextRun.is_math`) and flows
   into the paragraph text, `to_text` and `to_markdown`. No math layout or LaTeX;
   PDF export draws it as plain text and emits one `math-flattened` warning.
+- **Math fractions, scripts and radicals no longer glue digits together**: `m:f`
+  extracts as `num/den` (`1/2`, not `12`), `m:sSup` as `x^2`, `m:sSub` as `x_i`,
+  `m:rad` as `sqrt(x)` (`root(3,x)` when a degree is present). An operand made of
+  more than one text fragment is parenthesised, e.g. `(a+b)/c`. Other math
+  structures keep plain concatenation; still no LaTeX. Iterative walk, structure
+  depth capped by `MAX_NEST_DEPTH`.
 
 ### Fixed
 

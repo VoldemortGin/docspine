@@ -532,8 +532,8 @@ fn inline_omath_text_extracted_in_document_order() {
              <w:r><w:t> end</w:t></w:r></w:p>"#
     ));
     let txt = to_text(&parsed.document);
-    assert_eq!(txt, "Let x12y3 end");
-    assert!(to_markdown(&parsed.document).contains("x12y3"));
+    assert_eq!(txt, "Let x1/2y^3 end");
+    assert!(to_markdown(&parsed.document).contains("x1/2y^3"));
 }
 
 #[test]
@@ -577,4 +577,121 @@ fn deeply_nested_omath_no_stack_overflow() {
     );
     let txt = text_of(&body);
     assert!(txt.ends_with("after"), "{txt:?}");
+}
+
+/// 单个 `m:r` 文本片段。
+fn mr(t: &str) -> String {
+    format!("<m:r><m:t>{t}</m:t></m:r>")
+}
+
+/// 把一段公式内部 XML 包成 `m:oMath` 段落,返回抽出的公式文本。
+fn math_text(inner: &str) -> String {
+    text_of(&format!("<w:p {M_NS}><m:oMath>{inner}</m:oMath></w:p>"))
+}
+
+#[test]
+fn omath_fraction_is_linearized_not_glued() {
+    let f = |num: &str, den: &str| format!("<m:f><m:num>{num}</m:num><m:den>{den}</m:den></m:f>");
+    // 1/2 不能拼成 12。
+    assert_eq!(math_text(&f(&mr("1"), &mr("2"))), "1/2");
+    // 分子 / 分母含多个 m:r 片段时加括号。
+    assert_eq!(math_text(&f(&(mr("a") + &mr("+b")), &mr("c"))), "(a+b)/c");
+    assert_eq!(math_text(&f(&mr("a"), &(mr("c") + &mr("+d")))), "a/(c+d)");
+    // 分式嵌套分式:内层是复合项,外层包括号。
+    let inner = f(&mr("1"), &mr("2"));
+    assert_eq!(math_text(&f(&inner, &mr("3"))), "(1/2)/3");
+}
+
+#[test]
+fn omath_scripts_and_radicals_are_disambiguated() {
+    let e = |t: &str| format!("<m:e>{}</m:e>", mr(t));
+    // x² -> x^2(不是 x2)。
+    assert_eq!(
+        math_text(&format!(
+            "<m:sSup>{}<m:sup>{}</m:sup></m:sSup>",
+            e("x"),
+            mr("2")
+        )),
+        "x^2"
+    );
+    // x_i。
+    assert_eq!(
+        math_text(&format!(
+            "<m:sSub>{}<m:sub>{}</m:sub></m:sSub>",
+            e("x"),
+            mr("i")
+        )),
+        "x_i"
+    );
+    // 多片段底数加括号:(a+b)^2。
+    assert_eq!(
+        math_text(&format!(
+            "<m:sSup><m:e>{}{}</m:e><m:sup>{}</m:sup></m:sSup>",
+            mr("a"),
+            mr("+b"),
+            mr("2")
+        )),
+        "(a+b)^2"
+    );
+    // 根号:sqrt(x);空 m:deg(平方根)不影响。
+    assert_eq!(
+        math_text(&format!(
+            "<m:rad><m:radPr><m:degHide m:val=\"1\"/></m:radPr><m:deg/>{}</m:rad>",
+            e("x")
+        )),
+        "sqrt(x)"
+    );
+    // 带次数的根号不丢次数文字。
+    assert_eq!(
+        math_text(&format!(
+            "<m:rad><m:deg>{}</m:deg>{}</m:rad>",
+            mr("3"),
+            e("x")
+        )),
+        "root(3,x)"
+    );
+}
+
+#[test]
+fn omath_other_structures_keep_plain_concatenation() {
+    // 未处理的结构(上下标并存 / 定界符)保持纯拼接;结构外的文字与顺序不变。
+    let txt = math_text(&format!(
+        "{}<m:d><m:e>{}</m:e></m:d><m:sSubSup><m:e>{}</m:e><m:sub>{}</m:sub><m:sup>{}</m:sup></m:sSubSup>",
+        mr("a"),
+        mr("b"),
+        mr("c"),
+        mr("d"),
+        mr("e")
+    ));
+    assert_eq!(txt, "abcde");
+}
+
+#[test]
+fn omath_structures_missing_slots_do_not_panic() {
+    assert_eq!(math_text("<m:f><m:num/></m:f>"), "");
+    assert_eq!(
+        math_text(&format!("<m:f><m:num>{}</m:num></m:f>", mr("1"))),
+        "1/"
+    );
+    assert_eq!(
+        math_text(&format!("<m:sSup><m:sup>{}</m:sup></m:sSup>", mr("2"))),
+        "^2"
+    );
+}
+
+#[test]
+fn deeply_nested_math_structures_no_stack_overflow() {
+    let levels = 5_000;
+    let body = format!(
+        "<w:p {M_NS}><m:oMath>{}{}{}</m:oMath></w:p><w:p><w:r><w:t>after</w:t></w:r></w:p>",
+        "<m:f><m:num>".repeat(levels),
+        mr("deep"),
+        "</m:num></m:f>".repeat(levels)
+    );
+    let txt = text_of(&body);
+    assert!(
+        txt.contains("deep") && txt.ends_with("after"),
+        "{}",
+        txt.len()
+    );
 }

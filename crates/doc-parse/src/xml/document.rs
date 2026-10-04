@@ -594,32 +594,210 @@ fn break_kind(e: &BytesStart) -> BreakKind {
 
 // ============================================================ 公式 (m:oMath)
 
+/// 公式里需要线性化的结构(其余结构保持文字纯拼接)。
+#[derive(Clone, Copy, PartialEq)]
+enum MathStruct {
+    /// `m:f` 分式(`m:num` / `m:den`)-> `分子/分母`。
+    Frac,
+    /// `m:sSup` 上标(`m:e` / `m:sup`)-> `底^上`。
+    Sup,
+    /// `m:sSub` 下标(`m:e` / `m:sub`)-> `底_下`。
+    Sub,
+    /// `m:rad` 根号(`m:deg` / `m:e`)-> `sqrt(x)`;带次数时 `root(次,x)`。
+    Rad,
+}
+
+/// 结构内的槽位元素。
+#[derive(Clone, Copy, PartialEq)]
+enum MathSlot {
+    Num,
+    Den,
+    Base,
+    Sup,
+    Sub,
+    Deg,
+}
+
+/// 公式遍历栈上的一帧:容器 / 结构 / 槽位各自攒一份文字。其余嵌套元素不开帧,只在帧内
+/// 记 `other_depth`,文字直接并入当前帧(保持纯拼接且不随深度反复复制)。
+struct MathFrame {
+    /// 本帧是哪种结构(`None` = 容器或槽位)。
+    kind: Option<MathStruct>,
+    /// 本帧若是槽位,它是哪个槽。
+    slot: Option<MathSlot>,
+    text: String,
+    /// 本帧内 `m:t` 文字片段数(复合子项记 2),决定线性化时是否加括号。
+    frags: usize,
+    /// 结构帧:已收齐的槽位 `(槽, 文字, 片段数)`。
+    slots: Vec<(MathSlot, String, usize)>,
+    /// 帧内未开帧的嵌套元素深度。
+    other_depth: usize,
+}
+
+impl MathFrame {
+    fn new(kind: Option<MathStruct>, slot: Option<MathSlot>) -> Self {
+        MathFrame {
+            kind,
+            slot,
+            text: String::new(),
+            frags: 0,
+            slots: Vec::new(),
+            other_depth: 0,
+        }
+    }
+}
+
+/// 结构元素本地名 -> 结构种类。
+fn math_struct_of(name: &[u8]) -> Option<MathStruct> {
+    match name {
+        b"f" => Some(MathStruct::Frac),
+        b"sSup" => Some(MathStruct::Sup),
+        b"sSub" => Some(MathStruct::Sub),
+        b"rad" => Some(MathStruct::Rad),
+        _ => None,
+    }
+}
+
+/// 槽位元素本地名 -> 在给定结构里的槽位(不属于该结构的名字不算槽位)。
+fn math_slot_of(kind: MathStruct, name: &[u8]) -> Option<MathSlot> {
+    match (kind, name) {
+        (MathStruct::Frac, b"num") => Some(MathSlot::Num),
+        (MathStruct::Frac, b"den") => Some(MathSlot::Den),
+        (MathStruct::Sup, b"e") | (MathStruct::Sub, b"e") | (MathStruct::Rad, b"e") => {
+            Some(MathSlot::Base)
+        }
+        (MathStruct::Sup, b"sup") => Some(MathSlot::Sup),
+        (MathStruct::Sub, b"sub") => Some(MathSlot::Sub),
+        (MathStruct::Rad, b"deg") => Some(MathSlot::Deg),
+        _ => None,
+    }
+}
+
+/// 多于一个文字片段(或复合子项)时用括号包起来。
+fn math_wrap(text: &str, frags: usize) -> String {
+    if frags > 1 {
+        format!("({text})")
+    } else {
+        text.to_string()
+    }
+}
+
+/// 把一个结构帧收拢成线性记法文本;所有槽位都为空时返回空串。
+fn math_linearize(kind: MathStruct, slots: &[(MathSlot, String, usize)]) -> String {
+    if slots.iter().all(|(_, t, _)| t.is_empty()) {
+        return String::new();
+    }
+    let slot = |want: MathSlot| {
+        slots
+            .iter()
+            .find(|(s, _, _)| *s == want)
+            .map(|(_, t, n)| (t.as_str(), *n))
+            .unwrap_or(("", 0))
+    };
+    let wrapped = |want: MathSlot| {
+        let (t, n) = slot(want);
+        math_wrap(t, n)
+    };
+    match kind {
+        MathStruct::Frac => format!("{}/{}", wrapped(MathSlot::Num), wrapped(MathSlot::Den)),
+        MathStruct::Sup => format!("{}^{}", wrapped(MathSlot::Base), wrapped(MathSlot::Sup)),
+        MathStruct::Sub => format!("{}_{}", wrapped(MathSlot::Base), wrapped(MathSlot::Sub)),
+        MathStruct::Rad => {
+            let (base, _) = slot(MathSlot::Base);
+            match slot(MathSlot::Deg) {
+                ("", _) => format!("sqrt({base})"),
+                (deg, _) => format!("root({deg},{base})"),
+            }
+        }
+    }
+}
+
+/// 把结束的帧并入父帧:槽位 -> 父结构的槽表;结构 -> 线性化文字(作复合项,记 2 片段)。
+fn math_merge(parent: &mut MathFrame, done: MathFrame) {
+    if let (Some(slot), true) = (done.slot, parent.kind.is_some()) {
+        parent.slots.push((slot, done.text, done.frags));
+    } else if let Some(kind) = done.kind {
+        let out = math_linearize(kind, &done.slots);
+        if !out.is_empty() {
+            parent.text.push_str(&out);
+            parent.frags += 2;
+        }
+    }
+}
+
 /// 解析 `m:oMath` / `m:oMathPara`:按文档顺序抽取其中所有文字元素(`m:t`,亦含 run 内
-/// 偶见的 `w:t`)拼成一个 `is_math` run;分式 / 上下标等结构不还原,只保文字不丢。
+/// 偶见的 `w:t`)拼成一个 `is_math` run。仅四种结构按最朴素的线性记法消歧,免得相邻
+/// 数字被拼错(1/2 不再成 `12`、x² 不再成 `x2`):分式 `分子/分母`、上标 `x^2`、下标
+/// `x_i`、根号 `sqrt(x)`(带次数 `root(3,x)`);某一项含多于一个文字片段(或本身是复合
+/// 结构)时加括号,如 `(a+b)/c`。其它结构(定界符 / 求和 / 矩阵等)仍纯拼接,不做 LaTeX。
 /// `m:oMathPara` 内多个 `m:oMath` 以空格分隔。修订删除 `w:del` / `w:moveFrom` 子树按
-/// “接受修订”丢弃。已消费起始标签;**迭代**遍历(深度计数,不递归),深嵌套不会栈溢出。
+/// “接受修订”丢弃。已消费起始标签;**迭代**遍历(显式栈,不递归),结构帧深度受
+/// [`MAX_NEST_DEPTH`] 约束(更深的结构退化为纯拼接),深嵌套不会栈溢出。
 /// 抽不出文字时返回 `None`。
 fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>, container: &[u8]) -> Option<TextRun> {
     let is_para = container == b"oMathPara";
-    let mut text = String::new();
-    let mut depth = 0usize;
+    let mut stack = vec![MathFrame::new(None, None)];
+    let mut struct_depth = 0u32;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
-                b"del" | b"moveFrom" => skip_element(reader),
-                b"t" => text.push_str(&read_text(reader)),
-                b"oMath" if is_para && !text.is_empty() => {
-                    text.push(' ');
-                    depth += 1;
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                let name = name.as_slice();
+                // 栈永不为空(根帧只在容器结束时才处理),下面的 last_mut 都成立。
+                let Some(top) = stack.last_mut() else { break };
+                match name {
+                    b"del" | b"moveFrom" => skip_element(reader),
+                    b"t" => {
+                        let t = read_text(reader);
+                        if !t.is_empty() {
+                            top.text.push_str(&t);
+                            top.frags += 1;
+                        }
+                    }
+                    _ if top.other_depth == 0 && top.kind.is_some() => {
+                        // 结构帧的直接子元素:认得的槽位开新帧,其余当普通嵌套。
+                        match top.kind.and_then(|k| math_slot_of(k, name)) {
+                            Some(slot) => stack.push(MathFrame::new(None, Some(slot))),
+                            None => top.other_depth += 1,
+                        }
+                    }
+                    _ if top.other_depth == 0 && struct_depth < MAX_NEST_DEPTH => {
+                        match math_struct_of(name) {
+                            Some(kind) => {
+                                struct_depth += 1;
+                                stack.push(MathFrame::new(Some(kind), None));
+                            }
+                            None => {
+                                if name == b"oMath" && is_para && !top.text.is_empty() {
+                                    top.text.push(' ');
+                                }
+                                top.other_depth += 1;
+                            }
+                        }
+                    }
+                    _ => {
+                        if name == b"oMath" && is_para && !top.text.is_empty() {
+                            top.text.push(' ');
+                        }
+                        top.other_depth += 1;
+                    }
                 }
-                _ => depth += 1,
-            },
+            }
             Ok(Event::End(_)) => {
-                if depth == 0 {
+                let Some(top) = stack.last_mut() else { break };
+                if top.other_depth > 0 {
+                    top.other_depth -= 1;
+                } else if stack.len() == 1 {
                     break; // 容器自身结束。
+                } else if let Some(done) = stack.pop() {
+                    if done.kind.is_some() {
+                        struct_depth -= 1;
+                    }
+                    if let Some(parent) = stack.last_mut() {
+                        math_merge(parent, done);
+                    }
                 }
-                depth -= 1;
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -627,6 +805,14 @@ fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>, container: &[u8]) -> 
         }
         buf.clear();
     }
+    // 畸形输入(Eof 时栈未回到根):自内向外把未闭合的帧并入父帧,文字不丢。
+    while stack.len() > 1 {
+        let Some(done) = stack.pop() else { break };
+        if let Some(parent) = stack.last_mut() {
+            math_merge(parent, done);
+        }
+    }
+    let text = stack.pop().map(|f| f.text).unwrap_or_default();
     if text.is_empty() {
         return None;
     }
