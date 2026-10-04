@@ -60,6 +60,57 @@ pub struct Document {
     /// 其内容**不解析**、不进任何导出,所以文档里这部分内容缺失;计数让调用方知道有内容没被
     /// 导入(PDF 导出另有 `alt-chunk-skipped` 告警)。只计主文档部件,页眉页脚 / 注内的不计。
     pub alt_chunk_count: usize,
+    /// 解析诊断:内容被静默截断 / 跳过 / 钳制时的结构化记录(见 [`Diagnostic`])。正常文件为空;
+    /// 只含种类 / 部件路径 / 计数,**绝不含文档正文**。
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// 解析诊断的种类。`#[non_exhaustive]`:后续可能新增。[`DiagnosticKind::code`] 是稳定的
+/// 短横线标识(与渲染告警 `RenderWarning` 的 code 同风格)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum DiagnosticKind {
+    /// 某部件 XML 中途损坏 / 被截断:只解析出了前半部分。
+    XmlTruncated,
+    /// 递归容器嵌套超过深度上限,子树被整棵跳过(计数 = 跳过的子树数)。
+    NestingDepthExceeded,
+    /// 表格列数被钳到 Word 上限:`w:tblGrid` 多余的列被丢弃、`gridBefore` / `gridAfter` 被钳
+    /// (计数 = 丢弃的列数 + 被钳的次数)。
+    TableColumnsClamped,
+    /// 单元格 `w:gridSpan` 超过列数上限被钳(计数 = 被钳的单元格数)。
+    GridSpanClamped,
+    /// 编号起值超过 Word 上限(`MAX_LIST_NUMBER`):字母 / 罗马格式回退十进制、计数饱和
+    /// (计数 = 超限的层级 / 覆盖数)。
+    NumberingValueClamped,
+    /// 关系 / 引用指向缺失的部件(页眉页脚、图片等);`part` 是**持有该引用**的部件
+    /// (计数 = 悬空引用数)。
+    MissingPart,
+    /// 遇到 `w:altChunk`(外部内容块)而未导入(计数 = 个数)。
+    AltChunkNotImported,
+}
+
+impl DiagnosticKind {
+    /// 稳定的短横线 code(如 `"xml-truncated"`)。
+    pub fn code(self) -> &'static str {
+        match self {
+            DiagnosticKind::XmlTruncated => "xml-truncated",
+            DiagnosticKind::NestingDepthExceeded => "nesting-depth-exceeded",
+            DiagnosticKind::TableColumnsClamped => "table-columns-clamped",
+            DiagnosticKind::GridSpanClamped => "grid-span-clamped",
+            DiagnosticKind::NumberingValueClamped => "numbering-value-clamped",
+            DiagnosticKind::MissingPart => "missing-part",
+            DiagnosticKind::AltChunkNotImported => "alt-chunk-not-imported",
+        }
+    }
+}
+
+/// 一条解析诊断:种类 + 部件路径(如 `word/document.xml`)+ 计数。同一 `(种类, 部件)` 合并成一条。
+/// 隐私:不含任何文档正文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub kind: DiagnosticKind,
+    pub part: String,
+    pub count: usize,
 }
 
 impl Document {

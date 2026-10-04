@@ -38,7 +38,7 @@ use quick_xml::Reader;
 
 use super::{
     attr_of, attr_string, is_prop_change, local_name, media_name_from_target, on_off_val,
-    parse_rels, props, skip_element, Relationship,
+    parse_rels, props, skip_element, PartStats, Relationship,
 };
 
 /// 递归容器(`w:tbl` / 块级与行内 `w:sdt`·`w:customXml` / `w:hyperlink`·`w:ins`·`w:moveTo`·
@@ -56,6 +56,8 @@ struct Ctx<'a> {
     fields: std::cell::RefCell<FieldStack>,
     /// 遇到的 `w:altChunk` 个数(内容不解析,只计数;见 `Document::alt_chunk_count`)。
     alt_chunks: std::cell::Cell<usize>,
+    /// 本部件的诊断计数(调用方持有,解析结束后转成 `Diagnostic`;只计数、不含正文)。
+    stats: &'a std::cell::Cell<PartStats>,
 }
 
 /// 复杂字段(`w:fldChar` begin / separate / end)的嵌套栈。
@@ -103,6 +105,14 @@ impl Ctx<'_> {
     /// 记一个 `w:altChunk`(外部内容块,不解析)。
     fn count_alt_chunk(&self) {
         self.alt_chunks.set(self.alt_chunks.get().saturating_add(1));
+        self.note(|s| s.alt_chunks += 1);
+    }
+
+    /// 累加一项诊断计数。
+    fn note(&self, f: impl FnOnce(&mut PartStats)) {
+        let mut s = self.stats.get();
+        f(&mut s);
+        self.stats.set(s);
     }
 
     /// 进入一层递归容器。超过 [`MAX_NEST_DEPTH`] 时返回 `None`,调用方应
@@ -110,6 +120,7 @@ impl Ctx<'_> {
     fn enter(&self) -> Option<DepthGuard<'_>> {
         let d = self.depth.get() + 1;
         if d > MAX_NEST_DEPTH {
+            self.note(|s| s.nest_skipped += 1);
             return None;
         }
         self.depth.set(d);
@@ -125,6 +136,7 @@ pub fn parse(
     xml: &str,
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
+    stats: &std::cell::Cell<PartStats>,
 ) -> (Vec<Block>, Vec<Section>, usize) {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
     let ctx = Ctx {
@@ -133,6 +145,7 @@ pub fn parse(
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
         alt_chunks: Default::default(),
+        stats,
     };
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -163,6 +176,7 @@ pub fn parse_hdr_ftr(
     xml: &str,
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
+    stats: &std::cell::Cell<PartStats>,
 ) -> Vec<Block> {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
     let ctx = Ctx {
@@ -171,6 +185,7 @@ pub fn parse_hdr_ftr(
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
         alt_chunks: Default::default(),
+        stats,
     };
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -188,6 +203,7 @@ pub fn parse_notes(
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
     note_tag: &[u8],
+    stats: &std::cell::Cell<PartStats>,
 ) -> BTreeMap<i64, Vec<Block>> {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
     let ctx = Ctx {
@@ -196,6 +212,7 @@ pub fn parse_notes(
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
         alt_chunks: Default::default(),
+        stats,
     };
     let mut notes = BTreeMap::new();
     let mut reader = Reader::from_str(xml);
@@ -243,6 +260,7 @@ pub fn parse_comments(
     xml: &str,
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
+    stats: &std::cell::Cell<PartStats>,
 ) -> BTreeMap<i64, Comment> {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
     let ctx = Ctx {
@@ -251,6 +269,7 @@ pub fn parse_comments(
         depth: std::cell::Cell::new(0),
         fields: Default::default(),
         alt_chunks: Default::default(),
+        stats,
     };
     let mut comments = BTreeMap::new();
     let mut reader = Reader::from_str(xml);
@@ -1525,7 +1544,7 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"tblPr" => parse_tblpr(reader, &mut table),
-                    b"tblGrid" => table.grid_cols = parse_tbl_grid(reader),
+                    b"tblGrid" => table.grid_cols = parse_tbl_grid(reader, ctx),
                     b"tr" => table.rows.push(parse_table_row(reader, ctx)),
                     b"sdt" => table.rows.extend(parse_sdt_rows(reader, ctx)),
                     b"customXml" => table.rows.extend(parse_custom_xml_rows(reader, ctx)),
@@ -1621,14 +1640,14 @@ fn parse_measure(e: &BytesStart) -> Option<TableWidth> {
 /// 解析 `w:tblGrid` -> 各列宽(twip)。已消费 `<w:tblGrid>` 起始标签。
 /// `w:tblGridChange`(修订前的旧网格,内嵌一份 `w:tblGrid`)整体跳过;展开写法
 /// `<w:gridCol></w:gridCol>` 的结束标签也要随之消费,否则会被误当成 `tblGrid` 的结束。
-fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Twips> {
+fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Twips> {
     let mut cols = Vec::new();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) => push_grid_col(&e, &mut cols),
+            Ok(Event::Empty(e)) => push_grid_col(&e, &mut cols, ctx),
             Ok(Event::Start(e)) => {
-                push_grid_col(&e, &mut cols);
+                push_grid_col(&e, &mut cols, ctx);
                 skip_element(reader);
             }
             Ok(Event::End(_)) => break,
@@ -1642,10 +1661,14 @@ fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Twips> {
 }
 
 /// `w:gridCol` 记一列宽(其它元素忽略)。
-fn push_grid_col(e: &BytesStart, cols: &mut Vec<Twips>) {
-    // 超过 Word 列数上限的 gridCol 丢弃(与 `gridSpan` 同一上限)。
-    if local_name(e.name().as_ref()) == b"gridCol" && cols.len() < MAX_TABLE_COLS {
-        cols.push(attr_of(e, b"w").and_then(|s| s.parse().ok()).unwrap_or(0));
+fn push_grid_col(e: &BytesStart, cols: &mut Vec<Twips>, ctx: &Ctx) {
+    // 超过 Word 列数上限的 gridCol 丢弃(与 `gridSpan` 同一上限),并计入诊断。
+    if local_name(e.name().as_ref()) == b"gridCol" {
+        if cols.len() < MAX_TABLE_COLS {
+            cols.push(attr_of(e, b"w").and_then(|s| s.parse().ok()).unwrap_or(0));
+        } else {
+            ctx.note(|s| s.cols_clamped += 1);
+        }
     }
 }
 
@@ -1658,7 +1681,7 @@ fn parse_table_row<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Ro
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"trPr" => parse_trpr(reader, &mut row),
+                    b"trPr" => parse_trpr(reader, &mut row, ctx),
                     b"tc" => row.cells.push(parse_table_cell(reader, ctx)),
                     b"sdt" => row.cells.extend(parse_sdt_cells(reader, ctx)),
                     b"customXml" => row.cells.extend(parse_custom_xml_cells(reader, ctx)),
@@ -1678,18 +1701,18 @@ fn parse_table_row<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Ro
 
 /// 解析 `w:trPr`(行属性,C-7):`w:trHeight@w:val/@w:hRule`、`w:tblHeader`、
 /// `w:cantSplit`、`w:gridBefore` / `w:gridAfter`。已消费 `<w:trPr>` 起始标签。深度计数兜底嵌套子树。
-fn parse_trpr<R: std::io::BufRead>(reader: &mut Reader<R>, row: &mut Row) {
+fn parse_trpr<R: std::io::BufRead>(reader: &mut Reader<R>, row: &mut Row, ctx: &Ctx) {
     let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) => apply_trpr_prop(&e, row),
+            Ok(Event::Empty(e)) => apply_trpr_prop(&e, row, ctx),
             // 修订前的旧 trPr(w:trPrChange)整体跳过,不得覆盖现值。
             Ok(Event::Start(e)) if is_prop_change(local_name(e.name().as_ref())) => {
                 skip_element(reader)
             }
             Ok(Event::Start(e)) => {
-                apply_trpr_prop(&e, row);
+                apply_trpr_prop(&e, row, ctx);
                 depth += 1;
             }
             Ok(Event::End(_)) => {
@@ -1707,7 +1730,7 @@ fn parse_trpr<R: std::io::BufRead>(reader: &mut Reader<R>, row: &mut Row) {
 }
 
 /// 把一个 trPr 子元素的属性应用到 [`Row`] 上。
-fn apply_trpr_prop(e: &BytesStart, row: &mut Row) {
+fn apply_trpr_prop(e: &BytesStart, row: &mut Row, ctx: &Ctx) {
     match local_name(e.name().as_ref()) {
         b"trHeight" => {
             row.height = attr_of(e, b"val")
@@ -1720,17 +1743,22 @@ fn apply_trpr_prop(e: &BytesStart, row: &mut Row) {
         b"tblHeader" => row.is_header = on_off_val(e),
         b"cantSplit" => row.cant_split = on_off_val(e),
         // 行首 / 行末跳过的网格列数:非数字 / 负数按缺失(0),超大值钳到 Word 的列数上限。
-        b"gridBefore" => row.grid_before = grid_skip(e),
-        b"gridAfter" => row.grid_after = grid_skip(e),
+        b"gridBefore" => row.grid_before = grid_skip(e, ctx),
+        b"gridAfter" => row.grid_after = grid_skip(e, ctx),
         _ => {}
     }
 }
 
 /// `w:gridBefore` / `w:gridAfter` 的 `@w:val`:钳到 [`MAX_TABLE_COLS`];缺失 / 非法 → 0。
-fn grid_skip(e: &BytesStart) -> u32 {
+fn grid_skip(e: &BytesStart, ctx: &Ctx) -> u32 {
     attr_of(e, b"val")
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .map_or(0, |n| n.min(MAX_TABLE_COLS as u64) as u32)
+        .map_or(0, |n| {
+            if n > MAX_TABLE_COLS as u64 {
+                ctx.note(|s| s.cols_clamped += 1);
+            }
+            n.min(MAX_TABLE_COLS as u64) as u32
+        })
 }
 
 /// 解析 `w:tc`(单元格):`w:tcPr`(合并/宽度/填充)+ 内容块(段落 + 嵌套表)。
@@ -1746,7 +1774,7 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> C
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"tcPr" => parse_tcpr(reader, &mut cell),
+                    b"tcPr" => parse_tcpr(reader, &mut cell, ctx),
                     b"p" => {
                         let (para, _) = parse_paragraph(reader, ctx);
                         cell.blocks.push(Block::Paragraph(para));
@@ -1788,19 +1816,19 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> C
 /// 合并)、`w:tcW`(dxa 绝对宽 / pct 百分比宽)、`w:shd`(填充)、`w:tcBorders`、
 /// `w:vAlign`、`w:tcMar`。已消费 `<w:tcPr>` 起始标签。边框/边距子树走专用子
 /// walker(其子元素名 top/left/… 会与别的属性撞车);其余以深度计数兜底。
-fn parse_tcpr<R: std::io::BufRead>(reader: &mut Reader<R>, cell: &mut Cell) {
+fn parse_tcpr<R: std::io::BufRead>(reader: &mut Reader<R>, cell: &mut Cell, ctx: &Ctx) {
     let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) => apply_tcpr_prop(&e, cell),
+            Ok(Event::Empty(e)) => apply_tcpr_prop(&e, cell, ctx),
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"tcBorders" => cell.borders = props::parse_tc_borders(reader),
                 b"tcMar" => cell.margins = props::parse_cell_margins(reader),
                 // 修订前的旧 tcPr(w:tcPrChange)整体跳过,不得覆盖现值。
                 n if is_prop_change(n) => skip_element(reader),
                 _ => {
-                    apply_tcpr_prop(&e, cell);
+                    apply_tcpr_prop(&e, cell, ctx);
                     depth += 1;
                 }
             },
@@ -1819,19 +1847,26 @@ fn parse_tcpr<R: std::io::BufRead>(reader: &mut Reader<R>, cell: &mut Cell) {
 }
 
 /// 把一个 tcPr 子元素的属性应用到 [`Cell`] 上(边框/边距子树除外)。
-fn apply_tcpr_prop(e: &BytesStart, cell: &mut Cell) {
+fn apply_tcpr_prop(e: &BytesStart, cell: &mut Cell, ctx: &Ctx) {
     match local_name(e.name().as_ref()) {
         b"gridSpan" => {
             // 钳到 Word 的表格列数上限;非数字 / 负数按缺省 1,纯数字但溢出 u64 视作超大。
             cell.grid_span = attr_of(e, b"val").map_or(1, |s| {
                 let s = s.trim();
-                match s.parse::<u64>() {
-                    Ok(n) => n.min(MAX_TABLE_COLS as u64) as u32,
+                let (span, clamped) = match s.parse::<u64>() {
+                    Ok(n) => (
+                        n.min(MAX_TABLE_COLS as u64) as u32,
+                        n > MAX_TABLE_COLS as u64,
+                    ),
                     Err(_) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => {
-                        MAX_TABLE_COLS as u32
+                        (MAX_TABLE_COLS as u32, true)
                     }
-                    Err(_) => 1,
+                    Err(_) => (1, false),
+                };
+                if clamped {
+                    ctx.note(|st| st.span_clamped += 1);
                 }
+                span
             });
         }
         b"vMerge" => {
@@ -2163,8 +2198,12 @@ fn resolve_picture(
         .map(|r| media_name_from_target(&r.target));
     let image_bytes_len = media_name
         .as_ref()
-        .and_then(|n| ctx.media_index.get(n).copied())
-        .unwrap_or(0);
+        .and_then(|n| ctx.media_index.get(n).copied());
+    if image_bytes_len.is_none() {
+        // 关系缺失或指向的 media 不在包里:图片取不到字节。
+        ctx.note(|s| s.missing_media += 1);
+    }
+    let image_bytes_len = image_bytes_len.unwrap_or(0);
     Some(Picture {
         rel_id,
         media_name,

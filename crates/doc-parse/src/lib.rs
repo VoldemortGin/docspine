@@ -12,13 +12,16 @@ mod zip_pkg;
 
 pub mod legacy;
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use doc_core::model::{Block, Document, Section};
+use doc_core::model::{Block, Diagnostic, DiagnosticKind, Document, Section};
+use doc_core::numbering::MAX_LIST_NUMBER;
 use doc_core::{DocError, Result};
 
 pub use doc_core::LimitKind;
+use xml::PartStats;
 use zip_pkg::Package;
 pub use zip_pkg::ZipLimits;
 
@@ -71,47 +74,64 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     // 2) word/document.xml(必有) + 其 rels(把图片 r:id 映射到 media 名)。
     let doc_xml = pkg.document_xml()?;
     let rels_xml = pkg.document_rels_str();
+    let mut diags: Vec<Diagnostic> = Vec::new();
 
     // 3) 走 w:body -> 块序列(段落 + 表格,表格是重点)+ 节序列(sectPr 页面几何)。
     let (body, mut sections, alt_chunk_count) =
-        xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index);
+        parse_part(&mut diags, DOCUMENT_PART, &doc_xml, |stats| {
+            xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index, stats)
+        });
 
     // 3b) 页眉页脚:节里只有 r:id 引用,经主文档 rels 定位 `word/header*.xml` /
     //     `word/footer*.xml`;内容复用块级解析。指向同一部件的多个 r:id 归一成第一个,
     //     关系 / 部件缺失的引用丢弃。脚注尾注走固定部件名 `word/footnotes.xml` / `endnotes.xml`。
-    let header_footers =
-        load_header_footers(&pkg, rels_xml.as_deref(), &media_index, &mut sections);
+    let header_footers = load_header_footers(
+        &pkg,
+        rels_xml.as_deref(),
+        &media_index,
+        &mut sections,
+        &mut diags,
+    );
     let footnotes = pkg
         .part_str("word/footnotes.xml")
         .map(|s| {
-            xml::document::parse_notes(
-                &s,
-                pkg_rels(&pkg, "word/footnotes.xml").as_deref(),
-                &media_index,
-                b"footnote",
-            )
+            parse_part(&mut diags, "word/footnotes.xml", &s, |stats| {
+                xml::document::parse_notes(
+                    &s,
+                    pkg_rels(&pkg, "word/footnotes.xml").as_deref(),
+                    &media_index,
+                    b"footnote",
+                    stats,
+                )
+            })
         })
         .unwrap_or_default();
     let endnotes = pkg
         .part_str("word/endnotes.xml")
         .map(|s| {
-            xml::document::parse_notes(
-                &s,
-                pkg_rels(&pkg, "word/endnotes.xml").as_deref(),
-                &media_index,
-                b"endnote",
-            )
+            parse_part(&mut diags, "word/endnotes.xml", &s, |stats| {
+                xml::document::parse_notes(
+                    &s,
+                    pkg_rels(&pkg, "word/endnotes.xml").as_deref(),
+                    &media_index,
+                    b"endnote",
+                    stats,
+                )
+            })
         })
         .unwrap_or_default();
     // 批注:固定部件名 `word/comments.xml`(与脚注尾注一致),带自己的 rels。
     let comments = pkg
         .part_str("word/comments.xml")
         .map(|s| {
-            xml::document::parse_comments(
-                &s,
-                pkg_rels(&pkg, "word/comments.xml").as_deref(),
-                &media_index,
-            )
+            parse_part(&mut diags, "word/comments.xml", &s, |stats| {
+                xml::document::parse_comments(
+                    &s,
+                    pkg_rels(&pkg, "word/comments.xml").as_deref(),
+                    &media_index,
+                    stats,
+                )
+            })
         })
         .unwrap_or_default();
 
@@ -120,17 +140,33 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     //    列表段按普通段渲染)。级联/计数在 doc-core,这里只机械搬运。
     let styles = pkg
         .styles_xml_str()
-        .map(|s| xml::styles::parse(&s))
+        .map(|s| {
+            parse_part(&mut diags, "word/styles.xml", &s, |_| {
+                xml::styles::parse(&s)
+            })
+        })
         .unwrap_or_default();
     let numbering = pkg
         .numbering_xml_str()
-        .map(|s| xml::numbering::parse(&s))
+        .map(|s| {
+            parse_part(&mut diags, "word/numbering.xml", &s, |_| {
+                xml::numbering::parse(&s)
+            })
+        })
         .unwrap_or_default();
+    record_numbering_clamps(&mut diags, "word/numbering.xml", &numbering);
     let theme = pkg
         .theme_xml_str()
-        .map(|s| xml::theme::parse(&s))
+        .map(|s| {
+            parse_part(&mut diags, "word/theme/theme1.xml", &s, |_| {
+                xml::theme::parse(&s)
+            })
+        })
         .unwrap_or_default();
     let settings_xml = pkg.settings_xml_str();
+    if let Some(s) = settings_xml.as_deref() {
+        record_truncation(&mut diags, "word/settings.xml", s);
+    }
     let default_tab_stop = settings_xml.as_deref().and_then(xml::settings::parse);
     let even_and_odd_headers = settings_xml
         .as_deref()
@@ -150,6 +186,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             endnotes,
             comments,
             alt_chunk_count,
+            diagnostics: diags,
         },
         media,
     })
@@ -167,13 +204,17 @@ fn load_header_footers(
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
     sections: &mut [Section],
+    diags: &mut Vec<Diagnostic>,
 ) -> BTreeMap<String, Vec<Block>> {
     let mut parts = BTreeMap::new();
+    let mut missing = 0usize;
     let Some(rels_xml) = rels_xml else {
         for s in sections.iter_mut() {
+            missing += s.headers.len() + s.footers.len();
             s.headers.clear();
             s.footers.clear();
         }
+        add_diag(diags, DiagnosticKind::MissingPart, DOCUMENT_PART, missing);
         return parts;
     };
     let rels = xml::parse_rels(rels_xml);
@@ -183,10 +224,12 @@ fn load_header_footers(
         for refs in [&mut sect.headers, &mut sect.footers] {
             refs.retain_mut(|r| {
                 let Some(rel) = rels.get(&r.rel_id) else {
+                    missing += 1;
                     return false;
                 };
                 let path = xml::part_path_from_target(&rel.target);
                 let Some(part_xml) = pkg.part_str(&path) else {
+                    missing += 1;
                     return false;
                 };
                 let id = canon
@@ -194,15 +237,89 @@ fn load_header_footers(
                     .or_insert_with(|| r.rel_id.clone());
                 r.rel_id = id.clone();
                 parts.entry(id.clone()).or_insert_with(|| {
-                    xml::document::parse_hdr_ftr(
-                        &part_xml,
-                        pkg_rels(pkg, &path).as_deref(),
-                        media_index,
-                    )
+                    parse_part(diags, &path, &part_xml, |stats| {
+                        xml::document::parse_hdr_ftr(
+                            &part_xml,
+                            pkg_rels(pkg, &path).as_deref(),
+                            media_index,
+                            stats,
+                        )
+                    })
                 });
                 true
             });
         }
     }
+    add_diag(diags, DiagnosticKind::MissingPart, DOCUMENT_PART, missing);
     parts
+}
+
+/// 记一条诊断:计数为 0 不记;同一 `(种类, 部件)` 累加进已有条目。
+fn add_diag(diags: &mut Vec<Diagnostic>, kind: DiagnosticKind, part: &str, count: usize) {
+    if count == 0 {
+        return;
+    }
+    match diags.iter_mut().find(|d| d.kind == kind && d.part == part) {
+        Some(d) => d.count += count,
+        None => diags.push(Diagnostic {
+            kind,
+            part: part.to_string(),
+            count,
+        }),
+    }
+}
+
+/// 主文档部件路径(诊断里的 `part`)。
+const DOCUMENT_PART: &str = "word/document.xml";
+
+/// 部件 XML 中途损坏 / 被截断则记 [`DiagnosticKind::XmlTruncated`]。
+fn record_truncation(diags: &mut Vec<Diagnostic>, part: &str, xml: &str) {
+    if !xml::is_complete_xml(xml) {
+        add_diag(diags, DiagnosticKind::XmlTruncated, part, 1);
+    }
+}
+
+/// 解析一个 XML 部件:`f` 拿到本部件的诊断计数槽,返回后统一转成诊断 + 截断检测。
+/// 各 walker 只需往 `Ctx` 里累加计数,诊断的收集集中在这一处。
+fn parse_part<T>(
+    diags: &mut Vec<Diagnostic>,
+    part: &str,
+    xml: &str,
+    f: impl FnOnce(&Cell<PartStats>) -> T,
+) -> T {
+    let stats = Cell::new(PartStats::default());
+    let out = f(&stats);
+    record_truncation(diags, part, xml);
+    let s = stats.get();
+    for (kind, n) in [
+        (DiagnosticKind::NestingDepthExceeded, s.nest_skipped),
+        (DiagnosticKind::TableColumnsClamped, s.cols_clamped),
+        (DiagnosticKind::GridSpanClamped, s.span_clamped),
+        (DiagnosticKind::MissingPart, s.missing_media),
+        (DiagnosticKind::AltChunkNotImported, s.alt_chunks),
+    ] {
+        add_diag(diags, kind, part, n);
+    }
+    out
+}
+
+/// 编号起值(`w:start` / `w:startOverride`)超过 Word 上限 [`MAX_LIST_NUMBER`] 的层级 / 覆盖数。
+/// 这类值在字母 / 罗马格式回退十进制、计数饱和,所以按「被钳制」记。
+fn record_numbering_clamps(
+    diags: &mut Vec<Diagnostic>,
+    part: &str,
+    numbering: &doc_core::NumberingTable,
+) {
+    let over = |v: Option<i64>| v.is_some_and(|n| n > MAX_LIST_NUMBER);
+    let mut count = 0usize;
+    for abs in numbering.abstracts.values() {
+        count += abs.levels.values().filter(|l| over(l.start)).count();
+    }
+    for num in numbering.nums.values() {
+        for o in num.overrides.values() {
+            count += usize::from(over(o.start_override))
+                + usize::from(o.level.as_ref().is_some_and(|l| over(l.start)));
+        }
+    }
+    add_diag(diags, DiagnosticKind::NumberingValueClamped, part, count);
 }

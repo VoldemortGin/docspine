@@ -453,6 +453,20 @@ impl PyDocument {
         self.inner.alt_chunk_count
     }
 
+    /// 解析诊断(`list[dict]`,正常文件为空):内容被静默截断 / 跳过 / 钳制时的记录,每项
+    /// `{"kind": 短横线 code, "part": 部件路径, "count": 计数}`,绝不含文档正文。
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let list = PyList::empty(py);
+        for d in &self.inner.diagnostics {
+            let item = PyDict::new(py);
+            item.set_item("kind", d.kind.code())?;
+            item.set_item("part", &d.part)?;
+            item.set_item("count", d.count)?;
+            list.append(item)?;
+        }
+        Ok(list)
+    }
+
     /// 顶层正文块,作为 `list[dict]`(段落 / 表格)。
     fn body<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);

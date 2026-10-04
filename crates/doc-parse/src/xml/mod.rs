@@ -36,6 +36,42 @@ pub struct Relationship {
     pub target: String,
 }
 
+/// 一个部件解析期收集的诊断计数(由 `document` 模块的 `Ctx` 累加,`lib.rs` 转成
+/// `doc_core::Diagnostic`)。只计数,**不含任何正文**。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PartStats {
+    /// 超过嵌套深度上限被整棵跳过的子树数。
+    pub nest_skipped: usize,
+    /// 被丢弃 / 钳制的表格列数(`gridCol` 多余列 + `gridBefore` / `gridAfter` 钳制次数)。
+    pub cols_clamped: usize,
+    /// `gridSpan` 被钳的单元格数。
+    pub span_clamped: usize,
+    /// 指向缺失 media 的图片数。
+    pub missing_media: usize,
+    /// `w:altChunk` 个数(含页眉页脚 / 注内的)。
+    pub alt_chunks: usize,
+}
+
+/// 一份 XML 是否完整良构地读到了结尾。各 walker 遇读错误都是 `break`、返回已解析的部分;
+/// 这里单独走一遍:读错误(畸形 / 标签错配)或在元素未闭合时遇到 EOF(中途截断)都算不完整。
+/// 集中在一处判定,避免每个 walker 各写一遍。
+pub fn is_complete_xml(xml: &str) -> bool {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Eof) => return depth == 0,
+            Err(_) => return false,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
 /// 解析一份 `.rels` XML,得到 `rId -> Relationship` 映射。容错:解析出错则返回已得部分。
 pub fn parse_rels(xml: &str) -> BTreeMap<String, Relationship> {
     let mut map = BTreeMap::new();

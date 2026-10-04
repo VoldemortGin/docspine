@@ -49,6 +49,8 @@ change.
 
 ### Added
 
+- **Parse diagnostics channel** (`Document.diagnostics`, Python `doc.diagnostics()`): a structured list of `Diagnostic { kind, part, count }` (identical `(kind, part)` merged; **never contains document text**) so callers can tell when content was silently truncated, skipped or clamped. Kinds (`DiagnosticKind`, `#[non_exhaustive]`, stable `code()` strings in the `RenderWarning` kebab-case style): `xml-truncated` (a part's XML is broken / cut off; the parsed prefix is still returned), `nesting-depth-exceeded` (subtrees skipped by the `MAX_NEST_DEPTH` guard), `table-columns-clamped` (extra `gridCol`s dropped + `gridBefore` / `gridAfter` clamps), `grid-span-clamped`, `numbering-value-clamped` (`w:start` / `w:startOverride` above `MAX_LIST_NUMBER`), `missing-part` (header / footer relationships or parts that do not exist, pictures whose media is missing; `part` is the part holding the dangling reference), `alt-chunk-not-imported` (every `w:altChunk`, headers / notes included). Collected centrally: walkers only bump counters on their `Ctx`, and `doc-parse/src/lib.rs` turns them into diagnostics and runs one well-formedness pass per XML part. `alt_chunk_count` is kept unchanged (body only). `Document` gained a public field, so struct literals without `..Default::default()` need updating (Rust API).
+
 - **`w:altChunk` is now surfaced**: its content is still not imported, but `Document.alt_chunk_count` (Python `doc.alt_chunk_count`) counts them and PDF export emits one `alt-chunk-skipped` warning, so callers know content is missing.
 
 - **Picture alt text**: `Picture.alt` (Rust) / `pic["alt"]` (Python) from `wp:docPr@descr`, falling back to `@title` (VML: `v:shape@alt` / `v:imagedata@o:title`).
@@ -170,6 +172,8 @@ change.
   the previously missing `run["is_math"]`.
 
 ### Breaking (Rust API, pre-1.0)
+
+- `Document` gains `diagnostics`, `ParaProps` gains `num_id` / `num_ilvl`, and `NumLevel` gains `p_style` (struct literals without `..Default::default()` must be updated).
 
 - `Row` gains `grid_before` and `grid_after` (struct literals without `..Default::default()` must be updated).
 

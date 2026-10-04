@@ -683,3 +683,28 @@ def test_grid_before_after_exposed_and_html_aligned():
     assert [(r["grid_before"], r["grid_after"]) for r in table["rows"]] == [(0, 0), (1, 1)]
     assert '<td rowspan="2">b</td>' in doc.to_html()
     assert "<tr>\n<td></td>\n</tr>" in doc.to_html()
+
+
+def test_diagnostics_empty_for_clean_document(minimal_docx_bytes):
+    """正常文件:诊断为空列表。"""
+    assert docspine.open_bytes(minimal_docx_bytes).diagnostics() == []
+
+
+def test_diagnostics_report_truncation_and_altchunk_without_text():
+    """document.xml 中途截断 + altChunk:诊断是 dict(kind / part / count),不含任何正文;已解析部分仍可读。"""
+    secret = "TOPSECRETBODY"
+    xml = (
+        _DOC_HEADER
+        + f'<w:body><w:p><w:r><w:t>{secret}</w:t></w:r></w:p><w:altChunk r:id="rId9"/>'
+        + "<w:p><w:r><w:t>cut off"
+    )
+    doc = docspine.open_bytes(build_docx(xml))
+    assert doc.to_text().startswith(secret)
+    got = {(d["kind"], d["part"]): d["count"] for d in doc.diagnostics()}
+    assert got == {
+        ("xml-truncated", "word/document.xml"): 1,
+        ("alt-chunk-not-imported", "word/document.xml"): 1,
+    }
+    assert doc.alt_chunk_count == 1
+    assert secret not in repr(doc.diagnostics())
+    assert all(set(d) == {"kind", "part", "count"} for d in doc.diagnostics())
