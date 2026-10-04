@@ -93,40 +93,49 @@ fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
                     notes.scope(|| text_blocks(&tb.blocks, out, notes));
                 }
             }
-            Block::Table(t) => {
-                for row in &t.rows {
-                    // 行首跳过的网格列(`gridBefore`)补空字段,首个单元格才落在正确的列。
-                    let mut cells: Vec<String> = vec![String::new(); row.grid_before as usize];
-                    cells.extend(
-                        row.cells
-                            .iter()
-                            .map(|c| cell_lines(&c.blocks, notes, mode).join("\n")),
-                    );
-                    out.push(cells.join("\t"));
-                }
-            }
+            Block::Table(t) => out.extend(table_lines(t, notes, mode)),
         }
     }
 }
 
-/// 单元格内直接段落的行(纯文本 / GFM 单元格用):每段一行(空段保留空行),列表标签作前缀,
-/// 段落锚定的文本框内容紧随其后;嵌套表忽略(与历史 `Cell::text` 一致)。
+/// 一张表的纯文本行:每行的单元格用 `\t` 连接(单元格内多行用 `\n` 连成一格,嵌套表的行同理压平)。
+fn table_lines(t: &Table, notes: &Notes, mode: Mode) -> Vec<String> {
+    t.rows
+        .iter()
+        .map(|row| {
+            // 行首跳过的网格列(`gridBefore`)补空字段,首个单元格才落在正确的列。
+            let mut cells: Vec<String> = vec![String::new(); row.grid_before as usize];
+            cells.extend(
+                row.cells
+                    .iter()
+                    .map(|c| cell_lines(&c.blocks, notes, mode).join("\n")),
+            );
+            cells.join("\t")
+        })
+        .collect()
+}
+
+/// 单元格内的行(纯文本 / GFM 单元格用):每段一行(空段保留空行),列表标签作前缀,
+/// 段落锚定的文本框内容紧随其后;嵌套表按 [`table_lines`] 压平成多行(行内单元格 `\t`),不丢字。
 fn cell_lines(blocks: &[Block], notes: &Notes, mode: Mode) -> Vec<String> {
     let mut lines = Vec::new();
     for b in blocks {
-        if let Block::Paragraph(p) = b {
-            let item = notes.list_item(p);
-            let t = para_inline(p, notes, mode);
-            lines.push(match item {
-                Some(it) if !t.is_empty() => format!("{}{t}", plain_prefix(&it, mode)),
-                _ => t,
-            });
-            for tb in p.text_boxes() {
-                let inner = notes.scope(|| cell_lines(&tb.blocks, notes, mode).join("\n"));
-                if !inner.is_empty() {
-                    lines.push(inner);
+        match b {
+            Block::Paragraph(p) => {
+                let item = notes.list_item(p);
+                let t = para_inline(p, notes, mode);
+                lines.push(match item {
+                    Some(it) if !t.is_empty() => format!("{}{t}", plain_prefix(&it, mode)),
+                    _ => t,
+                });
+                for tb in p.text_boxes() {
+                    let inner = notes.scope(|| cell_lines(&tb.blocks, notes, mode).join("\n"));
+                    if !inner.is_empty() {
+                        lines.push(inner);
+                    }
                 }
             }
+            Block::Table(t) => lines.extend(table_lines(t, notes, mode)),
         }
     }
     lines
@@ -272,11 +281,17 @@ fn md_cell_text(cell: &Cell, notes: &Notes) -> String {
 /// 表格是否需要退回 HTML:任一单元格横向跨列 / 参与纵向合并 / 含嵌套表(GFM 表无法表达)。
 fn table_needs_html(table: &Table) -> bool {
     table.rows.iter().any(|r| {
-        r.cells.iter().any(|c| {
-            c.grid_span > 1
-                || c.v_merge != VMerge::None
-                || c.blocks.iter().any(|b| matches!(b, Block::Table(_)))
-        })
+        r.cells
+            .iter()
+            .any(|c| c.grid_span > 1 || c.v_merge != VMerge::None || has_nested_table(&c.blocks))
+    })
+}
+
+/// 单元格内容里(含段落锚定的文本框)是否有表:GFM 单元格放不下,须退回 HTML 才不丢字。
+fn has_nested_table(blocks: &[Block]) -> bool {
+    blocks.iter().any(|b| match b {
+        Block::Table(_) => true,
+        Block::Paragraph(p) => p.text_boxes().any(|tb| has_nested_table(&tb.blocks)),
     })
 }
 
