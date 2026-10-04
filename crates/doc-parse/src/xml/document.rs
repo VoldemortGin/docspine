@@ -1557,16 +1557,17 @@ fn parse_measure(e: &BytesStart) -> Option<TableWidth> {
 }
 
 /// 解析 `w:tblGrid` -> 各列宽(twip)。已消费 `<w:tblGrid>` 起始标签。
+/// `w:tblGridChange`(修订前的旧网格,内嵌一份 `w:tblGrid`)整体跳过;展开写法
+/// `<w:gridCol></w:gridCol>` 的结束标签也要随之消费,否则会被误当成 `tblGrid` 的结束。
 fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Twips> {
     let mut cols = Vec::new();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                if local_name(e.name().as_ref()) == b"gridCol" {
-                    let w: Twips = attr_of(&e, b"w").and_then(|s| s.parse().ok()).unwrap_or(0);
-                    cols.push(w);
-                }
+            Ok(Event::Empty(e)) => push_grid_col(&e, &mut cols),
+            Ok(Event::Start(e)) => {
+                push_grid_col(&e, &mut cols);
+                skip_element(reader);
             }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
@@ -1576,6 +1577,13 @@ fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Twips> {
         buf.clear();
     }
     cols
+}
+
+/// `w:gridCol` 记一列宽(其它元素忽略)。
+fn push_grid_col(e: &BytesStart, cols: &mut Vec<Twips>) {
+    if local_name(e.name().as_ref()) == b"gridCol" {
+        cols.push(attr_of(e, b"w").and_then(|s| s.parse().ok()).unwrap_or(0));
+    }
 }
 
 /// 解析 `w:tr`(表格行)。已消费 `<w:tr>` 起始标签。
