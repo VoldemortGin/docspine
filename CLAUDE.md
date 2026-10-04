@@ -72,7 +72,7 @@ crates/
     src/model.rs   Document/Block(Paragraph|Table)/Paragraph/TextRun/Table/Row/Cell/VMerge/Picture/Color
     src/style.rs   有效样式 resolver:docDefaults → 表格样式 → pStyle basedOn 链 → 直接格式(级联 + theme 解引 + 防环)
     src/numbering.rs 列表模型 + 计数引擎:numId/ilvl → 标签串(起值/编号格式/层级重置)
-    src/export.rs  Document → 纯文本 / Markdown / HTML(纯序列化;含合并单元格转 HTML `<table>`)
+    src/export.rs  Document → 纯文本 / Markdown / HTML(纯序列化;含合并单元格转 HTML `<table>`);标题识别走样式表(`style::resolve_heading_level`:段落 / 样式 `outlineLvl` → 样式名沿 basedOn → styleId 字面;Markdown / HTML 7–9 级按 6 级)
   doc-parse/   OOXML 读取:zip 解包 + quick-xml 遍历 -> Document。本轮核心。#![forbid(unsafe_code)]
     src/lib.rs     parse_path / parse_bytes -> ParsedDoc { document, media };CFB 早判降级
     src/zip_pkg.rs zip 读 API:word/document.xml / word/_rels / word/media + ZipLimits 解压限额

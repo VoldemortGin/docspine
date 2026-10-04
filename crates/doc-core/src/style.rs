@@ -620,6 +620,9 @@ pub struct ParaProps {
     pub contextual_spacing: Option<bool>,
     /// 自定义制表位(`w:tabs`;空 = 未设置)。级联按整表就近替换(非空盖前层)。
     pub tabs: Vec<TabStop>,
+    /// 大纲级别(`w:outlineLvl@w:val`,0–8 = 1–9 级标题,9 = 正文)。标题识别用,见
+    /// [`resolve_heading_level`];渲染不消费。
+    pub outline_lvl: Option<u8>,
 }
 
 impl ParaProps {
@@ -645,6 +648,7 @@ impl ParaProps {
             page_break_before,
             widow_control,
             contextual_spacing,
+            outline_lvl,
         );
         if !other.tabs.is_empty() {
             self.tabs = other.tabs.clone();
@@ -960,6 +964,66 @@ fn full_chain<'a>(
         .or(table.default_para_style.as_deref());
     chain.extend(style_chain(table, para_style));
     chain
+}
+
+/// 样式名 / styleId -> 标题级别(1..=9):`heading N` / `标题N`(大小写、空白不敏感,
+/// 含常见本地化词头)-> N(钳到 1..=9);`Title` / `标题` -> 1;`Subtitle` / `副标题` -> 2;
+/// 其它 `None`。
+pub fn heading_level_from_name(name: &str) -> Option<u8> {
+    let norm: String = name
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    match norm.as_str() {
+        "title" | "标题" | "標題" | "タイトル" => return Some(1),
+        "subtitle" | "副标题" | "副標題" | "サブタイトル" => return Some(2),
+        _ => {}
+    }
+    const PREFIXES: [&str; 12] = [
+        "heading",
+        "标题",
+        "標題",
+        "見出し",
+        "제목",
+        "überschrift",
+        "titre",
+        "título",
+        "titulo",
+        "заголовок",
+        "intestazione",
+        "kop",
+    ];
+    PREFIXES.iter().find_map(|prefix| {
+        let n: u8 = norm.strip_prefix(prefix)?.parse().ok()?;
+        Some(n.clamp(1, 9))
+    })
+}
+
+/// 段落的标题级别(1..=9;`None` = 正文)。优先级:
+/// 1. 段落自身 `w:outlineLvl`(0–8 -> 1–9,9 = 正文);
+/// 2. 段落样式沿 `basedOn` 链级联的 `w:outlineLvl`(同上);
+/// 3. 样式名(自身起沿 `basedOn` 向上,首个命中)按 [`heading_level_from_name`];
+/// 4. 段落 styleId 的字面匹配(兼容无样式表 / 第三方生成器)。
+///
+/// `basedOn` 走 [`style_chain`] 的 visited-set 防环。
+pub fn resolve_heading_level(doc: &Document, para: &Paragraph) -> Option<u8> {
+    let from_outline = |v: u8| (v <= 8).then_some(v + 1);
+    if let Some(v) = para.ppr.outline_lvl {
+        return from_outline(v);
+    }
+    let st = &doc.styles;
+    let id = para.style.as_deref().or(st.default_para_style.as_deref());
+    let chain = style_chain(st, id); // 根在前。
+    if let Some(v) = chain.iter().rev().find_map(|s| s.ppr.outline_lvl) {
+        return from_outline(v);
+    }
+    let by_name = chain
+        .iter()
+        .rev()
+        .filter_map(|s| s.name.as_deref())
+        .find_map(heading_level_from_name);
+    by_name.or_else(|| para.style.as_deref().and_then(heading_level_from_name))
 }
 
 /// 沿 `basedOn` 走出一条样式链,**根(最基)在前**。visited-set 防环:重访即截断,

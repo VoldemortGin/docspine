@@ -258,6 +258,11 @@ pub fn apply_ppr_prop(e: &BytesStart, p: &mut ParaProps) {
         b"pageBreakBefore" => p.page_break_before = Some(on_off_val(e)),
         b"widowControl" => p.widow_control = Some(on_off_val(e)),
         b"contextualSpacing" => p.contextual_spacing = Some(on_off_val(e)),
+        b"outlineLvl" => {
+            p.outline_lvl = attr_of(e, b"val")
+                .and_then(|s| s.parse::<u8>().ok())
+                .filter(|&v| v <= 9)
+        }
         _ => {}
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! 这是纯函数式的「模型 -> 字符串」序列化:无 IO / zip / XML,只读领域模型。三种形态:
 //! - [`to_text`]:全文按块拼成纯文本(段落换行、表格行内单元格按 tab、行间换行)。
-//! - [`to_markdown`]:段落按空行分隔;标题样式(`Heading1`/`标题1`)映射成 `#`;
+//! - [`to_markdown`]:段落按空行分隔;标题按样式表识别(`outlineLvl` / 样式名沿 `basedOn` / styleId,见 `style::resolve_heading_level`)映射成 `#`;
 //!   **无合并的表格输出 GFM 管道表;一旦含合并单元格(`gridSpan` 横向 / `vMerge` 纵向)
 //!   或嵌套表,则改用 HTML `<table>` 以保真 `rowspan`/`colspan`**(GFM 表无法表达合并)。
 //! - [`to_html`]:段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带 `rowspan`/`colspan`),
@@ -25,7 +25,10 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use crate::model::{Block, Cell, Document, HeaderFooterKind, NoteKind, RunSegment, Table, VMerge};
+use crate::model::{
+    Block, Cell, Document, HeaderFooterKind, NoteKind, Paragraph, RunSegment, Table, VMerge,
+};
+use crate::style::resolve_heading_level;
 
 // ============================================================ 纯文本
 
@@ -133,7 +136,7 @@ fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>, notes: &Notes) {
             Block::Paragraph(p) => {
                 let t = p.text_with_notes(&|k, id| notes.mark(k, id));
                 if !t.is_empty() {
-                    match heading_level(p.style.as_deref()) {
+                    match heading_level(notes.doc, p) {
                         Some(level) => parts.push(format!("{} {t}", "#".repeat(level as usize))),
                         None => parts.push(t),
                     }
@@ -239,7 +242,7 @@ fn push_html_header_footer(
 
 /// 段落 -> HTML 内联文本:文字转义,注引用放原样的 `<sup>` 标记(不能整体转义后再放)。
 /// 折叠规则同 [`TextRun::text`](Tab -> `\t`,断行 -> `<br>`)。
-fn html_para_text(p: &crate::model::Paragraph, notes: &Notes) -> String {
+fn html_para_text(p: &Paragraph, notes: &Notes) -> String {
     let mut out = String::new();
     for seg in p.runs.iter().flat_map(|r| &r.segments) {
         match seg {
@@ -259,7 +262,7 @@ fn html_blocks(blocks: &[Block], out: &mut String, notes: &Notes) {
             Block::Paragraph(p) => {
                 let t = html_para_text(p, notes);
                 if !t.is_empty() {
-                    match heading_level(p.style.as_deref()) {
+                    match heading_level(notes.doc, p) {
                         Some(level) => out.push_str(&format!("<h{level}>{t}</h{level}>\n")),
                         None => out.push_str(&format!("<p>{t}</p>\n")),
                     }
@@ -549,22 +552,11 @@ impl<'a> Notes<'a> {
 
 // ============================================================ 标题映射
 
-/// 把段落样式名映射成标题层级(1..=6):`Heading1`/`heading 2`/`标题3` -> 数字;`Title` -> 1;
-/// 其它返回 `None`(当普通段落)。层级钳到 `1..=6`。
-fn heading_level(style: Option<&str>) -> Option<u8> {
-    let raw = style?.trim();
-    if raw.eq_ignore_ascii_case("title") {
-        return Some(1);
-    }
-    let lower = raw.to_lowercase(); // 英文小写化;CJK 与 ASCII 数字不受影响。
-    for prefix in ["heading", "标题"] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            if let Ok(n) = rest.trim().parse::<u8>() {
-                return Some(n.clamp(1, 6));
-            }
-        }
-    }
-    None
+/// 段落的标题层级(1..=6;`None` = 普通段落):走样式表(段落 / 样式 `outlineLvl`、样式名沿
+/// `basedOn` 链、styleId 字面匹配,见 [`resolve_heading_level`]);Markdown / HTML 只有 6 级,
+/// 7–9 级按 6 级输出。
+fn heading_level(doc: &Document, p: &Paragraph) -> Option<u8> {
+    resolve_heading_level(doc, p).map(|l| l.min(6))
 }
 
 #[cfg(test)]
@@ -723,11 +715,16 @@ mod tests {
 
     #[test]
     fn heading_level_maps_variants() {
-        assert_eq!(heading_level(Some("Heading1")), Some(1));
-        assert_eq!(heading_level(Some("heading 3")), Some(3));
-        assert_eq!(heading_level(Some("标题2")), Some(2));
-        assert_eq!(heading_level(Some("Title")), Some(1));
-        assert_eq!(heading_level(Some("Normal")), None);
-        assert_eq!(heading_level(None), None);
+        let level = |style: Option<&str>| {
+            let p = para("x", style);
+            heading_level(&Document::default(), &p)
+        };
+        assert_eq!(level(Some("Heading1")), Some(1));
+        assert_eq!(level(Some("heading 3")), Some(3));
+        assert_eq!(level(Some("标题2")), Some(2));
+        assert_eq!(level(Some("Title")), Some(1));
+        assert_eq!(level(Some("Heading9")), Some(6));
+        assert_eq!(level(Some("Normal")), None);
+        assert_eq!(level(None), None);
     }
 }
