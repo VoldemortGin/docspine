@@ -185,6 +185,8 @@ change.
 
 ### Fixed
 
+- **Formula structures inside `m:oMathPara > m:oMath` (and inside `m:d` / `m:nary` / `m:func` / `m:e`) are linearized**: the inner `m:oMath` and other transparent wrappers used to hide `m:f` / `m:sSup` / `m:sSub` / `m:rad`, so a display equation such as `1/2` came out as `12`. Wrappers are now transparent; two `m:oMath` in one `m:oMathPara` are still joined by a space.
+
 - **`w:tblGridChange` no longer truncates the document.** A tracked column-width /
   column-insert edit nests an old `w:tblGrid` inside the current one; the walker
   returned at the first `</w:tblGrid>`, so the leftover end tags closed the table

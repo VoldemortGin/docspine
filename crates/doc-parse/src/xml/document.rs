@@ -964,7 +964,7 @@ enum MathSlot {
 }
 
 /// 公式遍历栈上的一帧:容器 / 结构 / 槽位各自攒一份文字。其余嵌套元素不开帧,只在帧内
-/// 记 `other_depth`,文字直接并入当前帧(保持纯拼接且不随深度反复复制)。
+/// 记 `other_depth`(外壳不挡住其内的结构),文字直接并入当前帧(保持纯拼接且不随深度反复复制)。
 struct MathFrame {
     /// 本帧是哪种结构(`None` = 容器或槽位)。
     kind: Option<MathStruct>,
@@ -1107,7 +1107,9 @@ fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>, container: &[u8]) -> 
                             None => top.other_depth += 1,
                         }
                     }
-                    _ if top.other_depth == 0 && struct_depth < MAX_NEST_DEPTH => {
+                    // 容器 / 槽位帧(`kind` 为 `None`)里不论隔了几层透明外壳(`m:oMath` /
+                    // `m:d` / `m:e` / `m:nary` / `m:func` 等)都认结构;外壳只记 `other_depth`。
+                    _ if top.kind.is_none() && struct_depth < MAX_NEST_DEPTH => {
                         match math_struct_of(name) {
                             Some(kind) => {
                                 struct_depth += 1;

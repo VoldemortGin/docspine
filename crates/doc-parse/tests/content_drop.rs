@@ -679,6 +679,108 @@ fn omath_structures_missing_slots_do_not_panic() {
     );
 }
 
+/// 把一段公式内部 XML 包成 `m:oMathPara > m:oMath`(Word 独占一行公式的写法)。
+fn para_math_text(inner: &str) -> String {
+    text_of(&format!(
+        "<w:p {M_NS}><m:oMathPara><m:oMath>{inner}</m:oMath></m:oMathPara></w:p>"
+    ))
+}
+
+#[test]
+fn omathpara_wrapped_structures_are_linearized() {
+    let e = |t: &str| format!("<m:e>{}</m:e>", mr(t));
+    assert_eq!(
+        para_math_text(&format!(
+            "<m:f><m:num>{}</m:num><m:den>{}</m:den></m:f>",
+            mr("1"),
+            mr("2")
+        )),
+        "1/2"
+    );
+    assert_eq!(
+        para_math_text(&format!(
+            "<m:sSup>{}<m:sup>{}</m:sup></m:sSup>",
+            e("x"),
+            mr("2")
+        )),
+        "x^2"
+    );
+    assert_eq!(
+        para_math_text(&format!(
+            "<m:sSub>{}<m:sub>{}</m:sub></m:sSub>",
+            e("x"),
+            mr("i")
+        )),
+        "x_i"
+    );
+    assert_eq!(
+        para_math_text(&format!("<m:rad><m:deg/>{}</m:rad>", e("x"))),
+        "sqrt(x)"
+    );
+}
+
+#[test]
+fn omathpara_with_two_omath_separated_by_space() {
+    let f = |a: &str, b: &str| {
+        format!(
+            "<m:oMath><m:f><m:num>{}</m:num><m:den>{}</m:den></m:f></m:oMath>",
+            mr(a),
+            mr(b)
+        )
+    };
+    let txt = text_of(&format!(
+        "<w:p {M_NS}><m:oMathPara>{}{}</m:oMathPara></w:p>",
+        f("1", "2"),
+        f("3", "4")
+    ));
+    assert_eq!(txt, "1/2 3/4");
+}
+
+#[test]
+fn omath_structures_inside_transparent_containers_are_linearized() {
+    let frac = format!(
+        "<m:f><m:num>{}</m:num><m:den>{}</m:den></m:f>",
+        mr("1"),
+        mr("2")
+    );
+    // 定界符 m:d > m:e > m:f。
+    assert_eq!(math_text(&format!("<m:d><m:e>{frac}</m:e></m:d>")), "1/2");
+    // 大运算符 m:nary > m:e > m:f(其 m:sub / m:sup 文字照常保留)。
+    assert_eq!(
+        math_text(&format!(
+            "<m:nary><m:naryPr/><m:sub>{}</m:sub><m:e>{frac}</m:e></m:nary>",
+            mr("i")
+        )),
+        "i1/2"
+    );
+    // 函数 m:func > m:fName + m:e > m:f。
+    assert_eq!(
+        math_text(&format!(
+            "<m:func><m:fName>{}</m:fName><m:e>{frac}</m:e></m:func>",
+            mr("sin")
+        )),
+        "sin1/2"
+    );
+    // 结构槽位里再套定界符再套上标:sSup > e > d > e > sSup。
+    let inner = format!(
+        "<m:sSup><m:e>{}</m:e><m:sup>{}</m:sup></m:sSup>",
+        mr("y"),
+        mr("3")
+    );
+    assert_eq!(
+        math_text(&format!(
+            "<m:sSup><m:e><m:d><m:e>{inner}</m:e></m:d></m:e><m:sup>{}</m:sup></m:sSup>",
+            mr("2")
+        )),
+        "(y^3)^2"
+    );
+    // 同一 m:d 内多个结构并列。
+    assert_eq!(
+        math_text(&format!("<m:d><m:e>{frac}</m:e><m:e>{frac}</m:e></m:d>")),
+        "1/21/2"
+    );
+}
+
 #[test]
 fn deeply_nested_math_structures_no_stack_overflow() {
     let levels = 5_000;
