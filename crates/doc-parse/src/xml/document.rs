@@ -1814,6 +1814,7 @@ fn parse_drawing<R: std::io::BufRead>(
 ) -> Option<Picture> {
     let mut rel_id = String::new();
     let mut extent: Option<(Emu, Emu)> = None;
+    let mut alt = AltText::default();
     let mut anchored = false;
     let mut behind = false;
     let (mut x, mut y): (Emu, Emu) = (0, 0);
@@ -1844,7 +1845,7 @@ fn parse_drawing<R: std::io::BufRead>(
                     apply_drawing_elem(
                         &e,
                         &name,
-                        (&mut rel_id, &mut extent),
+                        (&mut rel_id, &mut extent, &mut alt),
                         (&mut anchored, &mut behind),
                         (&mut rel_h, &mut rel_v, &mut axis),
                     );
@@ -1856,7 +1857,7 @@ fn parse_drawing<R: std::io::BufRead>(
                 apply_drawing_elem(
                     &e,
                     &name,
-                    (&mut rel_id, &mut extent),
+                    (&mut rel_id, &mut extent, &mut alt),
                     (&mut anchored, &mut behind),
                     (&mut rel_h, &mut rel_v, &mut axis),
                 );
@@ -1879,7 +1880,7 @@ fn parse_drawing<R: std::io::BufRead>(
         }
         buf.clear();
     }
-    let mut pic = resolve_picture(ctx, rel_id, extent)?;
+    let mut pic = resolve_picture(ctx, rel_id, extent, alt)?;
     if anchored {
         pic.placement = Placement::Anchored {
             x,
@@ -1896,7 +1897,7 @@ fn parse_drawing<R: std::io::BufRead>(
 fn apply_drawing_elem(
     e: &BytesStart,
     name: &[u8],
-    (rel_id, extent): (&mut String, &mut Option<(Emu, Emu)>),
+    (rel_id, extent, alt): (&mut String, &mut Option<(Emu, Emu)>, &mut AltText),
     (anchored, behind): (&mut bool, &mut bool),
     (rel_h, rel_v, axis): (&mut AnchorRef, &mut AnchorRef, &mut Option<bool>),
 ) {
@@ -1907,6 +1908,7 @@ fn apply_drawing_elem(
                 *behind = !(b == "0" || b.eq_ignore_ascii_case("false"));
             }
         }
+        b"docPr" => alt.set(attr_of(e, b"descr"), attr_of(e, b"title")),
         b"extent" => {
             let cx: Emu = attr_of(e, b"cx").and_then(|s| s.parse().ok()).unwrap_or(0);
             let cy: Emu = attr_of(e, b"cy").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -1947,6 +1949,7 @@ fn parse_vml_pict<R: std::io::BufRead>(
 ) -> Option<Picture> {
     let mut rel_id = String::new();
     let mut extent: Option<(Emu, Emu)> = None;
+    let mut alt = AltText::default();
     let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
@@ -1966,12 +1969,14 @@ fn parse_vml_pict<R: std::io::BufRead>(
                             rel_id = attr_string(&attr);
                         }
                     }
+                    alt.set(None, attr_of(e, b"title"));
                 } else if extent.is_none() {
                     // v:shape / v:rect 等形状元素:style="width:36pt;height:24pt;…"。
                     if let Some(style) = attr_of(e, b"style") {
                         extent = vml_style_extent(&style);
                     }
                 }
+                alt.set(attr_of(e, b"alt"), None);
             }
             Ok(Event::End(_)) => {
                 if depth == 0 {
@@ -1985,7 +1990,7 @@ fn parse_vml_pict<R: std::io::BufRead>(
         }
         buf.clear();
     }
-    resolve_picture(ctx, rel_id, extent)
+    resolve_picture(ctx, rel_id, extent, alt)
 }
 
 /// 解析一个文本框内容 `w:txbxContent`(段落 / 表格块序列)。已消费起始标签。
@@ -2043,9 +2048,40 @@ fn css_length_emu(value: &str) -> Option<Emu> {
     Some((pt * doc_core::geom::EMU_PER_POINT).round() as Emu)
 }
 
+/// 图片替代文字的收集器:`descr`(优先)与 `title`(兜底)各取首个非空值。
+#[derive(Default)]
+struct AltText {
+    descr: Option<String>,
+    title: Option<String>,
+}
+
+impl AltText {
+    fn set(&mut self, descr: Option<String>, title: Option<String>) {
+        let norm = |s: String| {
+            let t = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!t.is_empty()).then_some(t)
+        };
+        if self.descr.is_none() {
+            self.descr = descr.and_then(norm);
+        }
+        if self.title.is_none() {
+            self.title = title.and_then(norm);
+        }
+    }
+
+    fn finish(self) -> Option<String> {
+        self.descr.or(self.title)
+    }
+}
+
 /// 把图片的 rel id 经 rels 映射到 media 裸文件名,回填字节长度,组装 [`Picture`]。
 /// rel id 为空(没找到引用)则返回 `None`。
-fn resolve_picture(ctx: &Ctx, rel_id: String, extent: Option<(Emu, Emu)>) -> Option<Picture> {
+fn resolve_picture(
+    ctx: &Ctx,
+    rel_id: String,
+    extent: Option<(Emu, Emu)>,
+    alt: AltText,
+) -> Option<Picture> {
     if rel_id.is_empty() {
         return None;
     }
@@ -2062,6 +2098,7 @@ fn resolve_picture(ctx: &Ctx, rel_id: String, extent: Option<(Emu, Emu)>) -> Opt
         media_name,
         extent,
         image_bytes_len,
+        alt: alt.finish(),
         // 缺省行内;锚定浮动由调用方在解析 wp:anchor 后覆盖(C-8)。
         placement: Placement::Inline,
     })

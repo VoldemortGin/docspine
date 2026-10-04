@@ -674,6 +674,7 @@ mod tests {
             media_name: Some("logo.png".into()),
             extent: Some((228_600, 228_600)), // 18pt × 18pt
             image_bytes_len: PNG_1X1.len(),
+            alt: None,
             placement: Placement::Inline,
         });
         let logo = DocBlock::Paragraph(Paragraph {
@@ -861,6 +862,7 @@ mod tests {
             media_name: Some("logo.png".into()),
             extent: Some((228_600, 228_600)),
             image_bytes_len: PNG_1X1.len(),
+            alt: None,
             placement: Placement::Inline,
         });
         let mut doc = doc_with(

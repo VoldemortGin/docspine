@@ -103,6 +103,7 @@ _DOCUMENT = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:drawing>
           <wp:inline>
             <wp:extent cx="914400" cy="914400"/>
+            <wp:docPr id="1" name="Picture 1" descr="a tiny pixel"/>
             <a:graphic>
               <a:graphicData>
                 <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">

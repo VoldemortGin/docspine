@@ -171,6 +171,7 @@ fn picture_dict<'py>(py: Python<'py>, pic: &Picture) -> PyResult<Bound<'py, PyDi
         }
     }
     d.set_item("image_bytes_len", pic.image_bytes_len)?;
+    d.set_item("alt", pic.alt.as_deref())?;
     Ok(d)
 }
 

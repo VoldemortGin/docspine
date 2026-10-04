@@ -125,6 +125,7 @@ def test_embedded_picture_extracted(minimal_docx_bytes, image1_png_bytes):
     assert pic["rel_id"] == "rId10"
     assert pic["media"] == "image1.png"
     assert pic["image_bytes_len"] == len(image1_png_bytes)
+    assert pic["alt"] == "a tiny pixel"  # wp:docPr@descr
     # wp:extent cx=cy=914400 EMU = 1 inch = 72 pt。
     assert pic["extent"] == (914400, 914400)
     assert pic["extent_points"] == pytest.approx((72.0, 72.0))

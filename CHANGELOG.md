@@ -15,6 +15,8 @@ change.
 
 ### Changed
 
+- **`to_text` / `to_markdown` / `to_html` now include list labels, hyperlinks and pictures** (intentional behavior change; no existing assertion needed rewording): list labels are computed with the same `ListCounters` as the PDF path (body incl. table cells continuous; header/footer parts, each note and each text box counted separately). Markdown emits `- ` for bullets and real list syntax for `1.` / `2)` labels (indented 4 spaces per `ilvl`), other labels (`a)`, `1.2.3`, `(a)`) as escaped text prefixes; plain text / HTML prefix the label. Hyperlinks become `[text](url)` / `<a href>` for `http` / `https` / `mailto` only (anchors and other schemes stay plain text; `]` in text and `)`/space in URL are escaped); pictures become `![alt](media)` / `<img alt src>`, and plain text gets `[图片: alt]` only when alt text exists.
+
 - **Markdown / HTML heading detection now goes through the style sheet** (behavior change): a paragraph is a heading by (1) its own `w:outlineLvl`, (2) the `w:outlineLvl` cascaded along its style's `basedOn` chain, (3) the style `w:name` (own or inherited, case/space-insensitive `heading N`, `Title`, `Subtitle`, localized `标题 N` etc.), (4) the literal styleId match as before. `outlineLvl` 9 means body text; levels 7-9 are emitted as level 6. Numeric styleIds with a `heading 1` name and custom styles based on a heading used to export as plain paragraphs. `ParaProps` gained `outline_lvl` (Rust API, additive); `Subtitle` / `标题` styleIds now also map to headings.
 
 - **PDF export dependencies aligned to pdfspine v0.8.0** (`249a3f7`): `pdf-typeset`
@@ -42,6 +44,8 @@ change.
   SSIM gate included) ran green against pdfspine 0.12.0. Cargo git revs unchanged.
 
 ### Added
+
+- **Picture alt text**: `Picture.alt` (Rust) / `pic["alt"]` (Python) from `wp:docPr@descr`, falling back to `@title` (VML: `v:shape@alt` / `v:imagedata@o:title`).
 
 - **PDF export draws headers and footers on every page.** The effective part per
   page comes from the new pure `Document::header_footer_for_page(section,

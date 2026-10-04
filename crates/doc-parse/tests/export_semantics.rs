@@ -198,3 +198,391 @@ fn heading_recognition_applies_in_table_cells_html() {
     assert!(to_html(&doc).contains("cell"));
     assert_eq!(to_text(&doc), "cell");
 }
+
+// ============================================================ 任务 C:编号标签 / 超链接 / 图片
+
+const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/// 带关系表与额外部件的合成 docx:`rels` = `(rId, 类型后缀, Target, 是否外部)`。
+fn build(body: &str, rels: &[(&str, &str, &str, bool)], parts: &[(&str, String)]) -> Document {
+    let rels_xml = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}</Relationships>"#,
+        rels.iter()
+            .map(|(id, ty, target, ext)| {
+                let mode = if *ext {
+                    r#" TargetMode="External""#
+                } else {
+                    ""
+                };
+                let target = target
+                    .replace('&', "&amp;")
+                    .replace('"', "&quot;")
+                    .replace('<', "&lt;");
+                format!(r#"<Relationship Id="{id}" Type="{REL_NS}/{ty}" Target="{target}"{mode}/>"#)
+            })
+            .collect::<String>()
+    );
+    let doc = body_doc(body);
+    let mut all: Vec<(&str, &str)> = vec![
+        ("word/document.xml", &doc),
+        ("word/_rels/document.xml.rels", &rels_xml),
+    ];
+    all.extend(parts.iter().map(|(n, x)| (*n, x.as_str())));
+    parse_parts(&all)
+}
+
+/// 编号部件:abstract 0 = 十进制多级(`%1.` / `%1.%2` / `(%3)` 小写字母);
+/// abstract 1 = 项目符号两级;abstract 2 = `%1.` + `%2.` 两级十进制(嵌套有序列表);
+/// num 1 / 2 → abstract 0(不同 numId 各自从头计),num 3 → 1,num 4 → 2。
+fn numbering_xml() -> String {
+    format!(
+        r#"<w:numbering xmlns:w="{W_NS}">
+<w:abstractNum w:abstractNumId="0">
+ <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+ <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl>
+ <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="(%3)"/></w:lvl>
+</w:abstractNum>
+<w:abstractNum w:abstractNumId="1">
+ <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#x2022;"/></w:lvl>
+ <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>
+</w:abstractNum>
+<w:abstractNum w:abstractNumId="2">
+ <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+ <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl>
+</w:abstractNum>
+<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+<w:num w:numId="2"><w:abstractNumId w:val="0"/></w:num>
+<w:num w:numId="3"><w:abstractNumId w:val="1"/></w:num>
+<w:num w:numId="4"><w:abstractNumId w:val="2"/></w:num>
+</w:numbering>"#
+    )
+}
+
+fn li(num_id: u32, ilvl: u32, text: &str) -> String {
+    format!(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num_id}"/></w:numPr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+    )
+}
+
+fn plain(text: &str) -> String {
+    format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>")
+}
+
+fn with_numbering(body: &str) -> Document {
+    build(body, &[], &[("word/numbering.xml", numbering_xml())])
+}
+
+#[test]
+fn multilevel_numbered_list_labels_in_all_exports() {
+    let body = li(1, 0, "A")
+        + &li(1, 1, "B")
+        + &li(1, 1, "C")
+        + &li(1, 2, "D")
+        + &li(1, 0, "E")
+        + &li(1, 1, "F");
+    let doc = with_numbering(&body);
+    assert_eq!(to_text(&doc), "1. A\n1.1 B\n1.2 C\n(a) D\n2. E\n2.1 F");
+    // Markdown:`1.` 是合法有序列表语法,直接用;`1.1` / `(a)` 不是,作文字前缀成独立段。
+    assert_eq!(
+        to_markdown(&doc),
+        "1. A\n\n1.1 B\n\n1.2 C\n\n(a) D\n\n2. E\n\n2.1 F"
+    );
+    assert_eq!(
+        to_html(&doc),
+        "<p>1. A</p>\n<p>1.1 B</p>\n<p>1.2 C</p>\n<p>(a) D</p>\n<p>2. E</p>\n<p>2.1 F</p>"
+    );
+}
+
+#[test]
+fn bullet_lists_use_dash_in_markdown_and_indent_by_level() {
+    let body = li(3, 0, "x") + &li(3, 0, "y") + &li(3, 1, "z") + &li(3, 0, "w");
+    let doc = with_numbering(&body);
+    assert_eq!(to_markdown(&doc), "- x\n- y\n    - z\n- w");
+    assert_eq!(to_text(&doc), "\u{2022} x\n\u{2022} y\no z\n\u{2022} w");
+    assert!(to_html(&doc).starts_with("<p>\u{2022} x</p>\n<p>\u{2022} y</p>\n<p>o z</p>"));
+}
+
+#[test]
+fn nested_ordered_list_markdown_is_indented() {
+    let body = li(4, 0, "A") + &li(4, 1, "B") + &li(4, 1, "C") + &li(4, 0, "D");
+    let doc = with_numbering(&body);
+    assert_eq!(to_markdown(&doc), "1. A\n    1. B\n    2. C\n2. D");
+    assert_eq!(to_text(&doc), "1. A\n1. B\n2. C\n2. D");
+}
+
+#[test]
+fn list_level_jump_does_not_over_indent() {
+    // 从 0 级直接跳到 2 级:缩进不得超过父级内容 +1 层(否则 Markdown 当成缩进代码块)。
+    let body = li(3, 0, "a") + &li(3, 1, "b");
+    let md = to_markdown(&with_numbering(&li(1, 2, "deep")));
+    assert_eq!(md, "(a) deep");
+    assert_eq!(to_markdown(&with_numbering(&body)), "- a\n    - b");
+}
+
+#[test]
+fn different_num_id_restarts_numbering() {
+    let body = li(1, 0, "a") + &li(1, 0, "b") + &li(2, 0, "c") + &li(1, 0, "d");
+    let doc = with_numbering(&body);
+    assert_eq!(to_text(&doc), "1. a\n2. b\n1. c\n3. d");
+    assert_eq!(to_markdown(&doc), "1. a\n2. b\n1. c\n3. d");
+}
+
+#[test]
+fn list_counters_continue_across_table_cells() {
+    let body = li(1, 0, "a")
+        + &format!(
+            "<w:tbl><w:tr><w:tc>{}</w:tc><w:tc>{}</w:tc></w:tr></w:tbl>",
+            li(1, 0, "b"),
+            plain("plain")
+        )
+        + &li(1, 0, "c");
+    let doc = with_numbering(&body);
+    assert_eq!(to_text(&doc), "1. a\n2. b\tplain\n3. c");
+    assert_eq!(
+        to_markdown(&doc),
+        "1. a\n\n| 2. b | plain |\n| --- | --- |\n\n3. c"
+    );
+    let html = to_html(&doc);
+    assert!(
+        html.contains("<td>2. b</td>") && html.ends_with("<p>3. c</p>"),
+        "{html}"
+    );
+}
+
+#[test]
+fn list_counters_are_scoped_per_header_footnote_and_body() {
+    let hdr = format!(r#"<w:hdr xmlns:w="{W_NS}">{}</w:hdr>"#, li(1, 0, "head"));
+    let notes = format!(
+        r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:id="1">{}</w:footnote></w:footnotes>"#,
+        li(1, 0, "note")
+    );
+    let body = li(1, 0, "a")
+        + &li(1, 0, "b")
+        + r#"<w:p><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#
+        + r#"<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>"#;
+    let doc = build(
+        &body,
+        &[
+            ("rIdH", "header", "header1.xml", false),
+            ("rIdN", "footnotes", "footnotes.xml", false),
+        ],
+        &[
+            ("word/numbering.xml", numbering_xml()),
+            ("word/header1.xml", hdr),
+            ("word/footnotes.xml", notes),
+        ],
+    );
+    let txt = to_text(&doc);
+    // 页眉、脚注各自从 1 起,不吃正文的计数,正文也不被它们推进。
+    assert!(
+        txt.contains("[Header: default]\n1. head\n1. a\n2. b"),
+        "{txt}"
+    );
+    assert!(txt.contains("[1] 1. note"), "{txt}");
+}
+
+#[test]
+fn list_numbering_in_text_box_does_not_disturb_body() {
+    let tb = format!(
+        r#"<w:p><w:r><w:t>anchor</w:t><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+        li(1, 0, "boxed")
+    );
+    let doc = with_numbering(&(li(1, 0, "a") + &tb + &li(1, 0, "b")));
+    assert_eq!(to_text(&doc), "1. a\nanchor\n1. boxed\n2. b");
+}
+
+#[test]
+fn empty_list_paragraph_advances_counter_without_label_line() {
+    let body = li(1, 0, "a") + &li(1, 0, "") + &li(1, 0, "c");
+    let doc = with_numbering(&body);
+    assert_eq!(to_text(&doc), "1. a\n\n3. c");
+    // Markdown 跳过空段,不打断列表链。
+    assert_eq!(to_markdown(&doc), "1. a\n3. c");
+}
+
+#[test]
+fn numbered_heading_keeps_label_in_markdown_and_html() {
+    let styles = style("H1", "heading 1", None, "");
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="H1"/><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Intro</w:t></w:r></w:p>"#;
+    let doc = build(
+        body,
+        &[],
+        &[
+            ("word/numbering.xml", numbering_xml()),
+            (
+                "word/styles.xml",
+                format!(r#"<w:styles xmlns:w="{W_NS}">{styles}</w:styles>"#),
+            ),
+        ],
+    );
+    assert_eq!(to_markdown(&doc), "# 1.1 Intro");
+    assert!(to_html(&doc).contains("<h1>1.1 Intro</h1>"));
+}
+
+fn link(rel: &str, text: &str) -> String {
+    format!(r#"<w:hyperlink r:id="{rel}"><w:r><w:t>{text}</w:t></w:r></w:hyperlink>"#)
+}
+
+fn link_doc(targets: &[(&str, &str)], body: &str) -> Document {
+    let rels: Vec<(&str, &str, &str, bool)> = targets
+        .iter()
+        .map(|(id, t)| (*id, "hyperlink", *t, true))
+        .collect();
+    build(body, &rels, &[])
+}
+
+#[test]
+fn hyperlinks_become_markdown_and_html_links() {
+    let body = format!(
+        "<w:p><w:r><w:t>see </w:t></w:r>{}<w:r><w:t> now</w:t></w:r></w:p>",
+        link("r1", "the site")
+    );
+    let doc = link_doc(&[("r1", "https://example.com/a?b=1&c=2")], &body);
+    assert_eq!(to_text(&doc), "see the site now");
+    assert_eq!(
+        to_markdown(&doc),
+        "see [the site](https://example.com/a?b=1&c=2) now"
+    );
+    assert_eq!(
+        to_html(&doc),
+        "<p>see <a href=\"https://example.com/a?b=1&amp;c=2\">the site</a> now</p>"
+    );
+}
+
+#[test]
+fn link_split_over_runs_is_one_link_and_escapes_applied() {
+    let body = r#"<w:p><w:hyperlink r:id="r1"><w:r><w:t>a]b</w:t></w:r><w:r><w:t>[c</w:t></w:r></w:hyperlink></w:p>"#;
+    let doc = link_doc(&[("r1", "https://e.com/x y/(z)")], body);
+    assert_eq!(
+        to_markdown(&doc),
+        "[a\\]b\\[c](https://e.com/x%20y/%28z%29)"
+    );
+    assert_eq!(
+        to_html(&doc),
+        "<p><a href=\"https://e.com/x y/(z)\">a]b[c</a></p>"
+    );
+}
+
+#[test]
+fn only_http_https_mailto_become_links() {
+    for (target, linked) in [
+        ("http://a.com", true),
+        ("HTTPS://a.com", true),
+        ("mailto:me@a.com", true),
+        ("javascript:alert(1)", false),
+        ("  JaVaScRiPt:alert(1)", false),
+        ("java\tscript:alert(1)", false),
+        ("file:///etc/passwd", false),
+        ("data:text/html,x", false),
+        ("ftp://a.com", false),
+        ("../relative.docx", false),
+    ] {
+        let doc = link_doc(
+            &[("r1", target)],
+            &format!("<w:p>{}</w:p>", link("r1", "t")),
+        );
+        let (md, html) = (to_markdown(&doc), to_html(&doc));
+        if linked {
+            assert!(md.starts_with("[t]("), "{target}: {md}");
+            assert!(html.contains("<a href="), "{target}: {html}");
+        } else {
+            assert_eq!(md, "t", "{target}");
+            assert_eq!(html, "<p>t</p>", "{target}");
+        }
+        assert_eq!(to_text(&doc), "t");
+    }
+}
+
+#[test]
+fn anchor_links_are_plain_text() {
+    let body =
+        r#"<w:p><w:hyperlink w:anchor="_Toc1"><w:r><w:t>jump</w:t></w:r></w:hyperlink></w:p>"#;
+    let doc = build(body, &[], &[]);
+    assert_eq!(to_markdown(&doc), "jump");
+    assert_eq!(to_html(&doc), "<p>jump</p>");
+}
+
+#[test]
+fn html_href_attribute_is_escaped() {
+    let doc = link_doc(
+        &[("r1", "https://a.com/\"onmouseover=\"x")],
+        &format!("<w:p>{}</w:p>", link("r1", "t")),
+    );
+    let html = to_html(&doc);
+    assert!(
+        html.contains("href=\"https://a.com/&quot;onmouseover=&quot;x\""),
+        "{html}"
+    );
+}
+
+fn pic(alt_attrs: &str) -> String {
+    format!(
+        r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture 1" {alt_attrs}/>
+        <a:graphic><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rImg"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+        </wp:inline></w:drawing></w:r>"#
+    )
+}
+
+fn pic_doc(alt_attrs: &str, before: &str) -> Document {
+    build(
+        &format!("<w:p>{before}{}</w:p>", pic(alt_attrs)),
+        &[("rImg", "image", "media/image1.png", false)],
+        &[("word/media/image1.png", "x".to_string())],
+    )
+}
+
+#[test]
+fn pictures_with_alt_in_all_exports() {
+    let doc = pic_doc(
+        r#"descr="A red cat" title="ignored""#,
+        "<w:r><w:t>fig: </w:t></w:r>",
+    );
+    assert_eq!(to_text(&doc), "fig: [图片: A red cat]");
+    assert_eq!(to_markdown(&doc), "fig: ![A red cat](image1.png)");
+    assert_eq!(
+        to_html(&doc),
+        "<p>fig: <img alt=\"A red cat\" src=\"image1.png\"></p>"
+    );
+}
+
+#[test]
+fn picture_alt_falls_back_to_title_then_empty() {
+    let doc = pic_doc(r#"title="Only title""#, "");
+    assert_eq!(to_markdown(&doc), "![Only title](image1.png)");
+    let doc = pic_doc("", "");
+    // 无 alt:纯文本不输出(段落为空被跳过),Markdown / HTML 仍带图。
+    assert_eq!(to_text(&doc), "");
+    assert_eq!(to_markdown(&doc), "![](image1.png)");
+    assert_eq!(to_html(&doc), "<p><img alt=\"\" src=\"image1.png\"></p>");
+}
+
+#[test]
+fn picture_alt_is_escaped_and_whitespace_collapsed() {
+    let doc = pic_doc(r#"descr="a ] &quot;b&quot;&#10;c &lt;d&gt;""#, "");
+    assert_eq!(to_markdown(&doc), "![a \\] \"b\" c <d>](image1.png)");
+    assert_eq!(
+        to_html(&doc),
+        "<p><img alt=\"a ] &quot;b&quot; c &lt;d&gt;\" src=\"image1.png\"></p>"
+    );
+    assert_eq!(to_text(&doc), "[图片: a ] \"b\" c <d>]");
+}
+
+#[test]
+fn picture_in_table_cell_and_link_nesting() {
+    let body = format!(
+        r#"<w:tbl><w:tr><w:tc><w:p>{}</w:p></w:tc></w:tr></w:tbl>"#,
+        pic(r#"descr="logo""#)
+    );
+    let doc = build(
+        &body,
+        &[("rImg", "image", "media/image1.png", false)],
+        &[("word/media/image1.png", "x".to_string())],
+    );
+    assert_eq!(to_text(&doc), "[图片: logo]");
+    assert!(
+        to_markdown(&doc).contains("| ![logo](image1.png) |"),
+        "{}",
+        to_markdown(&doc)
+    );
+    assert!(to_html(&doc).contains("<td><img alt=\"logo\" src=\"image1.png\"></td>"));
+}

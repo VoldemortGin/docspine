@@ -645,6 +645,9 @@ pub struct Picture {
     pub extent: Option<(Emu, Emu)>,
     /// 图片字节长度(便利字段;字节本身在 media map 里)。
     pub image_bytes_len: usize,
+    /// 替代文字:`wp:docPr@descr`,缺则 `@title`(VML:`v:shape@alt` / `v:imagedata@o:title`);
+    /// 空白折叠成单个空格,全空为 `None`。导出的 `![alt]` / `<img alt>` / `[图片: alt]` 用它。
+    pub alt: Option<String>,
     /// 放置方式(`wp:inline` 行内 / `wp:anchor` 锚定浮动;C-8)。
     pub placement: Placement,
 }

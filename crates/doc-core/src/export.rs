@@ -8,6 +8,16 @@
 //! - [`to_html`]:段落 `<p>`、标题 `<h1>..<h6>`、表格 `<table>`(带 `rowspan`/`colspan`),
 //!   文本经 HTML 转义。
 //!
+//! 列表 / 超链接 / 图片(三种导出各有呈现,见各 `Mode`):
+//! - 列表标签由 [`crate::numbering::ListCounters`] 现算(与 PDF 映射同一引擎):纯文本 / HTML 作文字前缀;
+//!   Markdown 里项目符号 `- `、合法有序标记(`1.` / `2)`)直接作列表项并按 `ilvl` 缩进(每层 4 空格,
+//!   连续项紧排),其余标签(`a)` / `1.2.3` / `(a)` / `第一章`)作转义后的文字前缀。计数在正文(含表格
+//!   单元格)里连续推进;页眉页脚部件、每条注、每个文本框各自独立计数。
+//! - 超链接:Markdown `[文本](url)` / HTML `<a href>`;只放行 `http` / `https` / `mailto`,文档内锚点与
+//!   其它 scheme 只出文字;纯文本只出文字。
+//! - 图片:Markdown `![alt](媒体名)` / HTML `<img alt src>`(alt = `docPr@descr`,缺则 `@title`);纯文本有
+//!   alt 时出 `[图片: alt]`,没有就不出。
+//!
 //! 浮动文本框([`crate::model::TextBox`])的内容紧随其锚定段落之后,按同样规则输出。
 //!
 //! 页眉页脚与脚注尾注(`to_text` / `to_markdown` / `to_html`):
@@ -26,8 +36,10 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use crate::model::{
-    Block, Cell, Document, HeaderFooterKind, NoteKind, Paragraph, RunSegment, Table, VMerge,
+    Block, Cell, Document, HeaderFooterKind, NoteKind, Paragraph, RunSegment, Table, TextRun,
+    VMerge,
 };
+use crate::numbering::{ListCounters, NumFmt};
 use crate::style::resolve_heading_level;
 
 // ============================================================ 纯文本
@@ -37,7 +49,7 @@ pub fn to_text(doc: &Document) -> String {
     let notes = Notes::new(doc, NoteStyle::Text);
     let mut out: Vec<String> = Vec::new();
     for (kind, blocks) in header_footer_parts(doc, false) {
-        let lines = non_empty_lines(blocks, &notes);
+        let lines = notes.scope(|| non_empty_lines(blocks, &notes));
         if !lines.is_empty() {
             out.push(format!("[Header: {}]", kind.as_str()));
             out.extend(lines);
@@ -45,13 +57,11 @@ pub fn to_text(doc: &Document) -> String {
     }
     text_blocks(&doc.body, &mut out, &notes);
     for (label, blocks) in notes.referenced() {
-        out.push(format!(
-            "{label} {}",
-            non_empty_lines(blocks, &notes).join(" ")
-        ));
+        let lines = notes.scope(|| non_empty_lines(blocks, &notes));
+        out.push(format!("{label} {}", lines.join(" ")));
     }
     for (kind, blocks) in header_footer_parts(doc, true) {
-        let lines = non_empty_lines(blocks, &notes);
+        let lines = notes.scope(|| non_empty_lines(blocks, &notes));
         if !lines.is_empty() {
             out.push(format!("[Footer: {}]", kind.as_str()));
             out.extend(lines);
@@ -69,12 +79,18 @@ fn non_empty_lines(blocks: &[Block], notes: &Notes) -> Vec<String> {
 }
 
 fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
+    let mode = notes.plain_mode();
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                out.push(p.text_with_notes(&|k, id| notes.mark(k, id)));
+                let item = notes.list_item(p);
+                let t = para_inline(p, notes, mode);
+                out.push(match item {
+                    Some(it) if !t.is_empty() => format!("{}{t}", plain_prefix(&it, mode)),
+                    _ => t,
+                });
                 for tb in p.text_boxes() {
-                    text_blocks(&tb.blocks, out, notes);
+                    notes.scope(|| text_blocks(&tb.blocks, out, notes));
                 }
             }
             Block::Table(t) => {
@@ -82,13 +98,36 @@ fn text_blocks(blocks: &[Block], out: &mut Vec<String>, notes: &Notes) {
                     let cells: Vec<String> = row
                         .cells
                         .iter()
-                        .map(|c| c.text_with_notes(&|k, id| notes.mark(k, id)))
+                        .map(|c| cell_lines(&c.blocks, notes, mode).join("\n"))
                         .collect();
                     out.push(cells.join("\t"));
                 }
             }
         }
     }
+}
+
+/// 单元格内直接段落的行(纯文本 / GFM 单元格用):每段一行(空段保留空行),列表标签作前缀,
+/// 段落锚定的文本框内容紧随其后;嵌套表忽略(与历史 `Cell::text` 一致)。
+fn cell_lines(blocks: &[Block], notes: &Notes, mode: Mode) -> Vec<String> {
+    let mut lines = Vec::new();
+    for b in blocks {
+        if let Block::Paragraph(p) = b {
+            let item = notes.list_item(p);
+            let t = para_inline(p, notes, mode);
+            lines.push(match item {
+                Some(it) if !t.is_empty() => format!("{}{t}", plain_prefix(&it, mode)),
+                _ => t,
+            });
+            for tb in p.text_boxes() {
+                let inner = notes.scope(|| cell_lines(&tb.blocks, notes, mode).join("\n"));
+                if !inner.is_empty() {
+                    lines.push(inner);
+                }
+            }
+        }
+    }
+    lines
 }
 
 // ============================================================ Markdown
@@ -103,10 +142,8 @@ pub fn to_markdown(doc: &Document) -> String {
     }
     markdown_blocks(&doc.body, &mut parts, &notes);
     for (label, blocks) in notes.referenced() {
-        parts.push(format!(
-            "{label}: {}",
-            non_empty_lines(blocks, &notes).join(" ")
-        ));
+        let lines = notes.scope(|| non_empty_lines(blocks, &notes));
+        parts.push(format!("{label}: {}", lines.join(" ")));
     }
     for (kind, blocks) in header_footer_parts(doc, true) {
         push_md_header_footer("Footer", kind, blocks, &notes, &mut parts);
@@ -123,7 +160,7 @@ fn push_md_header_footer(
     parts: &mut Vec<String>,
 ) {
     let mut inner = Vec::new();
-    markdown_blocks(blocks, &mut inner, notes);
+    notes.scope(|| markdown_blocks(blocks, &mut inner, notes));
     if !inner.is_empty() {
         parts.push(format!("**{role} ({})**", kind.as_str()));
         parts.extend(inner);
@@ -131,18 +168,51 @@ fn push_md_header_footer(
 }
 
 fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>, notes: &Notes) {
+    // 上一个输出块是否是真列表项,及其(有效)层级:连续真列表项紧排成一个块,
+    // 缩进按层级(每层 4 空格),且不超过「上一项层级 + 1」,免得被当成缩进代码块。
+    let mut prev_list_level: Option<u32> = None;
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                let t = p.text_with_notes(&|k, id| notes.mark(k, id));
+                let item = notes.list_item(p);
+                let t = para_inline(p, notes, Mode::Markdown);
                 if !t.is_empty() {
-                    match heading_level(notes.doc, p) {
-                        Some(level) => parts.push(format!("{} {t}", "#".repeat(level as usize))),
-                        None => parts.push(t),
+                    match (heading_level(notes.doc, p), item) {
+                        (Some(level), item) => {
+                            let prefix = match item {
+                                Some(it) if !it.bullet => plain_prefix(&it, Mode::Markdown),
+                                _ => String::new(),
+                            };
+                            parts.push(format!("{} {prefix}{t}", "#".repeat(level as usize)));
+                            prev_list_level = None;
+                        }
+                        (None, Some(it)) => match md_list_marker(&it) {
+                            Some(marker) => {
+                                let level = it.level.min(prev_list_level.map_or(0, |l| l + 1));
+                                let line = format!("{}{marker} {t}", "    ".repeat(level as usize));
+                                match (prev_list_level, parts.last_mut()) {
+                                    (Some(_), Some(last)) => {
+                                        last.push('\n');
+                                        last.push_str(&line);
+                                    }
+                                    _ => parts.push(line),
+                                }
+                                prev_list_level = Some(level);
+                            }
+                            None => {
+                                parts.push(format!("{}{t}", plain_prefix(&it, Mode::Markdown)));
+                                prev_list_level = None;
+                            }
+                        },
+                        (None, None) => {
+                            parts.push(t);
+                            prev_list_level = None;
+                        }
                     }
                 }
                 for tb in p.text_boxes() {
-                    markdown_blocks(&tb.blocks, parts, notes);
+                    notes.scope(|| markdown_blocks(&tb.blocks, parts, notes));
+                    prev_list_level = None;
                 }
             }
             Block::Table(t) => {
@@ -150,6 +220,7 @@ fn markdown_blocks(blocks: &[Block], parts: &mut Vec<String>, notes: &Notes) {
                 if !md.is_empty() {
                     parts.push(md);
                 }
+                prev_list_level = None;
             }
         }
     }
@@ -183,7 +254,8 @@ fn markdown_table(table: &Table, notes: &Notes) -> String {
 
 /// GFM 单元格文字:换行规整为 `<br>`(否则会撑破表格),竖线转义,避免破坏管道语法。
 fn md_cell_text(cell: &Cell, notes: &Notes) -> String {
-    cell.text_with_notes(&|k, id| notes.mark(k, id))
+    cell_lines(&cell.blocks, notes, Mode::Markdown)
+        .join("\n")
         .replace('\n', "<br>")
         .replace('|', "\\|")
 }
@@ -212,7 +284,7 @@ pub fn to_html(doc: &Document) -> String {
     for (label, blocks) in notes.referenced() {
         out.push_str(&format!("<div class=\"note\" id=\"fn-{label}\">\n"));
         out.push_str(&format!("<sup>[{label}]</sup>\n"));
-        html_blocks(blocks, &mut out, &notes);
+        notes.scope(|| html_blocks(blocks, &mut out, &notes));
         out.push_str(&format!("<a href=\"#fnref-{label}\">&#8617;</a>\n</div>\n"));
     }
     for (kind, blocks) in header_footer_parts(doc, true) {
@@ -231,7 +303,7 @@ fn push_html_header_footer(
     out: &mut String,
 ) {
     let mut inner = String::new();
-    html_blocks(blocks, &mut inner, notes);
+    notes.scope(|| html_blocks(blocks, &mut inner, notes));
     if !inner.is_empty() {
         out.push_str(&format!(
             "<{tag} data-type=\"{}\">\n{inner}</{tag}>\n",
@@ -240,35 +312,24 @@ fn push_html_header_footer(
     }
 }
 
-/// 段落 -> HTML 内联文本:文字转义,注引用放原样的 `<sup>` 标记(不能整体转义后再放)。
-/// 折叠规则同 [`TextRun::text`](Tab -> `\t`,断行 -> `<br>`)。
-fn html_para_text(p: &Paragraph, notes: &Notes) -> String {
-    let mut out = String::new();
-    for seg in p.runs.iter().flat_map(|r| &r.segments) {
-        match seg {
-            RunSegment::Text(s) => out.push_str(&escape_html(s)),
-            RunSegment::Tab => out.push('\t'),
-            RunSegment::Break(_) => out.push_str("<br>"),
-            RunSegment::NoteRef { kind, id } => out.extend(notes.mark(*kind, *id)),
-            RunSegment::CommentRef { .. } => {}
-        }
-    }
-    out
-}
-
 fn html_blocks(blocks: &[Block], out: &mut String, notes: &Notes) {
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                let t = html_para_text(p, notes);
+                let item = notes.list_item(p);
+                let t = para_inline(p, notes, Mode::Html);
                 if !t.is_empty() {
+                    let t = match item {
+                        Some(it) => format!("{}{t}", plain_prefix(&it, Mode::Html)),
+                        None => t,
+                    };
                     match heading_level(notes.doc, p) {
                         Some(level) => out.push_str(&format!("<h{level}>{t}</h{level}>\n")),
                         None => out.push_str(&format!("<p>{t}</p>\n")),
                     }
                 }
                 for tb in p.text_boxes() {
-                    html_blocks(&tb.blocks, out, notes);
+                    notes.scope(|| html_blocks(&tb.blocks, out, notes));
                 }
             }
             Block::Table(t) => {
@@ -368,12 +429,16 @@ fn html_cell_content(blocks: &[Block], notes: &Notes) -> String {
     for b in blocks {
         match b {
             Block::Paragraph(p) => {
-                let t = html_para_text(p, notes);
+                let item = notes.list_item(p);
+                let t = para_inline(p, notes, Mode::Html);
                 if !t.is_empty() {
-                    parts.push(t);
+                    parts.push(match item {
+                        Some(it) => format!("{}{t}", plain_prefix(&it, Mode::Html)),
+                        None => t,
+                    });
                 }
                 for tb in p.text_boxes() {
-                    let inner = html_cell_content(&tb.blocks, notes);
+                    let inner = notes.scope(|| html_cell_content(&tb.blocks, notes));
                     if !inner.is_empty() {
                         parts.push(inner);
                     }
@@ -400,6 +465,167 @@ fn escape_html(s: &str) -> String {
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
             '\n' => out.push_str("<br>"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+// ============================================================ 行内:列表标签 / 超链接 / 图片
+
+/// 行内文本的呈现方式。
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    /// 纯文本:只出文字,图片带 alt 时出 `[图片: alt]`。
+    Text,
+    /// Markdown:`[文本](url)`、`![alt](媒体名)`。
+    Markdown,
+    /// HTML:文字转义,`<a href>` / `<img>`。
+    Html,
+}
+
+/// 一个段落的列表项信息。
+struct ListItem {
+    /// 计数引擎产出的最终标签串(`1.` / `a)` / `1.2.3` / 圆点字面)。
+    label: String,
+    /// 该层是项目符号(`numFmt = bullet`)。
+    bullet: bool,
+    /// `ilvl`。
+    level: u32,
+}
+
+/// Markdown 真列表项的标记:项目符号 `-`;标签恰是合法有序列表标记(1–9 位数字 + `.` / `)`)
+/// 时直接用;其它标签没有对应的列表语法,返回 `None`(改作文字前缀,见 [`plain_prefix`])。
+fn md_list_marker(item: &ListItem) -> Option<String> {
+    if item.bullet {
+        return Some("-".to_string());
+    }
+    let digits = item.label.trim_end_matches(['.', ')']);
+    let punct = &item.label[digits.len()..];
+    let ok = (1..=9).contains(&digits.len())
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (punct == "." || punct == ")");
+    ok.then(|| item.label.clone())
+}
+
+/// 把标签当文字前缀(含尾随空格):纯文本 / HTML 原样(HTML 转义),Markdown 转义特殊字符,
+/// 避免被误解析成强调 / 标题 / 列表等。
+fn plain_prefix(item: &ListItem, mode: Mode) -> String {
+    match mode {
+        Mode::Text => format!("{} ", item.label),
+        Mode::Html => format!("{} ", escape_html(&item.label)),
+        Mode::Markdown => {
+            let mut out = String::new();
+            for (i, c) in item.label.chars().enumerate() {
+                let special = matches!(
+                    c,
+                    '\\' | '*' | '_' | '`' | '[' | ']' | '#' | '>' | '|' | '<'
+                );
+                let lead_marker = i == 0 && matches!(c, '-' | '+');
+                if special || lead_marker {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+            out.push(' ');
+            out
+        }
+    }
+}
+
+/// 段落的行内内容:run 文字 + 注标记 + 图片;连续同目标的超链接 run 合成一个链接。
+fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < p.runs.len() {
+        let target = p.runs[i].link_target.as_deref();
+        let end = i + p.runs[i..]
+            .iter()
+            .take_while(|r| r.link_target.as_deref() == target)
+            .count();
+        let url = target.and_then(safe_url);
+        let linked = url.is_some() && mode != Mode::Text;
+        let group: String = p.runs[i..end]
+            .iter()
+            .map(|r| run_inline(r, notes, mode, linked))
+            .collect();
+        match url {
+            Some(url) if linked && !group.is_empty() => match mode {
+                Mode::Markdown => out.push_str(&format!("[{group}]({})", md_url(&url))),
+                _ => out.push_str(&format!("<a href=\"{}\">{group}</a>", escape_html(&url))),
+            },
+            _ => out.push_str(&group),
+        }
+        i = end;
+    }
+    out
+}
+
+/// 一个 run 的行内内容(文字分段 + 图片)。`in_link`:Markdown 链接文本内,`[` `]` 要转义。
+fn run_inline(run: &TextRun, notes: &Notes, mode: Mode, in_link: bool) -> String {
+    let mut out = String::new();
+    for seg in &run.segments {
+        match seg {
+            RunSegment::Text(s) => match mode {
+                Mode::Html => out.push_str(&escape_html(s)),
+                Mode::Markdown if in_link => {
+                    out.push_str(&s.replace('[', "\\[").replace(']', "\\]"))
+                }
+                _ => out.push_str(s),
+            },
+            RunSegment::Tab => out.push('\t'),
+            RunSegment::Break(_) => out.push_str(if mode == Mode::Html { "<br>" } else { "\n" }),
+            RunSegment::NoteRef { kind, id } => out.extend(notes.mark(*kind, *id)),
+            RunSegment::CommentRef { .. } => {}
+        }
+    }
+    for pic in &run.pictures {
+        let alt = pic.alt.as_deref().unwrap_or("");
+        match (mode, pic.media_name.as_deref()) {
+            (Mode::Markdown, Some(src)) => out.push_str(&format!(
+                "![{}]({})",
+                alt.replace('[', "\\[").replace(']', "\\]"),
+                md_url(src)
+            )),
+            (Mode::Html, Some(src)) => out.push_str(&format!(
+                "<img alt=\"{}\" src=\"{}\">",
+                escape_html(alt),
+                escape_html(src)
+            )),
+            // 纯文本,或没有可引用的媒体名:有 alt 才出,没有就不出。
+            _ if !alt.is_empty() => out.push_str(&format!("[图片: {alt}]")),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 超链接目标白名单:只放行 `http` / `https` / `mailto`(scheme 大小写不敏感,先去掉控制字符与
+/// 空白——浏览器同样忽略它们,`java\tscript:` 之类不能绕过);相对路径 / 书签 / 其它 scheme 一律
+/// `None`(只出文字)。返回去掉控制字符后的 URL。
+fn safe_url(target: &str) -> Option<String> {
+    let url: String = target.chars().filter(|c| !c.is_control()).collect();
+    let url = url.trim().to_string();
+    let scheme: String = url
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .take_while(|&c| c != ':')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let has_colon = url.contains(':');
+    (has_colon && matches!(scheme.as_str(), "http" | "https" | "mailto")).then_some(url)
+}
+
+/// Markdown 链接 / 图片目的地:空白与括号百分号编码(其余原样)。
+fn md_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for c in url.chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '(' => out.push_str("%28"),
+            ')' => out.push_str("%29"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
             _ => out.push(c),
         }
     }
@@ -446,6 +672,9 @@ struct Notes<'a> {
     endnotes: Vec<i64>,
     /// HTML 已输出过 `id` 的引用标签(同一注多次引用时只首次带 `id`,避免重复 id)。
     emitted: RefCell<BTreeSet<String>>,
+    /// 当前作用域的列表计数。正文(含表格单元格)共用一份、按文档顺序连续推进;页眉页脚部件、
+    /// 每条脚注尾注、每个文本框各开独立作用域([`Notes::scope`]),与 PDF 映射的划分一致。
+    counters: RefCell<ListCounters>,
 }
 
 impl<'a> Notes<'a> {
@@ -456,6 +685,7 @@ impl<'a> Notes<'a> {
             footnotes: Vec::new(),
             endnotes: Vec::new(),
             emitted: RefCell::new(BTreeSet::new()),
+            counters: RefCell::new(ListCounters::new()),
         };
         notes.collect(&doc.body);
         notes
@@ -492,6 +722,42 @@ impl<'a> Notes<'a> {
         if defined.contains_key(&id) && !order.contains(&id) {
             order.push(id);
         }
+    }
+
+    /// 在一份全新的列表计数里跑 `f`,结束后还原外层计数(页眉页脚 / 注 / 文本框各自独立)。
+    fn scope<T>(&self, f: impl FnOnce() -> T) -> T {
+        let outer = self.counters.replace(ListCounters::new());
+        let out = f();
+        self.counters.replace(outer);
+        out
+    }
+
+    /// 本导出里内联文本的呈现方式(HTML 块自行传 [`Mode::Html`])。
+    fn plain_mode(&self) -> Mode {
+        match self.style {
+            NoteStyle::Markdown => Mode::Markdown,
+            _ => Mode::Text,
+        }
+    }
+
+    /// 推进并取该段落的列表标签(必须每个段落恰好调用一次,空段也要推进计数);非列表段 `None`。
+    fn list_item(&self, p: &Paragraph) -> Option<ListItem> {
+        let num_id = p.num_id?;
+        let level = p.list_level.unwrap_or(0);
+        let label = self
+            .counters
+            .borrow_mut()
+            .advance(&self.doc.numbering, num_id, level)?;
+        let bullet = self
+            .doc
+            .numbering
+            .level(num_id, level)
+            .is_some_and(|l| l.fmt == NumFmt::Bullet);
+        Some(ListItem {
+            label,
+            bullet,
+            level,
+        })
     }
 
     /// 标签正文(不含方括号):脚注 `1`,尾注 `e1`。

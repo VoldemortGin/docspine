@@ -910,6 +910,7 @@ mod tests {
             media_name: Some(media_name.into()),
             extent,
             image_bytes_len: 3,
+            alt: None,
             placement,
         });
         Paragraph {
