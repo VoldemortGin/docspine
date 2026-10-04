@@ -408,3 +408,79 @@ fn kind_codes_are_kebab_case_and_stable() {
         "alt-chunk-not-imported"
     );
 }
+
+/// 超过节数上限时并入末节的中间节:它们引用的页眉页脚部件仍进导出(去重后照常输出),不丢字。
+#[test]
+fn sections_beyond_cap_keep_every_header_and_footer_in_exports() {
+    let n = MAX_SECTIONS + 5;
+    let merged = MAX_SECTIONS + 1; // 落在被并入的区间里
+    let mut body = String::new();
+    for i in 0..n {
+        let refs = if i == 0 {
+            r#"<w:headerReference w:type="default" r:id="rH1"/>"#.to_string()
+        } else if i == merged {
+            r#"<w:headerReference w:type="default" r:id="rH2"/><w:footerReference w:type="default" r:id="rF2"/><w:pgNumType w:start="500"/>"#
+                .to_string()
+        } else {
+            String::new()
+        };
+        body.push_str(&format!(
+            "<w:p><w:pPr><w:sectPr>{refs}</w:sectPr></w:pPr></w:p>"
+        ));
+    }
+    body.push_str(&p("tail"));
+    body.push_str("<w:sectPr/>");
+    let hdr = |t: &str| format!(r#"<w:hdr xmlns:w="{W_NS}">{}</w:hdr>"#, p(t));
+    let ftr = |t: &str| format!(r#"<w:ftr xmlns:w="{W_NS}">{}</w:ftr>"#, p(t));
+    let doc = parse_parts(&[
+        ("word/document.xml", &doc_xml(&body)),
+        (
+            "word/_rels/document.xml.rels",
+            &rels(&[
+                ("rH1", "header", "header1.xml"),
+                ("rH2", "header", "header2.xml"),
+                ("rF2", "footer", "footer2.xml"),
+            ]),
+        ),
+        ("word/header1.xml", &hdr("HEADER-ONE")),
+        ("word/header2.xml", &hdr("ONLY-IN-MERGED")),
+        ("word/footer2.xml", &ftr("FOOT-MERGED")),
+    ]);
+    assert_eq!(doc.sections.len(), MAX_SECTIONS);
+    assert!(count_of(&doc, DiagnosticKind::SectionsTruncated, "word/document.xml").is_some());
+    for out in [
+        doc_core::export::to_text(&doc),
+        doc_core::export::to_markdown(&doc),
+        doc_core::export::to_html(&doc),
+    ] {
+        for want in ["HEADER-ONE", "ONLY-IN-MERGED", "FOOT-MERGED", "tail"] {
+            assert!(out.contains(want), "{want} 缺失");
+        }
+    }
+}
+
+/// 上限以内(1 万节以上,原上限会合并):每节一封信、页码各自从 1 重起,各节的页码起始值与页面几何
+/// 全部保留,没有合并诊断。
+#[test]
+fn ten_thousand_letters_keep_their_page_number_restarts() {
+    let n = 10_005usize;
+    let mut body = String::new();
+    for i in 0..n - 1 {
+        let orient = if i % 2 == 0 {
+            r#"<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>"#
+        } else {
+            ""
+        };
+        body.push_str(&format!(
+            r#"<w:p><w:pPr><w:sectPr>{orient}<w:pgNumType w:start="1"/></w:sectPr></w:pPr><w:r><w:t>L{i}</w:t></w:r></w:p>"#
+        ));
+    }
+    body.push_str(&p("last"));
+    body.push_str(r#"<w:sectPr><w:pgNumType w:start="1"/></w:sectPr>"#);
+    let doc = simple(&body);
+    assert_eq!(doc.sections.len(), n);
+    assert!(doc.sections.iter().all(|s| s.page_number_start == Some(1)));
+    assert_eq!(doc.sections[n - 3].page_width, 16838);
+    assert_eq!(doc.sections[n - 2].page_width, 12240);
+    assert!(count_of(&doc, DiagnosticKind::SectionsTruncated, "word/document.xml").is_none());
+}

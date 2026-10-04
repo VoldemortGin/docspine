@@ -13,10 +13,13 @@ mod zip_pkg;
 pub mod legacy;
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use doc_core::model::{Block, Diagnostic, DiagnosticKind, Document, Section, MAX_SECTIONS};
+use doc_core::model::{
+    Block, Diagnostic, DiagnosticKind, Document, HeaderFooterKind, HeaderFooterRef, Section,
+    MAX_SECTIONS,
+};
 use doc_core::numbering::MAX_LIST_NUMBER;
 use doc_core::{DocError, Result};
 
@@ -82,12 +85,10 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             xml::document::parse(&doc_xml, rels_xml.as_deref(), &media_index, stats)
         });
 
-    // 节数封顶:超出的中间节并入最后一节(它带文档级 sectPr),正文一字不丢。
-    let over = sections.len().saturating_sub(MAX_SECTIONS);
+    // 节数封顶:超出的中间节并入最后一节(它带文档级 sectPr),正文与页眉页脚一字不丢。
+    // 在加载页眉页脚之前做,被并入节引用的部件照样加载。
+    let over = merge_excess_sections(&mut sections, MAX_SECTIONS);
     if over > 0 {
-        let last = sections.pop();
-        sections.truncate(MAX_SECTIONS - 1);
-        sections.extend(last);
         add_diag(
             &mut diags,
             DiagnosticKind::SectionsTruncated,
@@ -224,6 +225,75 @@ fn pkg_rels(pkg: &Package, part: &str) -> Option<String> {
 
 /// 解析各节引用的页眉 / 页脚部件,返回 `归一后的 r:id -> 块序列`,并就地改写 / 过滤各节的引用
 /// (见 [`parse_bytes_with_limits`] 步骤 3b)。
+/// 节数超过 `cap`(>= 1)时把多余的中间节并入最后一节,返回被并入的节数。正文不动(节只是正文区间
+/// 的划分,末节的区间自然覆盖被并入的部分)。被并入节的**页面几何、页码起始值 / 格式、分栏、首页不同**
+/// 随之按末节处理(这就是 `sections-truncated` 诊断记录的合并),但**页眉页脚引用不丢**:
+/// - 末节自己没有的类型,补上被并入区间结束时的有效引用——正是原文档里末节继承到的那个,
+///   所以末节各页的页眉页脚与合并前一致;
+/// - 被并入节的其余引用(去重)追加在后面:同类型以先出现者为准,它们不改变 PDF 的选择,
+///   只保证这些部件被加载、进入文本导出。
+fn merge_excess_sections(sections: &mut Vec<Section>, cap: usize) -> usize {
+    let over = sections.len().saturating_sub(cap.max(1));
+    if over == 0 {
+        return 0;
+    }
+    let Some(mut last) = sections.pop() else {
+        return 0;
+    };
+    let merged = sections.split_off(cap.max(1) - 1);
+    for footer in [false, true] {
+        fn refs_of(s: &Section, footer: bool) -> &[HeaderFooterRef] {
+            if footer {
+                &s.footers
+            } else {
+                &s.headers
+            }
+        }
+        // 被并入区间结束时各类型的有效引用(本节有则覆盖,同节内先出现者为准)。
+        let mut eff: [Option<&HeaderFooterRef>; 3] = [None; 3];
+        for s in sections.iter().chain(&merged) {
+            for r in refs_of(s, footer).iter().rev() {
+                eff[kind_slot(r.kind)] = Some(r);
+            }
+        }
+        let mut extra: Vec<HeaderFooterRef> = Vec::new();
+        let own: Vec<usize> = refs_of(&last, footer)
+            .iter()
+            .map(|r| kind_slot(r.kind))
+            .collect();
+        for (slot, r) in eff.iter().enumerate() {
+            if let (false, Some(r)) = (own.contains(&slot), r) {
+                extra.push((*r).clone());
+            }
+        }
+        let mut seen: BTreeSet<(usize, String)> = refs_of(&last, footer)
+            .iter()
+            .chain(&extra)
+            .map(|r| (kind_slot(r.kind), r.rel_id.clone()))
+            .collect();
+        for r in merged.iter().flat_map(|s| refs_of(s, footer)) {
+            if seen.insert((kind_slot(r.kind), r.rel_id.clone())) {
+                extra.push(r.clone());
+            }
+        }
+        if footer {
+            last.footers.extend(extra);
+        } else {
+            last.headers.extend(extra);
+        }
+    }
+    sections.push(last);
+    over
+}
+
+fn kind_slot(kind: HeaderFooterKind) -> usize {
+    match kind {
+        HeaderFooterKind::Default => 0,
+        HeaderFooterKind::First => 1,
+        HeaderFooterKind::Even => 2,
+    }
+}
+
 fn load_header_footers(
     pkg: &Package,
     rels_xml: Option<&str>,
@@ -347,4 +417,64 @@ fn record_numbering_clamps(
         }
     }
     add_diag(diags, DiagnosticKind::NumberingValueClamped, part, count);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(kind: HeaderFooterKind, id: &str) -> HeaderFooterRef {
+        HeaderFooterRef {
+            kind,
+            rel_id: id.into(),
+        }
+    }
+
+    fn sect(headers: Vec<HeaderFooterRef>, start: Option<u32>) -> Section {
+        Section {
+            headers,
+            page_number_start: start,
+            ..Section::default()
+        }
+    }
+
+    /// 并入后:末节各页的有效页眉与合并前一致;被并入节引用的每个部件都还在某一节的引用里。
+    #[test]
+    fn merged_sections_keep_header_refs_and_last_section_resolution() {
+        use HeaderFooterKind::{Default as D, Even as E, First as F};
+        let original = vec![
+            sect(vec![r(D, "h0")], Some(1)),
+            sect(vec![r(D, "h1"), r(F, "f1")], None),
+            // 被并入区间里 default 类型先后出现 h2 / h3 / h4:末节继承的是最后的 h4,不是先出现的 h2。
+            sect(vec![r(D, "h2"), r(E, "e2")], Some(3)),
+            sect(vec![r(D, "h3")], None),
+            sect(vec![r(D, "h4"), r(D, "h3")], None),
+            sect(vec![r(F, "f5")], Some(9)),
+        ];
+        let mut merged = original.clone();
+        assert_eq!(merge_excess_sections(&mut merged, 3), 3);
+        assert_eq!(merged.len(), 3);
+        // 末节保留自己的设置(页码起始值等按末节)。
+        assert_eq!(merged[2].page_number_start, Some(9));
+        let doc_of = |sections: Vec<Section>| Document {
+            sections,
+            even_and_odd_headers: true,
+            ..Document::default()
+        };
+        let (before, after) = (doc_of(original), doc_of(merged.clone()));
+        let (ib, ia) = (before.header_footer_index(), after.header_footer_index());
+        for page in 0..4 {
+            for number in 1..5 {
+                assert_eq!(ib.for_page(5, page, number), ia.for_page(2, page, number));
+            }
+        }
+        let ids: BTreeSet<&str> = merged
+            .iter()
+            .flat_map(|s| &s.headers)
+            .map(|r| r.rel_id.as_str())
+            .collect();
+        for id in ["h0", "h1", "f1", "h2", "e2", "h3", "h4", "f5"] {
+            assert!(ids.contains(id), "{id} 丢了");
+        }
+    }
 }

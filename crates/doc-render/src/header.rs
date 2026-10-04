@@ -1037,6 +1037,15 @@ mod tests {
         assert_eq!(feet(&doc).0, ["0", "1"]);
     }
 
+    /// 1 万节以上(邮件合并:每封信一节、页码各自从 1 重起):逐页页码都是 1,与节数无关。
+    #[test]
+    fn ten_thousand_restarting_sections_number_every_page_from_one() {
+        let sects = vec![(1, Some(1), PageNumFormat::Decimal); 10_005];
+        let (foots, _) = feet(&numbered(&sects, page_only("PAGE")));
+        assert_eq!(foots.len(), 10_005);
+        assert!(foots.iter().all(|f| f == "1"));
+    }
+
     #[test]
     fn missing_start_continues_from_previous_section_and_start_restarts() {
         let d = PageNumFormat::Decimal;
