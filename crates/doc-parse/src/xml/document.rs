@@ -24,6 +24,7 @@
 //! 一路消费到其匹配的结束标签为止,期间填充模型。容错:未知元素跳过、缺失属性 → 缺省、绝不 panic。
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use doc_core::geom::{Emu, Twips};
@@ -62,10 +63,18 @@ struct Ctx<'a> {
     stats: &'a std::cell::Cell<PartStats>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 仅测试编译:`mc:Choice` 试解析为回滚而拷贝的字段栈字节数(快照 + 写时复制)。
+    static SNAPSHOT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// 复杂字段(`w:fldChar` begin / separate / end)的嵌套栈。
 #[derive(Default, Clone)]
 struct FieldStack {
-    frames: Vec<FieldFrame>,
+    /// 各层字段帧。`Rc` 共享:`mc:Choice` 试解析前的快照只拷贝帧指针(<= `MAX_NEST_DEPTH` 个),
+    /// 试解析期间改动某帧时才写时复制那一帧([`frame_mut`]),落选回滚就是换回旧指针。
+    frames: Vec<Rc<FieldFrame>>,
     /// 仍处在指令区(未遇 `separate`)的帧数:为 0 且栈非空时当前位置是可见的字段结果。
     hidden: usize,
 }
@@ -95,6 +104,15 @@ impl FieldFrame {
     }
 }
 
+/// 取帧的可变引用:帧仍被快照共享时写时复制(至多拷贝一帧,指令 <= [`MAX_FIELD_INSTR`] 字节)。
+fn frame_mut(frame: &mut Rc<FieldFrame>) -> &mut FieldFrame {
+    #[cfg(test)]
+    if Rc::strong_count(frame) > 1 {
+        SNAPSHOT_BYTES.with(|c| c.set(c.get() + frame.instr.len() + 64));
+    }
+    Rc::make_mut(frame)
+}
+
 /// `s` 的前缀,至多 `max` 字节且落在字符边界上。
 fn cap_str(s: &str, max: usize) -> &str {
     let mut end = max.min(s.len());
@@ -111,12 +129,12 @@ impl FieldStack {
         if self.hidden > 0 {
             return None;
         }
-        let f = self.frames.last_mut()?;
-        Some(
-            f.shared
-                .get_or_insert_with(|| Arc::from(f.instr.trim()))
-                .clone(),
-        )
+        let last = self.frames.last_mut()?;
+        if let Some(shared) = &last.shared {
+            return Some(Arc::clone(shared));
+        }
+        let f = frame_mut(last);
+        Some(Arc::clone(f.shared.insert(Arc::from(f.instr.trim()))))
     }
 
     /// 当前位置是否可见(不在任何字段的指令区里)。
@@ -877,18 +895,18 @@ fn field_char(e: &BytesStart, ctx: &Ctx, run: &mut TextRun) {
     let mut st = ctx.fields.borrow_mut();
     match attr_of(e, b"fldCharType").as_deref() {
         Some("begin") => {
-            st.frames.push(FieldFrame {
+            st.frames.push(Rc::new(FieldFrame {
                 instr: String::new(),
                 truncated: false,
                 in_result: false,
                 shared: None,
-            });
+            }));
             st.hidden += 1;
         }
         Some("separate") => {
             if let Some(top) = st.frames.last_mut() {
                 if !top.in_result {
-                    top.in_result = true;
+                    frame_mut(top).in_result = true;
                     st.hidden -= 1;
                 }
             }
@@ -928,7 +946,7 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> TextRun 
                         let text = read_text(reader);
                         let mut st = ctx.fields.borrow_mut();
                         if let Some(top) = st.frames.last_mut().filter(|f| !f.in_result) {
-                            if top.push_instr(&text) {
+                            if frame_mut(top).push_instr(&text) {
                                 ctx.note(|s| s.field_instr_truncated += 1);
                             }
                         }
@@ -1522,10 +1540,17 @@ where
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => match local_name(e.name().as_ref()) {
                 b"Choice" if chosen.is_none() => {
-                    // 病态的超深字段栈不做快照(防止对抗输入下的二次方拷贝)。
+                    // 快照只拷贝帧指针(Rc);病态的超深字段栈仍不做快照。每个 Choice 的最坏
+                    // 开销 = MAX_NEST_DEPTH 个指针 + 试解析期间被改动帧的写时复制(每帧
+                    // <= MAX_FIELD_INSTR 字节,至多 MAX_NEST_DEPTH 帧)。
                     let snapshot = Some(ctx.fields.borrow())
                         .filter(|st| st.frames.len() <= MAX_NEST_DEPTH as usize)
                         .map(|st| st.clone());
+                    #[cfg(test)]
+                    if let Some(sn) = &snapshot {
+                        let bytes = sn.frames.len() * std::mem::size_of::<Rc<FieldFrame>>();
+                        SNAPSHOT_BYTES.with(|c| c.set(c.get() + bytes));
+                    }
                     let v = parse(reader, ctx);
                     if !is_empty(&v) {
                         chosen = Some(v);
@@ -2302,4 +2327,66 @@ fn read_text<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
         buf.clear();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 解析一个段落体(`body` 放在 `w:body > w:p` 里),返回字段栈快照拷贝的总字节数。
+    fn snapshot_bytes_of(body: &str) -> usize {
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p>{body}</w:p></w:body></w:document>"#
+        );
+        SNAPSHOT_BYTES.with(|c| c.set(0));
+        let stats = std::cell::Cell::new(PartStats::default());
+        parse(&xml, None, &BTreeMap::new(), &stats);
+        SNAPSHOT_BYTES.with(|c| c.get())
+    }
+
+    /// 大量 `mc:Choice` × 深字段栈(每帧指令接近上限):快照只拷贝帧指针,总字节数
+    /// 与「Choice 数 × 栈深」成正比、与指令长度无关;修复前是深拷贝每帧指令。
+    #[test]
+    fn choice_snapshots_do_not_copy_instruction_text() {
+        let depth = 60usize; // < MAX_NEST_DEPTH
+        let choices = 200usize;
+        let instr = "x".repeat(MAX_FIELD_INSTR - 100);
+        let mut body = String::new();
+        for _ in 0..depth {
+            body.push_str(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instr}</w:instrText></w:r>"#
+            ));
+        }
+        body.push_str(
+            r#"<mc:AlternateContent><mc:Choice Requires="w14"></mc:Choice></mc:AlternateContent>"#
+                .repeat(choices)
+                .as_str(),
+        );
+        let bytes = snapshot_bytes_of(&body);
+        // 上界:每个 Choice 至多拷贝 MAX_NEST_DEPTH 个指针级句柄(各 <= 16 字节)。
+        let bound = choices * MAX_NEST_DEPTH as usize * 16;
+        assert!(bytes <= bound, "snapshot bytes {bytes} 应 <= {bound}");
+    }
+
+    /// 试解析会改动栈顶帧(追加指令)的落选 Choice:写时复制至多一帧(<= MAX_FIELD_INSTR),
+    /// 总字节数仍有明确上界,且回滚后指令不被污染。
+    #[test]
+    fn choice_that_mutates_top_frame_copies_at_most_one_frame() {
+        let choices = 100usize;
+        let instr = "x".repeat(MAX_FIELD_INSTR - 100);
+        let mut body = format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instr}</w:instrText></w:r>"#
+        );
+        body.push_str(
+            r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:r><w:instrText>yyyy</w:instrText></w:r></mc:Choice></mc:AlternateContent>"#
+                .repeat(choices)
+                .as_str(),
+        );
+        body.push_str(
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>r</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        );
+        let bytes = snapshot_bytes_of(&body);
+        let per_choice = MAX_NEST_DEPTH as usize * 16 + MAX_FIELD_INSTR + 64;
+        assert!(bytes <= choices * per_choice, "bytes {bytes}");
+    }
 }

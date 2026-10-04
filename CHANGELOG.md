@@ -278,6 +278,8 @@ change.
 
 - **Field instructions are no longer cloned per result run, and are length-capped** (memory DoS fix from review): every run in a field's result region used to get its own copy of the whole instruction text, so a 1.2 KB `.docx` (100 KB `w:instrText`, 2,000 result runs) used ~250 MB at parse. Runs now share one `Arc<str>` per field, and a single field instruction is truncated at `MAX_FIELD_INSTR = 4096` bytes (on a char boundary; counted by the new parse diagnostic `field-instr-truncated`). Rendering only needs the first word and `\*` switches, so nothing observable is lost.
 
+- **`mc:Choice` field-stack snapshots are now pointer-sized** (memory / CPU DoS fix from review): each non-empty `mc:Choice` deep-copied the whole complex-field stack (every frame's instruction text) so it could roll back a losing branch. Frames are now `Rc`-shared: a snapshot copies at most `MAX_NEST_DEPTH` pointers, and a frame is copied (copy-on-write, at most `MAX_FIELD_INSTR` bytes) only if the trial branch actually mutates it. Rollback semantics are unchanged.
+
 ### Security
 
 - Table size is now bounded: `gridSpan` and `w:tblGrid` are clamped to Word's 63-column
