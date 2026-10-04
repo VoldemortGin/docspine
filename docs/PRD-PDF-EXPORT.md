@@ -44,7 +44,13 @@ w:type="page"`); tab-to-default-stops; theme1.xml fontScheme (major/minor latin 
   negative top / bottom margin keeps the body fixed). If the push would leave less than
   min(72pt, original body height), that page keeps its margins and one `header-footer-overflow` warning
   fires. `PAGE` / `NUMPAGES` are computed (single body pass, then headers/footers per page; part heights
-  use the cached field text); other fields render their cached result. Parts holding only empty
+  use the cached field text); other fields render their cached result. `PAGE` prints the
+  **displayed** page number: a section's `w:pgNumType@w:start` restarts numbering (missing / negative /
+  non-numeric = continue the previous section, `0` valid) and `@w:fmt` formats it (`decimal`, `lower/upperRoman`,
+  `lower/upperLetter`; other values → decimal + one `page-number-format-unsupported` warning); a field
+  switch (`\* roman|ROMAN|alphabetic|ALPHABETIC|Arabic`) beats the section format; `NUMPAGES` stays the
+  physical total in decimal; odd/even header choice uses the displayed number (Word behaviour). `oddPage` /
+  `evenPage` section breaks still do not insert blank pages. Parts holding only empty
   paragraphs are treated as absent. The former `header-footer-not-rendered` warning was removed.
 - **Footnotes/endnotes** — per-page float layout with split/continuation is L-hard; parts never read
   (`w:footnoteReference` skipped, `document.rs:224`).
@@ -124,7 +130,7 @@ Verdicts against `crates/doc-parse` as of 2026-07-02. "Model growth" = which doc
 | i | Tab stops (`w:tabs`, settings.xml `defaultTabStop`) | **MISSING** (`w:tab` folded to `'\t'`, `document.rs:206-209`; settings.xml never read) | no `tabs` arm in `parse_ppr` | M (parse S, render M) | `ParaProps.tabs`; `Document.default_tab_stop` |
 | j | Hyperlink targets | **DONE** — `@r:id`→rels URI in `TextRun.link_target`; renders as a PDF `/Link` annotation via the engine's `RunStyle.link` (TS-11); internal `@w:anchor` stored as `"#name"`, not drawn + one-time warning | `document.rs` `hyperlink_target`; `map.rs` `push_runs` link threading | done | `TextRun.link_target` (landed) |
 | j | Footnotes/endnotes | **MISSING** | parts never read; refs skipped (`document.rs:224`) | L — **OUT v1** | — |
-| j | Headers/footers | **DONE** — parsed (refs + parts, `w:titlePg`, settings `w:evenAndOddHeaders`) and drawn per page with body avoidance; `PAGE` / `NUMPAGES` computed in headers/footers | `document.rs` `apply_sectpr_prop` / `field_char`; `doc-render/src/header.rs` | done | `Section.title_pg`, `Document.even_and_odd_headers`, `TextRun.field` |
+| j | Headers/footers | **DONE** — parsed (refs + parts, `w:titlePg`, settings `w:evenAndOddHeaders`) and drawn per page with body avoidance; `PAGE` / `NUMPAGES` computed in headers/footers | `document.rs` `apply_sectpr_prop` / `field_char`; `doc-render/src/header.rs` | done | `Section.title_pg` / `page_number_start` / `page_number_format`, `Document.even_and_odd_headers`, `TextRun.field` |
 | + | **Bonus bug: `w:sdt` content dropped wholesale** — cover pages / TOC text LOST | **MISSING** | `document.rs:82-83` + `skip_element` (`document.rs:620-638`) | S — fix in C-3 | none (transparent container) |
 | + | **Bonus bug: `w:fldSimple` cached result dropped** | **MISSING** | falls into `document.rs:127` skip | S — fix in C-3 | none (transparent container) |
 | + | **Silent drops (2026-10): `w:moveTo`, `w:smartTag`, `w:customXml` (block + inline), `mc:AlternateContent`, text boxes (`w:txbxContent`), `w:sym`/`w:softHyphen`/`w:noBreakHyphen`/`w:ptab`; VML `w:pict` with a nested shape truncated the rest of the body** | **FIXED** — wrappers transparent (same `MAX_NEST_DEPTH` guard), `w:moveFrom` dropped like `w:del`; AlternateContent = first `mc:Choice` that parses to non-empty content, else `mc:Fallback`; VML walker depth-counted; text boxes extracted only (`TextRun.text_boxes`, emitted after the anchoring paragraph), PDF not drawn + `TextBoxNotRendered` warning; soft hyphen stripped at render time | `document.rs` `parse_alternate_content` / `parse_text_box` / `push_run_char` | done | `TextBox { blocks }` on `TextRun` |

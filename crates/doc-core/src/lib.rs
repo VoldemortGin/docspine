@@ -9,6 +9,7 @@ pub mod export;
 pub mod geom;
 pub mod model;
 pub mod numbering;
+pub mod page_number;
 pub mod style;
 
 pub use error::{DocError, LimitKind, Result};
@@ -21,6 +22,7 @@ pub use model::{
     Paragraph, Picture, Row, RunSegment, Section, Table, TableWidth, TextRun, VMerge,
 };
 pub use numbering::{ListCounters, NumberingTable};
+pub use page_number::{format_page_number, PageNumFormat};
 pub use style::{
     resolve_para, resolve_para_in_table, resolve_run, resolve_run_in_table, resolve_table,
     EffectiveLineSpacing, EffectiveParaProps, EffectiveRunProps, EffectiveTableProps, StyleTable,

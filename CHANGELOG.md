@@ -65,6 +65,22 @@ change.
   are part of a visible field result; a field without a cached result leaves one
   empty run carrying only the mark. Text and exports are unchanged.
   `Section.title_pg` (`w:titlePg`) and `Document.even_and_odd_headers` are parsed.
+- **Page number start and format (`w:pgNumType`).** `Section.page_number_start`
+  (`w:start`; negative, non-numeric or out-of-range values count as missing, `0` is
+  valid) and `Section.page_number_format` (`PageNumFormat`: `decimal`,
+  `lowerRoman`, `upperRoman`, `lowerLetter`, `upperLetter`; any other `w:fmt` value
+  becomes `Other`, printed as decimal with one `page-number-format-unsupported`
+  warning per document) are parsed. A section with `w:start` begins its first page
+  at that number, otherwise numbering continues from the previous section; `PAGE`
+  in headers/footers prints the displayed number in the section's format, and a
+  field switch (`\* roman` / `ROMAN` / `alphabetic` / `ALPHABETIC` / `Arabic`)
+  overrides the section format (unknown switches are ignored). Roman numerals cover
+  1..=3999 and letters n >= 1 (27 is `aa`, 53 is `aaa`); anything outside degrades
+  to decimal. `NUMPAGES` stays the physical page count in decimal. Odd/even header
+  selection follows the **displayed** page number, as Word does, so `w:start`
+  shifts which pages are even. New pure `format_page_number` and
+  `Section::first_page_number`. `oddPage` / `evenPage` section breaks still insert
+  no blank page.
 
 - **Parse + cascade rPr `w:spacing`** (character spacing, twips, signed) **and
   `w:position`** (manual baseline shift, half-points); mapped to engine
@@ -138,6 +154,11 @@ change.
 
 ### Breaking (Rust API, pre-1.0)
 
+- `Document::header_footer_for_page`'s `page_number` is now the **displayed** page
+  number as `i64` (was the physical page index as `usize`); `Section` gains
+  `page_number_start` and `page_number_format`; `RenderWarning` gains
+  `PageNumFormatUnsupported`. Struct literals without `..Default::default()` and
+  exhaustive matches on `RenderWarning` must be updated.
 - `Document` gains `header_footers`, `footnotes`, `endnotes`, `comments`; `Section` gains
   `headers`, `footers`; `RunSegment` gains the `NoteRef { kind, id }` and `CommentRef { id }` variants;
   `RenderWarning` gains `HeaderFooterNotRendered` / `NotesNotRendered`. Struct

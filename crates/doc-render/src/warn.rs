@@ -59,6 +59,9 @@ pub enum RenderWarning {
     /// 脚注 / 尾注只抽取(进 `to_text` / `to_markdown`),PDF **不绘制**注文,正文里的引用
     /// 标记也不画(v1 声明降级;正文照常)。
     NotesNotRendered,
+    /// 页码格式(`w:pgNumType@w:fmt`)取了不支持的值(`ordinal` / 各语种计数法 …):
+    /// 该节页眉页脚里的 `PAGE` 按阿拉伯数字输出(字段自带 `\*` 开关时以开关为准)。
+    PageNumFormatUnsupported,
 }
 
 impl RenderWarning {
@@ -94,6 +97,7 @@ impl RenderWarning {
             RenderWarning::MathFlattened => "math-flattened",
             RenderWarning::HeaderFooterOverflow => "header-footer-overflow",
             RenderWarning::NotesNotRendered => "notes-not-rendered",
+            RenderWarning::PageNumFormatUnsupported => "page-number-format-unsupported",
         }
     }
 }
@@ -195,6 +199,13 @@ impl fmt::Display for RenderWarning {
                     f,
                     "footnotes and endnotes are extracted to text/markdown but not drawn \
                      in the PDF (nor their reference marks) in this version"
+                )
+            }
+            RenderWarning::PageNumFormatUnsupported => {
+                write!(
+                    f,
+                    "an unsupported page number format (w:pgNumType w:fmt) is shown as \
+                     decimal digits in this version"
                 )
             }
         }

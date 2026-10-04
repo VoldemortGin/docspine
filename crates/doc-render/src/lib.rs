@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use doc_core::model::Document;
-use doc_core::{DocError, Result};
+use doc_core::{DocError, PageNumFormat, Result};
 use pdf_typeset::{FontResolver, ImageSpec, Op, PageOps, Typesetter};
 
 pub use warn::RenderWarning;
@@ -127,11 +127,18 @@ fn layout_document(
     let mut pages = Vec::new();
     // 每页的 (节序号, 节内页序号),页眉页脚选部件用。
     let mut placement = Vec::new();
+    // 每页的显示页码(`w:pgNumType@w:start` 重置、缺省接续上一节),`PAGE` 字段与奇偶页判定用。
+    let mut numbers: Vec<i64> = Vec::new();
+    let mut next_number = 1_i64;
     for (si, plan) in mapped.sections.iter().enumerate() {
         hf.measure_section(ts, si, plan.geom);
         // 每节一个分页回调;引擎每起一页调用一次,含首页。
-        let first_number = pages.len() + 1;
-        let mut provider = section::SectionPages::new(|k| hf.body_geom(si, k, first_number + k));
+        let first_number = doc
+            .sections
+            .get(si)
+            .map_or(next_number, |s| s.first_page_number(next_number));
+        let mut provider =
+            section::SectionPages::new(|k| hf.body_geom(si, k, first_number + k as i64));
         let mut section_pages = ts.layout_flow(&plan.blocks, &mut provider);
         // 锚定浮动图(C-8):画在本节**首页**的绝对位置。behindDoc 衬于正文下方
         // (插到 ops 最前),否则叠加在上层(追加到末尾)。文字不环绕(声明降级)。
@@ -154,10 +161,19 @@ fn layout_document(
             }
         }
         placement.extend((0..section_pages.len()).map(|k| (si, k)));
+        numbers.extend((0..section_pages.len()).map(|k| first_number + k as i64));
+        next_number = first_number + section_pages.len() as i64;
         pages.extend(section_pages);
     }
-    hf.draw(ts, &mut pages, &placement);
+    hf.draw(ts, &mut pages, &placement, &numbers);
     let mut warnings = mapped.warnings;
+    if doc
+        .sections
+        .iter()
+        .any(|s| s.page_number_format == PageNumFormat::Other)
+    {
+        warnings.push(RenderWarning::PageNumFormatUnsupported);
+    }
     warnings.extend(hf.into_warnings());
     (pages, warnings)
 }

@@ -31,6 +31,7 @@ use doc_core::model::{
     HeaderFooterRef, HeightRule, NoteKind, Orientation, Paragraph, Picture, Placement, Row,
     RunSegment, Section, Table, TableWidth, TextBox, TextRun, VMerge,
 };
+use doc_core::page_number::PageNumFormat;
 use doc_core::style::{ColorRef, FontRef, Justification, RunProps};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -406,7 +407,7 @@ fn parse_block_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx)
 // ============================================================ 节 (w:sectPr)
 
 /// 解析 `w:sectPr`(节属性):`w:pgSz`(页面尺寸/纸向)、`w:pgMar`(页边距)、
-/// `w:cols@w:num`(分栏数)。已消费 `<w:sectPr>` 起始标签。未知子元素跳过;
+/// `w:cols@w:num`(分栏数)、`w:pgNumType`(页码起始值 / 格式)。已消费 `<w:sectPr>` 起始标签。未知子元素跳过;
 /// 缺失属性一律落到 Word 默认值([`Section::default`])。`end_block` 由调用方回填。
 fn parse_sectpr<R: std::io::BufRead>(reader: &mut Reader<R>) -> Section {
     let mut sect = Section::default();
@@ -467,6 +468,13 @@ fn apply_sectpr_prop(e: &BytesStart, sect: &mut Section) {
             }
         }
         b"titlePg" => sect.title_pg = on_off_val(e),
+        // 页码设置:`w:start` 负数 / 非数字 / 超 u32 一律按缺失(接续上一节),`0` 合法。
+        b"pgNumType" => {
+            sect.page_number_start = attr_of(e, b"start").and_then(|s| s.parse().ok());
+            sect.page_number_format = attr_of(e, b"fmt")
+                .map(|f| PageNumFormat::from_attr(&f))
+                .unwrap_or_default();
+        }
         // 页眉 / 页脚引用:先只记 `r:id` + 类型,部件由 lib.rs 经 rels 解析并归一。
         name @ (b"headerReference" | b"footerReference") => {
             if let Some(rel_id) = attr_of(e, b"id").filter(|id| !id.is_empty()) {

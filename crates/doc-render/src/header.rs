@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use doc_core::geom::twips_to_points;
 use doc_core::model::{Block as DocBlock, Document, RunSegment, Section};
+use doc_core::{format_page_number, PageNumFormat};
 use pdf_typeset::{ImageSpec, Op, PageGeom, PageOps, Rect, TextBoxSpec, Typesetter, VAnchor};
 
 use crate::map::PartMapper;
@@ -62,6 +63,7 @@ impl<'a> HeaderFooters<'a> {
         self.geoms.push(geom);
         let doc = self.doc;
         let mut keys = BTreeSet::new();
+        // 页码奇偶两种、首页 / 非首页两种,共四种组合(与 `w:start` 取值无关)。
         for (k, n) in [(0, 1), (0, 2), (1, 1), (1, 2)] {
             let (h, f) = doc.header_footer_for_page(si, k, n);
             keys.extend(h.into_iter().chain(f));
@@ -77,9 +79,9 @@ impl<'a> HeaderFooters<'a> {
         }
     }
 
-    /// 第 `si` 节节内第 `k` 页(全局页码 `page_number`)的正文几何:按该页页眉 / 页脚的
+    /// 第 `si` 节节内第 `k` 页(显示页码 `page_number`)的正文几何:按该页页眉 / 页脚的
     /// 内容高下推正文起点、上推正文底边。
-    pub(crate) fn body_geom(&mut self, si: usize, k: usize, page_number: usize) -> PageGeom {
+    pub(crate) fn body_geom(&mut self, si: usize, k: usize, page_number: i64) -> PageGeom {
         let doc = self.doc;
         let base = self
             .geoms
@@ -112,21 +114,23 @@ impl<'a> HeaderFooters<'a> {
     }
 
     /// 正文全部排完后逐页画页眉页脚(衬在该页其余内容之下)。`placement[i]` 是第 `i` 页的
-    /// `(节序号, 节内页序号)`;总页数即 `pages.len()`(`NUMPAGES`)。
+    /// `(节序号, 节内页序号)`,`numbers[i]` 是其显示页码(`PAGE`、奇偶页判定用);总页数即
+    /// `pages.len()`(`NUMPAGES`)。
     pub(crate) fn draw(
         &mut self,
         ts: &mut Typesetter,
         pages: &mut [PageOps],
         placement: &[(usize, usize)],
+        numbers: &[i64],
     ) {
         let doc = self.doc;
         let total = pages.len();
-        for (i, (page, &(si, k))) in pages.iter_mut().zip(placement).enumerate() {
-            let (h, f) = doc.header_footer_for_page(si, k, i + 1);
+        for ((page, &(si, k)), &number) in pages.iter_mut().zip(placement).zip(numbers) {
+            let (h, f) = doc.header_footer_for_page(si, k, number);
             let mut ops = Vec::new();
             for (key, footer) in [(h, false), (f, true)] {
                 if let Some(key) = key {
-                    ops.extend(self.part_ops(ts, si, key, footer, i + 1, total));
+                    ops.extend(self.part_ops(ts, si, key, footer, number, total));
                 }
             }
             page.ops.splice(0..0, ops);
@@ -147,7 +151,7 @@ impl<'a> HeaderFooters<'a> {
         si: usize,
         key: &str,
         footer: bool,
-        page_number: usize,
+        page_number: i64,
         total: usize,
     ) -> Vec<Op> {
         let doc = self.doc;
@@ -167,7 +171,7 @@ impl<'a> HeaderFooters<'a> {
         }
         let substituted;
         let blocks = if dynamic {
-            substituted = substitute_fields(blocks, page_number, total);
+            substituted = substitute_fields(blocks, page_number, total, sect.page_number_format);
             &substituted
         } else {
             blocks
@@ -235,12 +239,44 @@ fn has_content(blocks: &[DocBlock]) -> bool {
     })
 }
 
-/// 字段指令 → 现算值:`PAGE` → 页码,`NUMPAGES` → 总页数(阿拉伯数字;`\*` 格式开关忽略);
-/// 其余字段 `None`(用缓存结果)。
-fn field_value(instr: &str, page_number: usize, total: usize) -> Option<String> {
+/// 字段指令里的页码格式开关 `\* roman|ROMAN|alphabetic|ALPHABETIC|Arabic`(大小写按 Word:
+/// 罗马 / 字母的大小写决定输出大小写,`Arabic` 不分大小写);未知开关(`MERGEFORMAT` …)忽略,
+/// 取第一个认得的。
+fn switch_format(instr: &str) -> Option<PageNumFormat> {
+    let mut tokens = instr.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        let Some(rest) = tok.strip_prefix("\\*") else {
+            continue;
+        };
+        let arg = if rest.is_empty() {
+            tokens.next()?
+        } else {
+            rest
+        };
+        match arg {
+            "roman" => return Some(PageNumFormat::LowerRoman),
+            "ROMAN" => return Some(PageNumFormat::UpperRoman),
+            "alphabetic" => return Some(PageNumFormat::LowerLetter),
+            "ALPHABETIC" => return Some(PageNumFormat::UpperLetter),
+            a if a.eq_ignore_ascii_case("arabic") => return Some(PageNumFormat::Decimal),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 字段指令 → 现算值:`PAGE` → 显示页码(格式:字段 `\*` 开关优先,否则本节 `sect_fmt`),
+/// `NUMPAGES` → 物理总页数(恒为阿拉伯数字);其余字段 `None`(用缓存结果)。
+fn field_value(
+    instr: &str,
+    page_number: i64,
+    total: usize,
+    sect_fmt: PageNumFormat,
+) -> Option<String> {
     let name = instr.split_whitespace().next()?;
     if name.eq_ignore_ascii_case("PAGE") {
-        Some(page_number.to_string())
+        let fmt = switch_format(instr).unwrap_or(sect_fmt);
+        Some(format_page_number(page_number, fmt))
     } else if name.eq_ignore_ascii_case("NUMPAGES") {
         Some(total.to_string())
     } else {
@@ -254,7 +290,7 @@ fn uses_page_fields(blocks: &[DocBlock]) -> bool {
         DocBlock::Paragraph(p) => p.runs.iter().any(|r| {
             r.field
                 .as_deref()
-                .is_some_and(|f| field_value(f, 0, 0).is_some())
+                .is_some_and(|f| field_value(f, 0, 0, PageNumFormat::Decimal).is_some())
         }),
         DocBlock::Table(t) => t
             .rows
@@ -266,13 +302,18 @@ fn uses_page_fields(blocks: &[DocBlock]) -> bool {
 
 /// 克隆部件块并把 `PAGE` / `NUMPAGES` 字段结果换成现算值。同一字段结果跨相邻多个 run 时
 /// 只在第一个 run 放值,其余清空。
-fn substitute_fields(blocks: &[DocBlock], page_number: usize, total: usize) -> Vec<DocBlock> {
+fn substitute_fields(
+    blocks: &[DocBlock],
+    page_number: i64,
+    total: usize,
+    sect_fmt: PageNumFormat,
+) -> Vec<DocBlock> {
     let mut out = blocks.to_vec();
-    substitute_in(&mut out, page_number, total);
+    substitute_in(&mut out, page_number, total, sect_fmt);
     out
 }
 
-fn substitute_in(blocks: &mut [DocBlock], page_number: usize, total: usize) {
+fn substitute_in(blocks: &mut [DocBlock], page_number: i64, total: usize, sect_fmt: PageNumFormat) {
     for block in blocks {
         match block {
             DocBlock::Paragraph(p) => {
@@ -281,7 +322,7 @@ fn substitute_in(blocks: &mut [DocBlock], page_number: usize, total: usize) {
                     let value = run
                         .field
                         .as_deref()
-                        .and_then(|f| field_value(f, page_number, total));
+                        .and_then(|f| field_value(f, page_number, total, sect_fmt));
                     if let Some(v) = value {
                         if prev.is_some() && prev == run.field {
                             run.segments.clear();
@@ -294,7 +335,7 @@ fn substitute_in(blocks: &mut [DocBlock], page_number: usize, total: usize) {
             }
             DocBlock::Table(t) => {
                 for cell in t.rows.iter_mut().flat_map(|row| &mut row.cells) {
-                    substitute_in(&mut cell.blocks, page_number, total);
+                    substitute_in(&mut cell.blocks, page_number, total, sect_fmt);
                 }
             }
         }
@@ -328,6 +369,7 @@ mod tests {
         Block as DocBlock, BreakKind, Cell, Document, HeaderFooterKind, HeaderFooterRef, Paragraph,
         Picture, Placement, Row, RunSegment, Section, Table, TextRun,
     };
+    use doc_core::PageNumFormat;
     use pdf_typeset::{FontResolver, Op, PageOps, Typesetter};
 
     use crate::{layout_document, render_with, RenderOptions};
@@ -847,5 +889,163 @@ mod tests {
                 .pdf
         };
         assert_eq!(render(), render());
+    }
+
+    // -------------------------------------------------------- 页码起始值 / 格式
+
+    /// 多节文档:`sects` 每项 `(本节页数, w:start, w:fmt)`,每节一段 `pages_body`;只有首节
+    /// 引用页脚部件 `f`(后面的节继承),奇偶页眉开关 `even_odd` 时另挂 `he` 偶数页眉。
+    fn numbered(sects: &[(usize, Option<u32>, PageNumFormat)], footer: DocBlock) -> Document {
+        let mut doc = Document {
+            header_footers: [("f".to_string(), vec![footer])].into_iter().collect(),
+            ..Document::default()
+        };
+        for (i, &(pages, start, fmt)) in sects.iter().enumerate() {
+            doc.body.push(pages_body(pages));
+            doc.sections.push(Section {
+                footers: if i == 0 {
+                    vec![r(HeaderFooterKind::Default, "f")]
+                } else {
+                    vec![]
+                },
+                page_number_start: start,
+                page_number_format: fmt,
+                end_block: doc.body.len(),
+                ..Section::default()
+            });
+        }
+        doc
+    }
+
+    fn page_only(instr: &str) -> DocBlock {
+        DocBlock::Paragraph(Paragraph {
+            runs: vec![field_run(instr, "9")],
+            ..Paragraph::default()
+        })
+    }
+
+    fn feet(doc: &Document) -> (Vec<String>, Vec<String>) {
+        let (pages, warnings) = layout(doc, &BTreeMap::new());
+        (pages.iter().map(footer_text).collect(), warnings)
+    }
+
+    #[test]
+    fn section_start_resets_page_numbers() {
+        let doc = numbered(&[(3, Some(5), PageNumFormat::Decimal)], page_only("PAGE"));
+        assert_eq!(feet(&doc).0, ["5", "6", "7"]);
+        // `w:start="0"` 合法:首页印 0。
+        let doc = numbered(&[(2, Some(0), PageNumFormat::Decimal)], page_only("PAGE"));
+        assert_eq!(feet(&doc).0, ["0", "1"]);
+    }
+
+    #[test]
+    fn missing_start_continues_from_previous_section_and_start_restarts() {
+        let d = PageNumFormat::Decimal;
+        // 封面不计页:第一节 start=0,正文节 start=1 重新起算,第三节接续。
+        let doc = numbered(
+            &[(1, Some(0), d), (2, Some(1), d), (2, None, d)],
+            page_only("PAGE"),
+        );
+        assert_eq!(feet(&doc).0, ["0", "1", "2", "3", "4"]);
+        // 全部缺失 = 物理页序。
+        let doc = numbered(&[(2, None, d), (1, None, d)], page_only("PAGE"));
+        assert_eq!(feet(&doc).0, ["1", "2", "3"]);
+        // 中途重置后再接续。
+        let doc = numbered(
+            &[(2, None, d), (2, Some(10), d), (1, None, d)],
+            page_only("PAGE"),
+        );
+        assert_eq!(feet(&doc).0, ["1", "2", "10", "11", "12"]);
+    }
+
+    #[test]
+    fn section_format_applies_per_section() {
+        let doc = numbered(
+            &[
+                (3, None, PageNumFormat::LowerRoman),
+                (2, Some(1), PageNumFormat::Decimal),
+                (2, None, PageNumFormat::UpperLetter),
+            ],
+            page_only("PAGE"),
+        );
+        assert_eq!(feet(&doc).0, ["i", "ii", "iii", "1", "2", "C", "D"]);
+        // 超出罗马数字范围(<=0)降级为阿拉伯数字。
+        let doc = numbered(
+            &[(2, Some(0), PageNumFormat::UpperRoman)],
+            page_only("PAGE"),
+        );
+        assert_eq!(feet(&doc).0, ["0", "I"]);
+    }
+
+    #[test]
+    fn numpages_stays_physical_total_in_arabic() {
+        let doc = numbered(&[(3, Some(7), PageNumFormat::LowerRoman)], page_x_of_y());
+        assert_eq!(feet(&doc).0, ["Pageviiof3", "Pageviiiof3", "Pageixof3"]);
+    }
+
+    #[test]
+    fn field_format_switch_beats_section_format() {
+        let sect = |f| numbered(&[(2, None, f)], page_only(r"PAGE \* roman"));
+        assert_eq!(feet(&sect(PageNumFormat::Decimal)).0, ["i", "ii"]);
+        let cases = [
+            (r"PAGE \* ROMAN", PageNumFormat::Decimal, ["I", "II"]),
+            (r"PAGE \* alphabetic", PageNumFormat::Decimal, ["a", "b"]),
+            (r"PAGE \* ALPHABETIC", PageNumFormat::Decimal, ["A", "B"]),
+            (r"PAGE \* Arabic", PageNumFormat::UpperRoman, ["1", "2"]),
+            // 未知开关忽略:落回节格式。
+            (
+                r"PAGE \* MERGEFORMAT",
+                PageNumFormat::LowerLetter,
+                ["a", "b"],
+            ),
+            (r"PAGE \* Bogus", PageNumFormat::UpperRoman, ["I", "II"]),
+            // 未知开关不挡后面的已知开关。
+            (
+                r"PAGE \* MERGEFORMAT \* ROMAN",
+                PageNumFormat::Decimal,
+                ["I", "II"],
+            ),
+        ];
+        for (instr, fmt, want) in cases {
+            let doc = numbered(&[(2, None, fmt)], page_only(instr));
+            assert_eq!(feet(&doc).0, want, "{instr}");
+        }
+    }
+
+    /// 奇偶页眉按显示页码的奇偶(`w:start`=2 → 节首页算偶数页)。
+    #[test]
+    fn even_odd_headers_follow_displayed_page_number() {
+        let mut doc = numbered(&[(3, Some(2), PageNumFormat::Decimal)], para("F"));
+        doc.sections[0].headers = vec![
+            r(HeaderFooterKind::Default, "h"),
+            r(HeaderFooterKind::Even, "he"),
+        ];
+        doc.header_footers.insert("h".into(), vec![para("ODDH")]);
+        doc.header_footers.insert("he".into(), vec![para("EVENH")]);
+        doc.even_and_odd_headers = true;
+        let (pages, _) = layout(&doc, &BTreeMap::new());
+        let heads: Vec<String> = pages.iter().map(header_text).collect();
+        assert_eq!(heads, ["EVENH", "ODDH", "EVENH"]);
+    }
+
+    #[test]
+    fn unsupported_format_prints_arabic_and_warns_once() {
+        let doc = numbered(
+            &[
+                (2, None, PageNumFormat::Other),
+                (1, None, PageNumFormat::Other),
+            ],
+            page_only("PAGE"),
+        );
+        let (foots, warnings) = feet(&doc);
+        assert_eq!(foots, ["1", "2", "3"]);
+        let n = warnings
+            .iter()
+            .filter(|k| *k == "page-number-format-unsupported")
+            .count();
+        assert_eq!(n, 1, "{warnings:?}");
+        // 支持的格式不告警。
+        let ok = numbered(&[(1, None, PageNumFormat::LowerRoman)], page_only("PAGE"));
+        assert!(!feet(&ok).1.iter().any(|k| k.contains("page-number")));
     }
 }

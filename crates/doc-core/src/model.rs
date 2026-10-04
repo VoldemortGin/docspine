@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use crate::geom::{Emu, Twips};
 use crate::numbering::NumberingTable;
+use crate::page_number::PageNumFormat;
 use crate::style::{
     CellBorders, CellMargins, Justification, ParaProps, RunProps, StyleTable, TableBorders, Theme,
 };
@@ -61,9 +62,10 @@ impl Document {
     /// 某一页实际生效的 `(页眉, 页脚)` 部件键([`Document::header_footers`] 的键;`None` = 无)。
     ///
     /// `section` 是节序号(0 起),`page_in_section` 是该节内的页序号(0 起),`page_number`
-    /// 是全局页码(1 起,奇偶判定用)。纯函数,规则同 Word:
+    /// 是**显示页码**(受 `w:pgNumType@w:start` 影响,可为 0;只用于奇偶判定)。纯函数,规则同 Word:
     /// - 本节 `w:titlePg` 为真且是节内首页 → `first`;
-    /// - 否则 `w:evenAndOddHeaders` 为真且页码为偶数 → `even`;
+    /// - 否则 `w:evenAndOddHeaders` 为真且页码为偶数 → `even`(依据 Word 实际行为:奇偶页看
+    ///   页码本身,所以 `w:start` 把节首页设成偶数时首页就用 `even`,与物理页序无关);
     /// - 否则 → `default`。
     ///
     /// 选定类型在本节没有引用时逐节向前回溯同类型引用;一直没有就是无页眉 / 页脚。
@@ -72,14 +74,14 @@ impl Document {
         &self,
         section: usize,
         page_in_section: usize,
-        page_number: usize,
+        page_number: i64,
     ) -> (Option<&str>, Option<&str>) {
         let Some(sect) = self.sections.get(section) else {
             return (None, None);
         };
         let kind = if sect.title_pg && page_in_section == 0 {
             HeaderFooterKind::First
-        } else if self.even_and_odd_headers && page_number.is_multiple_of(2) {
+        } else if self.even_and_odd_headers && page_number.rem_euclid(2) == 0 {
             HeaderFooterKind::Even
         } else {
             HeaderFooterKind::Default
@@ -185,9 +187,22 @@ pub struct Section {
     pub footers: Vec<HeaderFooterRef>,
     /// 首页不同页眉页脚(`w:titlePg`,缺省 `false`):为真时本节首页用 `first` 类型。
     pub title_pg: bool,
+    /// 本节首页的页码起始值(`w:pgNumType@w:start`)。`None` = 缺失 / 非法(负数、非数字、
+    /// 超 `u32`)= 接续上一节页码;`Some(0)` 合法。
+    pub page_number_start: Option<u32>,
+    /// 本节页码格式(`w:pgNumType@w:fmt`,缺省 `decimal`;按本节自己的声明,不接续上一节)。
+    pub page_number_format: PageNumFormat,
     /// 本节覆盖的正文块区间的**排他性**结束下标(相对 [`Document::body`])。
     /// 本节的块为 `body[上一节.end_block .. 本节.end_block]`,首节从 0 起。
     pub end_block: usize,
+}
+
+impl Section {
+    /// 本节首页的页码:有 `w:start` 取它,否则接续(`continued` = 上一节末页页码 + 1,
+    /// 文档首节传 1)。
+    pub fn first_page_number(&self, continued: i64) -> i64 {
+        self.page_number_start.map_or(continued, i64::from)
+    }
 }
 
 impl Default for Section {
@@ -201,6 +216,8 @@ impl Default for Section {
             headers: Vec::new(),
             footers: Vec::new(),
             title_pg: false,
+            page_number_start: None,
+            page_number_format: PageNumFormat::Decimal,
             end_block: 0,
         }
     }
@@ -860,5 +877,25 @@ mod header_footer_rule_tests {
         assert_eq!(d.header_footer_for_page(0, 0, 1), (None, None));
         assert_eq!(d.header_footer_for_page(0, 1, 2), (Some("h"), None));
         assert_eq!(d.header_footer_for_page(5, 0, 1), (None, None));
+    }
+
+    #[test]
+    fn first_page_number_continues_or_restarts() {
+        let mut s = Section::default();
+        assert_eq!(s.first_page_number(1), 1);
+        assert_eq!(s.first_page_number(8), 8);
+        s.page_number_start = Some(5);
+        assert_eq!(s.first_page_number(8), 5);
+        // `w:start="0"` 合法:该节首页是 0,不当作缺失。
+        s.page_number_start = Some(0);
+        assert_eq!(s.first_page_number(8), 0);
+    }
+
+    /// 奇偶判定看**显示页码**:`w:start` 把节首页设成偶数时,首页就用 `even`。
+    #[test]
+    fn even_page_parity_follows_displayed_page_number() {
+        let d = doc_of(vec![full_section("a")], true);
+        assert_eq!(d.header_footer_for_page(0, 0, 0).0, Some("h-a-even"));
+        assert_eq!(d.header_footer_for_page(0, 0, 1).0, Some("h-a-default"));
     }
 }
