@@ -93,16 +93,31 @@ struct FieldFrame {
 }
 
 impl FieldFrame {
-    /// 追加一段 `w:instrText`,总长封顶 [`MAX_FIELD_INSTR`];返回本次是否**新**触发截断。
+    /// 追加一段 `w:instrText`(先折叠空白,见 [`push_folded`]),总长封顶 [`MAX_FIELD_INSTR`];
+    /// 返回本次是否**新**触发截断。
     fn push_instr(&mut self, text: &str) -> bool {
-        let room = MAX_FIELD_INSTR - self.instr.len();
-        if text.len() <= room {
-            self.instr.push_str(text);
-            return false;
-        }
-        self.instr.push_str(cap_str(text, room));
-        !std::mem::replace(&mut self.truncated, true)
+        push_folded(&mut self.instr, text) && !std::mem::replace(&mut self.truncated, true)
     }
+}
+
+/// 把一段指令文字折进 `dst`:去掉前导空白、连续空白折成一个空格,**之后**再按 [`MAX_FIELD_INSTR`]
+/// 封顶(空白不占配额,4 KB 空白在前也截不掉 `PAGE`);返回是否截断。逐字符,开销与输入成线性。
+fn push_folded(dst: &mut String, src: &str) -> bool {
+    for c in src.chars() {
+        let c = if c.is_whitespace() {
+            if dst.is_empty() || dst.ends_with(' ') {
+                continue;
+            }
+            ' '
+        } else {
+            c
+        };
+        if dst.len() + c.len_utf8() > MAX_FIELD_INSTR {
+            return true;
+        }
+        dst.push(c);
+    }
+    false
 }
 
 /// 取帧的可变引用:帧仍被快照共享时写时复制(至多拷贝一帧,指令 <= [`MAX_FIELD_INSTR`] 字节)。
@@ -112,15 +127,6 @@ fn frame_mut(frame: &mut Rc<FieldFrame>) -> &mut FieldFrame {
         SNAPSHOT_BYTES.with(|c| c.set(c.get() + frame.instr.len() + 64));
     }
     Rc::make_mut(frame)
-}
-
-/// `s` 的前缀,至多 `max` 字节且落在字符边界上。
-fn cap_str(s: &str, max: usize) -> &str {
-    let mut end = max.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 impl FieldStack {
@@ -252,11 +258,14 @@ pub fn parse_hdr_ftr(
 /// 解析脚注 / 尾注部件(`w:footnotes` / `w:endnotes`):`note_tag`(`footnote` / `endnote`)
 /// 子元素按 `w:id` 建表,内容走块级解析。`w:type` 为 `separator` / `continuationSeparator` /
 /// `continuationNotice` 的非内容注、缺 / 非法 `w:id` 的注跳过;重复 id 以先出现者为准。
+/// 条目数封顶 [`MAX_NOTES`],**被引用的注优先**:`referenced`(正文与页眉页脚里引用到的 id)
+/// 先预留至多 `MAX_NOTES` 个名额,未被引用的注只占剩下的名额;超出的条目丢弃并计 `notes-truncated`。
 pub fn parse_notes(
     xml: &str,
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
     note_tag: &[u8],
+    referenced: &std::collections::BTreeSet<i64>,
     stats: &std::cell::Cell<PartStats>,
 ) -> BTreeMap<i64, Vec<Block>> {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
@@ -274,6 +283,27 @@ pub fn parse_notes(
     if !enter_root(&mut reader) {
         return notes;
     }
+    // 名额:被引用的注至多 `reserved` 条,未被引用的至多 `MAX_NOTES - reserved` 条(合计 <= MAX_NOTES)。
+    let reserved = referenced.len().min(MAX_NOTES);
+    let (mut kept_ref, mut kept_unref) = (0usize, 0usize);
+    // 新 id 是否收录(重复 id 不收、不计;没名额的丢弃并计数)。
+    let mut admit = |id: i64, notes: &BTreeMap<i64, Vec<Block>>| -> bool {
+        if notes.contains_key(&id) {
+            return false;
+        }
+        let (kept, room) = if referenced.contains(&id) {
+            (&mut kept_ref, reserved)
+        } else {
+            (&mut kept_unref, MAX_NOTES - reserved)
+        };
+        if *kept < room {
+            *kept += 1;
+            true
+        } else {
+            ctx.note(|s| s.notes_dropped += 1);
+            false
+        }
+    };
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -284,26 +314,17 @@ pub fn parse_notes(
                     Some("separator" | "continuationSeparator" | "continuationNotice")
                 );
                 match id {
-                    // 条目数封顶:超出的新 id 整条丢弃(重复 id 本来就不收,不计)。
-                    Some(id) if is_content && notes.len() >= MAX_NOTES => {
-                        if !notes.contains_key(&id) {
-                            ctx.note(|s| s.notes_dropped += 1);
-                        }
-                        skip_element(&mut reader);
-                    }
-                    Some(id) if is_content => {
+                    Some(id) if is_content && admit(id, &notes) => {
                         let blocks = parse_block_container(&mut reader, &ctx);
-                        notes.entry(id).or_insert(blocks);
+                        notes.insert(id, blocks);
                     }
                     _ => skip_element(&mut reader),
                 }
             }
             Ok(Event::Empty(e)) if local_name(e.name().as_ref()) == note_tag => {
                 if let Some(id) = attr_of(&e, b"id").and_then(|s| s.trim().parse::<i64>().ok()) {
-                    if notes.len() < MAX_NOTES {
-                        notes.entry(id).or_insert_with(Vec::new);
-                    } else if !notes.contains_key(&id) {
-                        ctx.note(|s| s.notes_dropped += 1);
+                    if admit(id, &notes) {
+                        notes.insert(id, Vec::new());
                     }
                 }
             }
@@ -874,18 +895,18 @@ fn empty_field_run(e: &BytesStart, ctx: &Ctx) -> Option<TextRun> {
     })
 }
 
-/// `w:fldSimple@w:instr` 去首尾空白(超过 [`MAX_FIELD_INSTR`] 截断并记诊断);
+/// `w:fldSimple@w:instr` 折叠空白后去首尾空白(超过 [`MAX_FIELD_INSTR`] 截断并记诊断);
 /// 空指令或位于不可见的字段指令区时 `None`。
 fn fld_simple_instr(e: &BytesStart, ctx: &Ctx) -> Option<Arc<str>> {
     if !ctx.fields.borrow().is_visible() {
         return None;
     }
     let raw = attr_of(e, b"instr")?;
-    let capped = cap_str(&raw, MAX_FIELD_INSTR);
-    if capped.len() < raw.len() {
+    let mut folded = String::new();
+    if push_folded(&mut folded, &raw) {
         ctx.note(|s| s.field_instr_truncated += 1);
     }
-    let instr = capped.trim();
+    let instr = folded.trim();
     (!instr.is_empty()).then(|| Arc::from(instr))
 }
 

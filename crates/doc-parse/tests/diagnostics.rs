@@ -484,3 +484,59 @@ fn ten_thousand_letters_keep_their_page_number_restarts() {
     assert_eq!(doc.sections[n - 2].page_width, 12240);
     assert!(count_of(&doc, DiagnosticKind::SectionsTruncated, "word/document.xml").is_none());
 }
+
+/// 注条目超过上限时优先保留**被正文引用**的注:引用到的注排在部件最后也不丢(原先丢的是位置靠后的
+/// 条目,不论有没有被引用),多余的未引用注丢弃并计数;Start 形式 `<w:footnote>…</w:footnote>` 同样封顶。
+#[test]
+fn notes_cap_keeps_referenced_notes_first() {
+    let unreferenced: String = (1000..1000 + MAX_NOTES + 5)
+        .map(|i| format!(r#"<w:footnote w:id="{i}"><w:p/></w:footnote>"#))
+        .collect();
+    let referenced =
+        r#"<w:footnote w:id="7"><w:p><w:r><w:t>KEPT-NOTE</w:t></w:r></w:p></w:footnote>"#;
+    let body = r#"<w:p><w:r><w:t>see</w:t></w:r><w:r><w:footnoteReference w:id="7"/></w:r></w:p>"#;
+    let doc = parse_parts(&[
+        ("word/document.xml", &doc_xml(body)),
+        (
+            "word/footnotes.xml",
+            &format!(r#"<w:footnotes xmlns:w="{W_NS}">{unreferenced}{referenced}</w:footnotes>"#),
+        ),
+    ]);
+    assert_eq!(doc.footnotes.len(), MAX_NOTES);
+    assert!(doc.footnotes.contains_key(&7), "被引用的注必须保留");
+    assert_eq!(
+        count_of(&doc, DiagnosticKind::NotesTruncated, "word/footnotes.xml"),
+        Some(6)
+    );
+    let text = doc_core::export::to_text(&doc);
+    assert!(
+        text.starts_with("see[1]") && text.contains("[1] KEPT-NOTE"),
+        "{}",
+        &text[..40.min(text.len())]
+    );
+}
+
+/// 字段指令累积时先去前导空白、折叠连续空白再计入上限:约 4 KB 空白在前也不会把 `PAGE` 截掉。
+#[test]
+fn field_instruction_whitespace_does_not_count_against_the_cap() {
+    let pad = " ".repeat(5_000);
+    let body = format!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{pad}</w:instrText></w:r><w:r><w:instrText xml:space="preserve">PAGE{pad}\* roman </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:fldSimple w:instr="{pad}NUMPAGES{pad}"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>"#
+    );
+    let doc = simple(&body);
+    let fields: Vec<&str> = doc
+        .body
+        .iter()
+        .filter_map(|b| match b {
+            Block::Paragraph(p) => p.runs.iter().find_map(|r| r.field.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fields, ["PAGE \\* roman", "NUMPAGES"]);
+    assert!(count_of(
+        &doc,
+        DiagnosticKind::FieldInstrTruncated,
+        "word/document.xml"
+    )
+    .is_none());
+}

@@ -17,8 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use doc_core::model::{
-    Block, Diagnostic, DiagnosticKind, Document, HeaderFooterKind, HeaderFooterRef, Section,
-    MAX_SECTIONS,
+    Block, Diagnostic, DiagnosticKind, Document, HeaderFooterKind, HeaderFooterRef, NoteKind,
+    RunSegment, Section, MAX_SECTIONS,
 };
 use doc_core::numbering::MAX_LIST_NUMBER;
 use doc_core::{DocError, Result};
@@ -107,6 +107,12 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         &mut sections,
         &mut diags,
     );
+    // 正文与页眉页脚里引用到的注 id:注条目超限时优先保留它们。
+    let mut footnote_refs = BTreeSet::new();
+    let mut endnote_refs = BTreeSet::new();
+    for blocks in std::iter::once(&body).chain(header_footers.values()) {
+        collect_note_refs(blocks, &mut footnote_refs, &mut endnote_refs);
+    }
     let footnotes_path = pkg.related_part("footnotes", "word/footnotes.xml");
     let footnotes = pkg
         .part_str(&footnotes_path)
@@ -117,6 +123,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
                     pkg_rels(&pkg, &footnotes_path).as_deref(),
                     &media_index,
                     b"footnote",
+                    &footnote_refs,
                     stats,
                 )
             })
@@ -132,6 +139,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
                     pkg_rels(&pkg, &endnotes_path).as_deref(),
                     &media_index,
                     b"endnote",
+                    &endnote_refs,
                     stats,
                 )
             })
@@ -284,6 +292,34 @@ fn merge_excess_sections(sections: &mut Vec<Section>, cap: usize) -> usize {
     }
     sections.push(last);
     over
+}
+
+/// 收集块序列(含表格单元格与文本框)里的脚注 / 尾注引用 id。递归深度受解析期嵌套上限约束。
+fn collect_note_refs(blocks: &[Block], foot: &mut BTreeSet<i64>, end: &mut BTreeSet<i64>) {
+    for b in blocks {
+        match b {
+            Block::Paragraph(p) => {
+                for r in &p.runs {
+                    for seg in &r.segments {
+                        if let RunSegment::NoteRef { kind, id } = seg {
+                            match kind {
+                                NoteKind::Footnote => foot.insert(*id),
+                                NoteKind::Endnote => end.insert(*id),
+                            };
+                        }
+                    }
+                    for tb in &r.text_boxes {
+                        collect_note_refs(&tb.blocks, foot, end);
+                    }
+                }
+            }
+            Block::Table(t) => {
+                for cell in t.rows.iter().flat_map(|r| &r.cells) {
+                    collect_note_refs(&cell.blocks, foot, end);
+                }
+            }
+        }
+    }
 }
 
 fn kind_slot(kind: HeaderFooterKind) -> usize {

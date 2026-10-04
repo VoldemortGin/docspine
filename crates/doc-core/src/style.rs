@@ -1015,18 +1015,20 @@ pub fn resolve_run_in_table(
 
 /// 组装完整样式链:表格样式链(如在表格内)+ 段落样式链,各自 basedOn 递归、根先派生后。
 /// 段落无 `pStyle` 时应用缺省段落样式(Word 语义:每个段落都有样式)。
+/// 另返回其中是否有链被 [`MAX_STYLE_CHAIN`] 截断。
 fn full_chain<'a>(
     table: &'a StyleTable,
     table_style: Option<&str>,
     para: &'a Paragraph,
-) -> Vec<&'a Style> {
-    let mut chain = style_chain(table, table_style);
+) -> (Vec<&'a Style>, bool) {
+    let (mut chain, t1) = style_chain_checked(table, table_style);
     let para_style = para
         .style
         .as_deref()
         .or(table.default_para_style.as_deref());
-    chain.extend(style_chain(table, para_style));
-    chain
+    let (para_chain, t2) = style_chain_checked(table, para_style);
+    chain.extend(para_chain);
+    (chain, t1 || t2)
 }
 
 /// 样式名 / styleId -> 标题级别(1..=9):`heading N` / `标题N`(大小写、空白不敏感,
@@ -1219,16 +1221,27 @@ impl StyleCache {
 /// 有限步终止(环告警见 [`StyleTable::validate`]);未知 id 处链截断;
 /// 至多 [`MAX_STYLE_CHAIN`] 层(超出的最基样式被截断,见 [`StyleTable::over_long_chain_count`])。
 fn style_chain<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<&'a Style> {
-    let mut chain: Vec<&Style> = style_chain_ids(table, id)
-        .into_iter()
-        .map(|(_, s)| s)
-        .collect();
+    style_chain_checked(table, id).0
+}
+
+/// [`style_chain`],另返回链是否因超过 [`MAX_STYLE_CHAIN`] 被截断。
+fn style_chain_checked<'a>(table: &'a StyleTable, id: Option<&str>) -> (Vec<&'a Style>, bool) {
+    let (ids, truncated) = style_chain_ids_checked(table, id);
+    let mut chain: Vec<&Style> = ids.into_iter().map(|(_, s)| s).collect();
     chain.reverse();
-    chain
+    (chain, truncated)
 }
 
 /// [`style_chain`] 的带 styleId 版本,**就近优先**(自身在前,其 basedOn 祖先在后)。
 fn style_chain_ids<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<(&'a str, &'a Style)> {
+    style_chain_ids_checked(table, id).0
+}
+
+/// [`style_chain_ids`],另返回链是否因超过 [`MAX_STYLE_CHAIN`] 被截断(成环 / 悬空引用不算)。
+fn style_chain_ids_checked<'a>(
+    table: &'a StyleTable,
+    id: Option<&str>,
+) -> (Vec<(&'a str, &'a Style)>, bool) {
     let mut chain = Vec::new();
     let mut visited: BTreeSet<&str> = BTreeSet::new();
     let mut cur = id;
@@ -1236,7 +1249,9 @@ fn style_chain_ids<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<(&'a str,
         #[cfg(test)]
         count_chain_step();
         if chain.len() >= MAX_STYLE_CHAIN {
-            break; // 链过长:截断。
+            // 链过长:截断(剩下的若只是成环 / 悬空,本就会停,不算截断)。
+            let more = !visited.contains(sid) && table.styles.contains_key(sid);
+            return (chain, more);
         }
         if !visited.insert(sid) {
             break; // basedOn 成环:截断。
@@ -1247,21 +1262,27 @@ fn style_chain_ids<'a>(table: &'a StyleTable, id: Option<&str>) -> Vec<(&'a str,
         chain.push((key.as_str(), style));
         cur = style.based_on.as_deref();
     }
-    chain
+    (chain, false)
 }
 
 /// toggle 属性的有效值(ECMA-376 §17.7.3):直接格式化是绝对开关;否则以 docDefaults
 /// 为基值,与样式链上 `Some(true)` 出现次数的奇偶异或(显式 `false` 不参与计数)。
+/// 样式链被 [`MAX_STYLE_CHAIN`] 截断(`truncated`)时奇偶已不可知,硬算会把结果翻转:改取离 run
+/// 最近的显式值(链为根先,从尾往前找),没有则用 docDefaults(截断另有 `style-chain-truncated` 诊断)。
 fn resolve_toggle(
     direct: Option<bool>,
     doc_default: Option<bool>,
     chain: &[&Style],
+    truncated: bool,
     get: impl Fn(&RunProps) -> Option<bool>,
 ) -> bool {
     if let Some(v) = direct {
         return v;
     }
     let base = doc_default == Some(true);
+    if truncated {
+        return chain.iter().rev().find_map(|s| get(&s.rpr)).unwrap_or(base);
+    }
     let odd = chain.iter().filter(|s| get(&s.rpr) == Some(true)).count() % 2 == 1;
     base ^ odd
 }
@@ -1309,10 +1330,12 @@ fn resolve_run_props(
     run: &TextRun,
 ) -> EffectiveRunProps {
     let st = &doc.styles;
-    let mut chain = full_chain(st, table_style, para);
+    let (mut chain, mut truncated) = full_chain(st, table_style, para);
     // 字符样式(`w:rStyle`)链:插在段落样式链之后、直接格式化之前(ECMA-376 §17.7.2),
     // 同样根先派生后,并进入 toggle 的 XOR 计数。
-    chain.extend(style_chain(st, run.rpr.r_style.as_deref()));
+    let (char_chain, char_truncated) = style_chain_checked(st, run.rpr.r_style.as_deref());
+    chain.extend(char_chain);
+    truncated |= char_truncated;
 
     // 值属性:docDefaults → 样式链(根先)→ 直接格式化,后者的 Some 覆盖前者。
     let mut merged = st.doc_default_rpr.clone();
@@ -1323,12 +1346,15 @@ fn resolve_run_props(
 
     // toggle 属性:XOR 语义(直接格式化绝对开关)。
     let dd = &st.doc_default_rpr;
-    let bold = resolve_toggle(run.rpr.b, dd.b, &chain, |r| r.b);
-    let italic = resolve_toggle(run.rpr.i, dd.i, &chain, |r| r.i);
-    let caps = resolve_toggle(run.rpr.caps, dd.caps, &chain, |r| r.caps);
-    let small_caps = resolve_toggle(run.rpr.small_caps, dd.small_caps, &chain, |r| r.small_caps);
-    let strike = resolve_toggle(run.rpr.strike, dd.strike, &chain, |r| r.strike);
-    let vanish = resolve_toggle(run.rpr.vanish, dd.vanish, &chain, |r| r.vanish);
+    let toggle = |direct: Option<bool>, dflt: Option<bool>, get: fn(&RunProps) -> Option<bool>| {
+        resolve_toggle(direct, dflt, &chain, truncated, get)
+    };
+    let bold = toggle(run.rpr.b, dd.b, |r| r.b);
+    let italic = toggle(run.rpr.i, dd.i, |r| r.i);
+    let caps = toggle(run.rpr.caps, dd.caps, |r| r.caps);
+    let small_caps = toggle(run.rpr.small_caps, dd.small_caps, |r| r.small_caps);
+    let strike = toggle(run.rpr.strike, dd.strike, |r| r.strike);
+    let vanish = toggle(run.rpr.vanish, dd.vanish, |r| r.vanish);
 
     // theme 解引 + Word 内置兜底。
     let font_ascii = merged
@@ -1393,7 +1419,7 @@ fn resolve_para_props(
     para: &Paragraph,
 ) -> EffectiveParaProps {
     let st = &doc.styles;
-    let chain = full_chain(st, table_style, para);
+    let (chain, _) = full_chain(st, table_style, para);
 
     // 值属性:docDefaults → 样式链(根先)→ numbering 层级 pPr → 直接格式化
     // (`Paragraph.ppr` 共享片段)。numbering.xml 的层级缩进插在样式层之下、
@@ -1756,6 +1782,36 @@ mod tests {
         ]);
         let eff = resolve_run(&doc, &styled_para(Some("Derived")), &TextRun::default());
         assert!(eff.bold, "显式 false 不计入 XOR");
+    }
+
+    /// basedOn 链超过 [`MAX_STYLE_CHAIN`] 被截断时,沿链异或的奇偶会因截断而翻转(结果是错的,不只是
+    /// 不完整):截断时 toggle 不再异或,改取离 run 最近的显式值。
+    #[test]
+    fn toggle_on_truncated_chain_takes_nearest_explicit_value() {
+        let ids: Vec<String> = (0..=MAX_STYLE_CHAIN).map(|i| format!("s{i}")).collect();
+        // MAX_STYLE_CHAIN + 1 层,每层 b=true;最外层(离 run 最近)i=false,其余 i=true。
+        let styles: Vec<(&str, Style)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let rpr = RunProps {
+                    b: Some(true),
+                    i: Some(i != MAX_STYLE_CHAIN),
+                    ..RunProps::default()
+                };
+                let based = i.checked_sub(1).map(|j| ids[j].as_str());
+                (id.as_str(), para_style(based, rpr, ParaProps::default()))
+            })
+            .collect();
+        let doc = doc_with_styles(styles);
+        let leaf = styled_para(Some(ids[MAX_STYLE_CHAIN].as_str()));
+        let eff = resolve_run(&doc, &leaf, &TextRun::default());
+        // 完整链上 b=true 共 65 次(奇数)→ 开;截到 64 层是偶数,异或会误判成关。
+        assert!(eff.bold, "截断后取最近显式值 b=true");
+        assert!(!eff.italic, "最近显式值 i=false");
+        // 链长在上限以内时照旧异或(64 层 b=true → 偶数 → 关)。
+        let inner = styled_para(Some(ids[MAX_STYLE_CHAIN - 1].as_str()));
+        assert!(!resolve_run(&doc, &inner, &TextRun::default()).bold);
     }
 
     /// toggle:直接格式化是绝对开关(b=0 恒关、b=1 恒开,无视链上奇偶)。

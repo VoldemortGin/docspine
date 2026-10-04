@@ -98,7 +98,8 @@ fn fld_simple_marks_its_result_runs() {
         runs(first_para(&d)),
         [
             ("Page ".into(), None),
-            ("7".into(), some(r"PAGE  \* MERGEFORMAT")),
+            // 指令先折叠连续空白再计入长度上限(第二轮复审),`PAGE  \*` 成 `PAGE \*`。
+            ("7".into(), some(r"PAGE \* MERGEFORMAT")),
             (" end".into(), None),
         ]
     );
@@ -165,7 +166,8 @@ fn nested_field_in_instruction_is_not_marked_and_fields_span_paragraphs() {
         </w:p>
         <w:p><w:r><w:t>still</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>after</w:t></w:r></w:p>"#;
     let d = build(body, &[]);
-    let outer = r#"IF  = 1 "a" "b""#;
+    // 指令先折叠连续空白(第二轮复审):两段 instrText 拼接处的双空格成单个空格。
+    let outer = r#"IF = 1 "a" "b""#;
     assert_eq!(
         runs(first_para(&d)),
         [("1".into(), None), ("a".into(), some(outer))]
