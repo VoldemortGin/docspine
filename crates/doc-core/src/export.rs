@@ -576,32 +576,18 @@ fn md_list_marker(item: &ListItem) -> Option<String> {
     ok.then(|| item.label.clone())
 }
 
-/// 把标签当文字前缀(含尾随空格):纯文本 / HTML 原样(HTML 转义),Markdown 转义特殊字符,
+/// 把标签当文字前缀(含尾随空格):纯文本 / HTML 原样(HTML 转义),Markdown 走 [`escape_md`],
 /// 避免被误解析成强调 / 标题 / 列表等。
 fn plain_prefix(item: &ListItem, mode: Mode) -> String {
     match mode {
         Mode::Text => format!("{} ", item.label),
         Mode::Html => format!("{} ", escape_html(&item.label)),
-        Mode::Markdown => {
-            let mut out = String::new();
-            for (i, c) in item.label.chars().enumerate() {
-                let special = matches!(
-                    c,
-                    '\\' | '*' | '_' | '`' | '[' | ']' | '#' | '>' | '|' | '<'
-                );
-                let lead_marker = i == 0 && matches!(c, '-' | '+');
-                if special || lead_marker {
-                    out.push('\\');
-                }
-                out.push(c);
-            }
-            out.push(' ');
-            out
-        }
+        Mode::Markdown => format!("{} ", escape_md(&item.label, true)),
     }
 }
 
 /// 段落的行内内容:run 文字 + 注标记 + 图片;连续同目标的超链接 run 合成一个链接。
+/// Markdown 下所有来自文档的文字都经 [`escape_md`] 转义,行首状态跨 run 跟踪。
 fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
     let mut out = String::new();
     let mut i = 0;
@@ -613,10 +599,16 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
             .count();
         let url = target.and_then(safe_url);
         let linked = url.is_some() && mode != Mode::Text;
-        let group: String = p.runs[i..end]
-            .iter()
-            .map(|r| run_inline(r, notes, mode, linked))
-            .collect();
+        // 链接文字紧跟在 `[` 之后,不在行首;否则看本行迄今是否只有空白。
+        let mut group = String::new();
+        for r in &p.runs[i..end] {
+            let line_start = if group.is_empty() {
+                !linked && line_blank_so_far(&out)
+            } else {
+                !linked && line_blank_so_far(&group)
+            };
+            group.push_str(&run_inline(r, notes, mode, line_start));
+        }
         match url {
             Some(url) if linked && !group.is_empty() => match mode {
                 Mode::Markdown => out.push_str(&format!("[{group}]({})", md_url(&url))),
@@ -629,17 +621,23 @@ fn para_inline(p: &Paragraph, notes: &Notes, mode: Mode) -> String {
     out
 }
 
-/// 一个 run 的行内内容(文字分段 + 图片)。`in_link`:Markdown 链接文本内,`[` `]` 要转义。
-fn run_inline(run: &TextRun, notes: &Notes, mode: Mode, in_link: bool) -> String {
+/// 一个 run 的行内内容(文字分段 + 图片)。`line_start`:本 run 的开头是否在行首
+/// (Markdown 的块级标记转义用)。
+fn run_inline(run: &TextRun, notes: &Notes, mode: Mode, line_start: bool) -> String {
     let mut out = String::new();
     for seg in &run.segments {
         match seg {
             RunSegment::Text(s) => match mode {
                 Mode::Html => out.push_str(&escape_html(s)),
-                Mode::Markdown if in_link => {
-                    out.push_str(&s.replace('[', "\\[").replace(']', "\\]"))
+                Mode::Markdown => {
+                    let at_start = if out.is_empty() {
+                        line_start
+                    } else {
+                        line_blank_so_far(&out)
+                    };
+                    out.push_str(&escape_md(s, at_start));
                 }
-                _ => out.push_str(s),
+                Mode::Text => out.push_str(s),
             },
             RunSegment::Tab => out.push('\t'),
             RunSegment::Break(_) => out.push_str(if mode == Mode::Html { "<br>" } else { "\n" }),
@@ -650,11 +648,9 @@ fn run_inline(run: &TextRun, notes: &Notes, mode: Mode, in_link: bool) -> String
     for pic in &run.pictures {
         let alt = pic.alt.as_deref().unwrap_or("");
         match (mode, pic.media_name.as_deref()) {
-            (Mode::Markdown, Some(src)) => out.push_str(&format!(
-                "![{}]({})",
-                alt.replace('[', "\\[").replace(']', "\\]"),
-                md_url(src)
-            )),
+            (Mode::Markdown, Some(src)) => {
+                out.push_str(&format!("![{}]({})", escape_md(alt, false), md_url(src)))
+            }
             (Mode::Html, Some(src)) => out.push_str(&format!(
                 "<img alt=\"{}\" src=\"{}\">",
                 escape_html(alt),
@@ -664,6 +660,93 @@ fn run_inline(run: &TextRun, notes: &Notes, mode: Mode, in_link: bool) -> String
             _ if !alt.is_empty() => out.push_str(&format!("[图片: {alt}]")),
             _ => {}
         }
+    }
+    out
+}
+
+/// `s` 的最后一行迄今是否只有空白(即下一个字符仍在行首)。
+fn line_blank_so_far(s: &str) -> bool {
+    s.rsplit('\n').next().is_none_or(|l| l.trim().is_empty())
+}
+
+/// Markdown 文本转义:**所有**来自文档内容的文字(段落 / 链接文字 / 图片 alt / 表格单元格 /
+/// 标题 / 脚注)都经它,使内容无法形成链接 / 图片 / 行内 HTML / 强调 / 代码段 / 块级标记。
+/// - 行内:反斜杠先转义,再 `* _ ` + `` ` `` + `[ ] ( ) < > & ~`(CommonMark 允许反斜杠转义任何 ASCII 标点)。
+///   `&` 防 `&#60;` 之类实体还原出 `<`;`~` 防 GFM 删除线。
+/// - 行首(`at_line_start`,换行后也是行首):`# > - + =` 转义;「1–9 位数字 + `.` / `)`」转义其标点
+///   (否则成有序列表);前导空白 >= 4 列会成缩进代码块,去掉。
+/// - 表格里的 `|` 由 [`md_cell_text`] 在单元格层处理(整行才知道是否在表内)。
+fn escape_md(s: &str, at_line_start: bool) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut at_start = at_line_start;
+    let mut lead = String::new();
+    let mut lead_cols = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\n' {
+            if lead_cols < 4 {
+                out.push_str(&lead);
+            }
+            lead.clear();
+            lead_cols = 0;
+            out.push('\n');
+            at_start = true;
+            i += 1;
+            continue;
+        }
+        if at_start && (c == ' ' || c == '\t') {
+            lead.push(c);
+            lead_cols += if c == '\t' { 4 } else { 1 };
+            i += 1;
+            continue;
+        }
+        if at_start {
+            if lead_cols < 4 {
+                out.push_str(&lead);
+            }
+            lead.clear();
+            lead_cols = 0;
+            at_start = false;
+            match c {
+                '#' | '>' | '-' | '+' | '=' => {
+                    out.push('\\');
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+                '0'..='9' => {
+                    let mut j = i;
+                    while j < chars.len() && chars[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    // 仅当标点后是空白 / 段尾才构成列表标记(`1.2.3` 不是)。
+                    let marker = matches!(chars.get(j), Some('.' | ')'))
+                        && chars.get(j + 1).is_none_or(|n| n.is_whitespace());
+                    if (1..=9).contains(&(j - i)) && marker {
+                        out.extend(&chars[i..j]);
+                        out.push('\\');
+                        out.push(chars[j]);
+                        i = j + 1;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if matches!(
+            c,
+            '\\' | '*' | '_' | '`' | '[' | ']' | '(' | ')' | '<' | '>' | '&' | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+        i += 1;
+    }
+    // 整段(或最后一行)全是空白且已 >= 4 列:丢掉,免得与后续 run 拼成缩进代码块。
+    if lead_cols < 4 {
+        out.push_str(&lead);
     }
     out
 }
@@ -684,12 +767,14 @@ fn safe_url(target: &str) -> Option<String> {
     (has_colon && matches!(scheme.as_str(), "http" | "https" | "mailto")).then_some(url)
 }
 
-/// Markdown 链接 / 图片目的地:空白与括号百分号编码(其余原样)。
+/// Markdown 链接 / 图片目的地:空白、反斜杠与括号 / 尖括号百分号编码(其余原样),
+/// 保证目的地不会被 `)` / 空白提前终止、也不会被 `\` 转义吞掉。
 fn md_url(url: &str) -> String {
     let mut out = String::with_capacity(url.len());
     for c in url.chars() {
         match c {
             ' ' => out.push_str("%20"),
+            '\\' => out.push_str("%5C"),
             '(' => out.push_str("%28"),
             ')' => out.push_str("%29"),
             '<' => out.push_str("%3C"),

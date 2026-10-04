@@ -73,7 +73,7 @@ crates/
     src/model.rs   Document/Block(Paragraph|Table)/Paragraph/TextRun/Table/Row/Cell/VMerge/Picture/Color
     src/style.rs   有效样式 resolver:docDefaults → 表格样式 → pStyle basedOn 链 → 直接格式(级联 + theme 解引 + 防环)
     src/numbering.rs 列表模型 + 计数引擎:numId/ilvl → 标签串(起值/编号格式/层级重置);段落有效编号(含样式级 numPr + `lvl@pStyle`)由 `style::resolve_numbering` 统一解析
-    src/export.rs  Document → 纯文本 / Markdown / HTML(纯序列化;含合并单元格转 HTML `<table>`);标题识别走样式表(`style::resolve_heading_level`:段落 / 样式 `outlineLvl` → 样式名沿 basedOn → styleId 字面;Markdown / HTML 7–9 级按 6 级);列表标签(`ListCounters` 现算,正文含单元格连续、页眉页脚 / 注 / 文本框各自独立)/ 超链接(仅 `http`·`https`·`mailto`)/ 图片(`Picture.alt` ← `docPr@descr|title`)进三种导出
+    src/export.rs  Document → 纯文本 / Markdown / HTML(纯序列化;含合并单元格转 HTML `<table>`);标题识别走样式表(`style::resolve_heading_level`:段落 / 样式 `outlineLvl` → 样式名沿 basedOn → styleId 字面;Markdown / HTML 7–9 级按 6 级);列表标签(`ListCounters` 现算,正文含单元格连续、页眉页脚 / 注 / 文本框各自独立)/ 超链接(仅 `http`·`https`·`mailto`)/ 图片(`Picture.alt` ← `docPr@descr|title`)进三种导出;**Markdown 文本一律经 `escape_md`**(段落 / 链接文字 / 图片 alt / 表格单元格 / 标题 / 列表标签 / 脚注内容):先转义 `\`,再 `* _ ` + 反引号 + `[ ] ( ) < > & ~`,行首 `# > - + =` 与「数字 + `.`/`)` + 空白」,前导 >= 4 列空白去掉,表格单元格 `|`;链接 URL 百分号编码 `\`·空白·括号·尖括号;新增 Markdown 文本出口必须走它
   doc-parse/   OOXML 读取:zip 解包 + quick-xml 遍历 -> Document。本轮核心。#![forbid(unsafe_code)]
     src/lib.rs     parse_path / parse_bytes -> ParsedDoc { document, media };CFB 早判降级
     src/zip_pkg.rs zip 读 API:主部件经 `_rels/.rels` 的 officeDocument 关系定位(回退 word/document.xml),附属部件(styles/numbering/settings/footnotes/endnotes/comments/theme)经主部件 rels 按类型定位(回退固定路径;`..` 逃出包根拒绝)+ media + ZipLimits 解压限额
